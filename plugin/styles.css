@@ -12,6 +12,21 @@
     50% { opacity: 0.35; }
 }
 
+/* 口述アンカーのマーカー（喋った文が差し込まれる位置） */
+.voxcraft-anchor {
+    display: inline-block;
+    width: 2px;
+    height: 1.1em;
+    vertical-align: text-bottom;
+    background: var(--interactive-accent);
+    border-radius: 1px;
+    animation: voxcraft-anchor-blink 1s steps(2, start) infinite;
+}
+@keyframes voxcraft-anchor-blink {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0.25; }
+}
+
 /* 変換戻しモーダル */
 .voxcraft-reconvert .voxcraft-hint {
     color: var(--text-muted);

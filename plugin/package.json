@@ -11,6 +11,8 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
+    "@codemirror/state": "^6.4.0",
+    "@codemirror/view": "^6.24.0",
     "@types/node": "^16.18.72",
     "builtin-modules": "^5.1.0",
     "esbuild": "0.17.19",

@@ -422,6 +422,60 @@ var AsrSocket = class {
   }
 };
 
+// anchor.ts
+var import_state = require("@codemirror/state");
+var import_view = require("@codemirror/view");
+var setAnchorEffect = import_state.StateEffect.define();
+var AnchorWidget = class extends import_view.WidgetType {
+  eq() {
+    return true;
+  }
+  toDOM() {
+    const el = document.createElement("span");
+    el.className = "voxcraft-anchor";
+    el.setAttribute("aria-hidden", "true");
+    return el;
+  }
+  ignoreEvent() {
+    return true;
+  }
+};
+var anchorField = import_state.StateField.define({
+  create() {
+    return null;
+  },
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setAnchorEffect))
+        return e.value;
+    }
+    if (value !== null && tr.docChanged) {
+      return tr.changes.mapPos(value, 1);
+    }
+    return value;
+  }
+});
+var anchorDecorations = import_view.EditorView.decorations.compute([anchorField], (state) => {
+  const pos = state.field(anchorField, false);
+  if (pos === null || pos === void 0)
+    return import_view.Decoration.none;
+  const at = Math.max(0, Math.min(pos, state.doc.length));
+  return import_view.Decoration.set([
+    import_view.Decoration.widget({ widget: new AnchorWidget(), side: 1 }).range(at)
+  ]);
+});
+var anchorExtension = [anchorField, anchorDecorations];
+function setAnchor(cm, pos) {
+  cm.dispatch({ effects: setAnchorEffect.of(pos) });
+}
+function clearAnchor(cm) {
+  cm.dispatch({ effects: setAnchorEffect.of(null) });
+}
+function getAnchor(cm) {
+  const v = cm.state.field(anchorField, false);
+  return v === void 0 ? null : v;
+}
+
 // main.ts
 var VoxCraftPlugin = class extends import_obsidian3.Plugin {
   constructor() {
@@ -429,12 +483,17 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     this.socket = null;
     this.recorder = null;
     this.recording = false;
-    // 挿入履歴（取り消し・変換戻しの対象特定に使う）。
-    this.history = [];
+    // 口述対象として録音開始時に固定するエディタ（背面作業やノート切替の影響を受けない）。
+    this.cm = null;
+    // アンカーに追記したチャンク列（取り消し・変換戻しの対象特定に使う。アンカー相対）。
+    this.chunks = [];
+    // 変換戻しの応答が返るまで対象範囲を覚えておく。
+    this.pendingReconvert = null;
     this.reconvertModal = null;
   }
   async onload() {
     await this.loadSettings();
+    this.registerEditorExtension(anchorExtension);
     this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft \u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB/\u505C\u6B62", () => {
       this.toggleRecording();
     });
@@ -470,9 +529,9 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
   async startRecording() {
     if (this.recording)
       return;
-    const editor = this.getEditor();
-    if (!editor) {
-      new import_obsidian3.Notice("VoxCraft: \u633F\u5165\u5148\u306E\u30CE\u30FC\u30C8\u3092\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
+    const cm = this.getActiveCm();
+    if (!cm) {
+      new import_obsidian3.Notice("VoxCraft: \u633F\u5165\u5148\u306E\u30CE\u30FC\u30C8\uFF08\u7DE8\u96C6\u30E2\u30FC\u30C9\uFF09\u3092\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
     this.setStatus("\u63A5\u7D9A\u4E2D\u2026");
@@ -515,6 +574,10 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
       this.setStatus("\u505C\u6B62\u4E2D");
       return;
     }
+    this.cm = cm;
+    this.chunks = [];
+    this.pendingReconvert = null;
+    setAnchor(cm, cm.state.selection.main.head);
     this.recording = true;
     this.ribbonEl.addClass("voxcraft-recording");
     this.setStatus("\u25CF \u9332\u97F3\u4E2D");
@@ -534,6 +597,7 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
       var _a2;
       (_a2 = this.socket) == null ? void 0 : _a2.close();
       this.socket = null;
+      this.clearDictationAnchor();
       this.setStatus("\u505C\u6B62\u4E2D");
     }, 1500);
   }
@@ -545,6 +609,12 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     this.recorder = null;
     (_c = this.socket) == null ? void 0 : _c.close();
     this.socket = null;
+    this.clearDictationAnchor();
+  }
+  clearDictationAnchor() {
+    if (this.cm && this.cm.dom.isConnected)
+      clearAnchor(this.cm);
+    this.cm = null;
   }
   // ---- 確定チャンクの処理 ----
   handleChunk(text) {
@@ -580,45 +650,69 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
         break;
     }
   }
+  // アンカー位置に追記する。ユーザーが手動でカーソルを離していれば、
+  // その編集位置は動かさず（follow=false）、アンカーにだけ差し込む。
   insertText(text) {
-    const editor = this.getEditor();
-    if (!editor)
+    const cm = this.cm;
+    if (!cm || !cm.dom.isConnected)
       return;
-    const from = editor.getCursor();
-    editor.replaceRange(text, from);
-    const to = editor.offsetToPos(editor.posToOffset(from) + text.length);
-    editor.setCursor(to);
-    this.history.push({ from, to, text });
-    if (this.history.length > 100)
-      this.history.shift();
+    const anchor = getAnchor(cm);
+    if (anchor === null)
+      return;
+    const at = Math.min(anchor, cm.state.doc.length);
+    const follow = cm.state.selection.main.head === anchor;
+    cm.dispatch({
+      changes: { from: at, to: at, insert: text },
+      selection: follow ? { anchor: at + text.length } : void 0,
+      scrollIntoView: follow
+    });
+    this.chunks.push(text);
+    if (this.chunks.length > 200)
+      this.chunks.shift();
   }
+  // 直前チャンク（アンカー直前の text.length 文字）を削除する。
   undoLast() {
-    const editor = this.getEditor();
-    const last = this.history.pop();
-    if (!editor || !last)
+    const cm = this.cm;
+    const last = this.chunks[this.chunks.length - 1];
+    if (!cm || last === void 0)
       return;
-    editor.replaceRange("", last.from, last.to);
-    editor.setCursor(last.from);
+    const anchor = getAnchor(cm);
+    if (anchor === null)
+      return;
+    const from = Math.max(0, anchor - last.length);
+    const current = cm.state.doc.sliceString(from, anchor);
+    if (current !== last) {
+      new import_obsidian3.Notice("VoxCraft: \u76F4\u524D\u306E\u5165\u529B\u304C\u7DE8\u96C6\u3055\u308C\u3066\u3044\u308B\u305F\u3081\u53D6\u308A\u6D88\u305B\u307E\u305B\u3093\u3002");
+      return;
+    }
+    this.chunks.pop();
+    cm.dispatch({ changes: { from, to: anchor, insert: "" } });
   }
+  // 「AをBに修正」: ノート全体からAをBに置換（過去テキストも対象）。
   replaceInDoc(from, to) {
-    const editor = this.getEditor();
-    if (!editor)
+    var _a;
+    const cm = (_a = this.cm) != null ? _a : this.getActiveCm();
+    if (!cm)
       return;
-    const content = editor.getValue();
-    const idx = content.lastIndexOf(from);
+    const doc = cm.state.doc.toString();
+    const idx = doc.lastIndexOf(from);
     if (idx < 0) {
       new import_obsidian3.Notice(`VoxCraft: \u300C${from}\u300D\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F\u3002`);
       return;
     }
-    const start = editor.offsetToPos(idx);
-    const end = editor.offsetToPos(idx + from.length);
-    editor.replaceRange(to, start, end);
+    cm.dispatch({ changes: { from: idx, to: idx + from.length, insert: to } });
   }
   // ---- 変換戻し ----
   requestReconvert() {
     var _a;
-    const last = this.history[this.history.length - 1];
-    if (!last || !last.text.trim()) {
+    const cm = this.cm;
+    const last = this.chunks[this.chunks.length - 1];
+    if (!cm || !cm.dom.isConnected) {
+      new import_obsidian3.Notice("VoxCraft: \u9332\u97F3\u4E2D\u306B\u300C\u5909\u63DB\u623B\u3057\u300D\u3092\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\u3002");
+      return;
+    }
+    const anchor = getAnchor(cm);
+    if (anchor === null || last === void 0 || !last.trim()) {
       new import_obsidian3.Notice("VoxCraft: \u5909\u63DB\u623B\u3057\u306E\u5BFE\u8C61\u304C\u3042\u308A\u307E\u305B\u3093\u3002");
       return;
     }
@@ -626,17 +720,21 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
       new import_obsidian3.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u672A\u63A5\u7D9A\u306E\u305F\u3081\u5909\u63DB\u623B\u3057\u3067\u304D\u307E\u305B\u3093\u3002");
       return;
     }
-    this.socket.sendReconvert(last.text);
+    const from = Math.max(0, anchor - last.length);
+    const targetText = cm.state.doc.sliceString(from, anchor);
+    this.pendingReconvert = { from, to: anchor };
+    this.socket.sendReconvert(targetText);
     this.setStatus("\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u4E2D\u2026");
   }
   handleReconvert(msg) {
     this.setStatus(this.recording ? "\u25CF \u9332\u97F3\u4E2D" : "\u505C\u6B62\u4E2D");
     const segments = msg.segments || [];
-    if (segments.length === 0) {
+    const target = this.pendingReconvert;
+    this.pendingReconvert = null;
+    if (segments.length === 0 || !target) {
       new import_obsidian3.Notice("VoxCraft: \u5909\u63DB\u5019\u88DC\u304C\u5F97\u3089\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
       return;
     }
-    const target = this.history[this.history.length - 1];
     const modal = new ReconvertModal(this.app, segments, (chosen) => {
       this.applyReconvert(target, chosen.join(""));
     });
@@ -650,20 +748,23 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     modal.open();
   }
   applyReconvert(target, newText) {
-    const editor = this.getEditor();
-    if (!editor || !target)
+    var _a;
+    const cm = (_a = this.cm) != null ? _a : this.getActiveCm();
+    if (!cm)
       return;
-    editor.replaceRange(newText, target.from, target.to);
-    const newTo = editor.offsetToPos(editor.posToOffset(target.from) + newText.length);
-    target.text = newText;
-    target.to = newTo;
-    editor.setCursor(newTo);
+    const to = Math.min(target.to, cm.state.doc.length);
+    const from = Math.min(target.from, to);
+    cm.dispatch({ changes: { from, to, insert: newText } });
+    if (this.chunks.length > 0)
+      this.chunks[this.chunks.length - 1] = newText;
   }
   // ---- ユーティリティ ----
-  getEditor() {
+  // アクティブな Markdown エディタの CodeMirror6 ビューを得る。
+  getActiveCm() {
     var _a;
     const view = this.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
-    return (_a = view == null ? void 0 : view.editor) != null ? _a : null;
+    const editor = view == null ? void 0 : view.editor;
+    return (_a = editor == null ? void 0 : editor.cm) != null ? _a : null;
   }
   setStatus(text) {
     this.statusEl.setText(`\u{1F399} VoxCraft: ${text}`);

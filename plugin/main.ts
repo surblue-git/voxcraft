@@ -1,4 +1,5 @@
 import { Editor, MarkdownView, Notice, Plugin } from "obsidian";
+import { EditorView } from "@codemirror/view";
 
 import { MicRecorder } from "./audio";
 import { parseCommand } from "./commands";
@@ -9,13 +10,7 @@ import {
     VoxCraftSettings,
 } from "./settings";
 import { AsrSocket, ServerMessage } from "./ws";
-
-// エディタへ挿入した1チャンク分の記録（取り消し用）。
-interface Insertion {
-    from: { line: number; ch: number };
-    to: { line: number; ch: number };
-    text: string;
-}
+import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
 
 export default class VoxCraftPlugin extends Plugin {
     settings: VoxCraftSettings;
@@ -26,12 +21,19 @@ export default class VoxCraftPlugin extends Plugin {
     private statusEl: HTMLElement;
     private ribbonEl: HTMLElement;
 
-    // 挿入履歴（取り消し・変換戻しの対象特定に使う）。
-    private history: Insertion[] = [];
+    // 口述対象として録音開始時に固定するエディタ（背面作業やノート切替の影響を受けない）。
+    private cm: EditorView | null = null;
+    // アンカーに追記したチャンク列（取り消し・変換戻しの対象特定に使う。アンカー相対）。
+    private chunks: string[] = [];
+    // 変換戻しの応答が返るまで対象範囲を覚えておく。
+    private pendingReconvert: { from: number; to: number } | null = null;
     private reconvertModal: ReconvertModal | null = null;
 
     async onload(): Promise<void> {
         await this.loadSettings();
+
+        // 口述アンカー（CM6 拡張）を全エディタに登録。
+        this.registerEditorExtension(anchorExtension);
 
         this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft 音声入力の開始/停止", () => {
             this.toggleRecording();
@@ -72,9 +74,9 @@ export default class VoxCraftPlugin extends Plugin {
 
     private async startRecording(): Promise<void> {
         if (this.recording) return;
-        const editor = this.getEditor();
-        if (!editor) {
-            new Notice("VoxCraft: 挿入先のノートを開いてください。");
+        const cm = this.getActiveCm();
+        if (!cm) {
+            new Notice("VoxCraft: 挿入先のノート（編集モード）を開いてください。");
             return;
         }
 
@@ -120,6 +122,12 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
 
+        // 口述対象を固定し、現在のカーソル位置にアンカーを立てる。
+        this.cm = cm;
+        this.chunks = [];
+        this.pendingReconvert = null;
+        setAnchor(cm, cm.state.selection.main.head);
+
         this.recording = true;
         this.ribbonEl.addClass("voxcraft-recording");
         this.setStatus("● 録音中");
@@ -135,10 +143,11 @@ export default class VoxCraftPlugin extends Plugin {
         void this.recorder?.stop().then(() => {
             this.recorder = null;
         });
-        // サーバーが末尾チャンクを返す猶予を置いて閉じる。
+        // サーバーが末尾チャンクを返す猶予を置いてから閉じ、アンカーを片付ける。
         window.setTimeout(() => {
             this.socket?.close();
             this.socket = null;
+            this.clearDictationAnchor();
             this.setStatus("停止中");
         }, 1500);
     }
@@ -150,6 +159,12 @@ export default class VoxCraftPlugin extends Plugin {
         this.recorder = null;
         this.socket?.close();
         this.socket = null;
+        this.clearDictationAnchor();
+    }
+
+    private clearDictationAnchor(): void {
+        if (this.cm && this.cm.dom.isConnected) clearAnchor(this.cm);
+        this.cm = null;
     }
 
     // ---- 確定チャンクの処理 ----
@@ -188,44 +203,70 @@ export default class VoxCraftPlugin extends Plugin {
         }
     }
 
+    // アンカー位置に追記する。ユーザーが手動でカーソルを離していれば、
+    // その編集位置は動かさず（follow=false）、アンカーにだけ差し込む。
     private insertText(text: string): void {
-        const editor = this.getEditor();
-        if (!editor) return;
-        const from = editor.getCursor();
-        editor.replaceRange(text, from);
-        const to = editor.offsetToPos(editor.posToOffset(from) + text.length);
-        editor.setCursor(to);
-        this.history.push({ from, to, text });
-        if (this.history.length > 100) this.history.shift();
+        const cm = this.cm;
+        if (!cm || !cm.dom.isConnected) return;
+        const anchor = getAnchor(cm);
+        if (anchor === null) return;
+
+        const at = Math.min(anchor, cm.state.doc.length);
+        const follow = cm.state.selection.main.head === anchor;
+
+        cm.dispatch({
+            changes: { from: at, to: at, insert: text },
+            selection: follow ? { anchor: at + text.length } : undefined,
+            scrollIntoView: follow,
+        });
+        // アンカーは StateField 側で at+text.length へ自動前進する。
+
+        this.chunks.push(text);
+        if (this.chunks.length > 200) this.chunks.shift();
     }
 
+    // 直前チャンク（アンカー直前の text.length 文字）を削除する。
     private undoLast(): void {
-        const editor = this.getEditor();
-        const last = this.history.pop();
-        if (!editor || !last) return;
-        editor.replaceRange("", last.from, last.to);
-        editor.setCursor(last.from);
+        const cm = this.cm;
+        const last = this.chunks[this.chunks.length - 1];
+        if (!cm || last === undefined) return;
+        const anchor = getAnchor(cm);
+        if (anchor === null) return;
+
+        const from = Math.max(0, anchor - last.length);
+        const current = cm.state.doc.sliceString(from, anchor);
+        if (current !== last) {
+            new Notice("VoxCraft: 直前の入力が編集されているため取り消せません。");
+            return;
+        }
+        this.chunks.pop();
+        cm.dispatch({ changes: { from, to: anchor, insert: "" } });
     }
 
+    // 「AをBに修正」: ノート全体からAをBに置換（過去テキストも対象）。
     private replaceInDoc(from: string, to: string): void {
-        const editor = this.getEditor();
-        if (!editor) return;
-        const content = editor.getValue();
-        const idx = content.lastIndexOf(from);
+        const cm = this.cm ?? this.getActiveCm();
+        if (!cm) return;
+        const doc = cm.state.doc.toString();
+        const idx = doc.lastIndexOf(from);
         if (idx < 0) {
             new Notice(`VoxCraft: 「${from}」が見つかりませんでした。`);
             return;
         }
-        const start = editor.offsetToPos(idx);
-        const end = editor.offsetToPos(idx + from.length);
-        editor.replaceRange(to, start, end);
+        cm.dispatch({ changes: { from: idx, to: idx + from.length, insert: to } });
     }
 
     // ---- 変換戻し ----
 
     private requestReconvert(): void {
-        const last = this.history[this.history.length - 1];
-        if (!last || !last.text.trim()) {
+        const cm = this.cm;
+        const last = this.chunks[this.chunks.length - 1];
+        if (!cm || !cm.dom.isConnected) {
+            new Notice("VoxCraft: 録音中に「変換戻し」を使ってください。");
+            return;
+        }
+        const anchor = getAnchor(cm);
+        if (anchor === null || last === undefined || !last.trim()) {
             new Notice("VoxCraft: 変換戻しの対象がありません。");
             return;
         }
@@ -233,18 +274,23 @@ export default class VoxCraftPlugin extends Plugin {
             new Notice("VoxCraft: サーバー未接続のため変換戻しできません。");
             return;
         }
-        this.socket.sendReconvert(last.text);
+
+        const from = Math.max(0, anchor - last.length);
+        const targetText = cm.state.doc.sliceString(from, anchor);
+        this.pendingReconvert = { from, to: anchor };
+        this.socket.sendReconvert(targetText);
         this.setStatus("変換候補を取得中…");
     }
 
     private handleReconvert(msg: ServerMessage): void {
         this.setStatus(this.recording ? "● 録音中" : "停止中");
         const segments = msg.segments || [];
-        if (segments.length === 0) {
+        const target = this.pendingReconvert;
+        this.pendingReconvert = null;
+        if (segments.length === 0 || !target) {
             new Notice("VoxCraft: 変換候補が得られませんでした。");
             return;
         }
-        const target = this.history[this.history.length - 1];
         const modal = new ReconvertModal(this.app, segments, (chosen) => {
             this.applyReconvert(target, chosen.join(""));
         });
@@ -258,22 +304,23 @@ export default class VoxCraftPlugin extends Plugin {
         modal.open();
     }
 
-    private applyReconvert(target: Insertion | undefined, newText: string): void {
-        const editor = this.getEditor();
-        if (!editor || !target) return;
-        // 直前挿入位置のテキストを置き換える。
-        editor.replaceRange(newText, target.from, target.to);
-        const newTo = editor.offsetToPos(editor.posToOffset(target.from) + newText.length);
-        target.text = newText;
-        target.to = newTo;
-        editor.setCursor(newTo);
+    private applyReconvert(target: { from: number; to: number }, newText: string): void {
+        const cm = this.cm ?? this.getActiveCm();
+        if (!cm) return;
+        const to = Math.min(target.to, cm.state.doc.length);
+        const from = Math.min(target.from, to);
+        cm.dispatch({ changes: { from, to, insert: newText } });
+        // 直前チャンクの記録も置換後の文字列に合わせておく（取り消し整合のため）。
+        if (this.chunks.length > 0) this.chunks[this.chunks.length - 1] = newText;
     }
 
     // ---- ユーティリティ ----
 
-    private getEditor(): Editor | null {
+    // アクティブな Markdown エディタの CodeMirror6 ビューを得る。
+    private getActiveCm(): EditorView | null {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-        return view?.editor ?? null;
+        const editor = view?.editor as (Editor & { cm?: EditorView }) | undefined;
+        return editor?.cm ?? null;
     }
 
     private setStatus(text: string): void {
