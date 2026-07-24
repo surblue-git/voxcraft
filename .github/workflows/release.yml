@@ -1,0 +1,45 @@
+name: Release Obsidian plugin
+
+# バージョンタグ（例: 0.2.0）を push すると、プラグインをビルドして
+# main.js / manifest.json / styles.css を添付したリリースを自動作成する。
+# BRAT はこのリリース資産を読み込んでインストール／更新する。
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      - name: Build plugin
+        working-directory: plugin
+        env:
+          # esbuild.config.mjs の出力先。CI では dist/ に出す。
+          OBSIDIAN_PLUGIN_DIR: dist
+        run: |
+          npm install
+          npm run build
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            plugin/dist/main.js \
+            plugin/dist/manifest.json \
+            plugin/dist/styles.css \
+            --title "VoxCraft $TAG" \
+            --notes "自動ビルド ($TAG)。BRAT でインストール／更新できます。" \
+            --latest

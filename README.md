@@ -41,6 +41,18 @@ pip install -r requirements.txt
 
 ### 2. Obsidian プラグイン
 
+#### 方法A: BRAT でインストール（推奨・更新も自動）
+
+1. Obsidianのコミュニティプラグインで **BRAT**（Obsidian42 - BRAT）をインストールして有効化。
+2. コマンドパレット →「BRAT: Add a beta plugin for testing」。
+3. リポジトリに `surblue-git/voxcraft` を入力して追加。
+4. **リポジトリがプライベートの場合**は、BRATの設定で GitHub の Personal Access Token（`repo` 読み取り権限）を登録しておく。公開リポジトリなら不要。
+5. インストール後、「設定 → コミュニティプラグイン」でVoxCraftを有効化。
+
+以降、新しいリリースを出すとBRATが自動で更新してくれる。
+
+#### 方法B: 手動ビルドで配置
+
 ```powershell
 cd plugin
 npm install
@@ -49,8 +61,18 @@ $env:OBSIDIAN_PLUGIN_DIR = "<Vault>/.obsidian/plugins/voxcraft"
 npm run build
 ```
 
-Obsidianの「設定 → コミュニティプラグイン」でVoxCraftを有効化。
-設定タブで **認識サーバー URL** を指定（Desktopは `ws://localhost:8760/ws`）。
+どちらの方法でも、Obsidianの「設定 → コミュニティプラグイン」でVoxCraftを有効化し、
+設定タブで **認識サーバー URL** を指定する（Desktopは `ws://localhost:8760/ws`）。
+
+#### リリースの出し方（BRAT更新用）
+
+`plugin/manifest.json` の `version` を上げ、同じ番号のタグを push すると、
+GitHub Actions が自動でビルドしてリリースを作る（`.github/workflows/release.yml`）。
+
+```powershell
+git tag 0.2.0
+git push origin 0.2.0
+```
 
 ### 3. Android（Obsidian Mobile）
 
