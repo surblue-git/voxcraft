@@ -49,10 +49,14 @@ _DEFAULTS = {
 }
 
 _lock = threading.Lock()
-_cache: dict = {"mtime": None, "items": None, "symbols": None, "hotwords": None}
+_cache: dict = {
+    "mtime": None, "items": None, "symbols": None, "hotwords": None, "error": None,
+}
 
 _TRAILING_COMMA = re.compile(r",(\s*[}\]])")
 _LINE_COMMENT = re.compile(r"(?m)//.*$")
+# 値の閉じ引用符の直後（改行を挟んで次のキーの引用符が続く）にカンマが無いケース。
+_MISSING_COMMA = re.compile(r'"(?=\s*\r?\n\s*")')
 
 
 def _ensure_file() -> None:
@@ -65,11 +69,13 @@ def _ensure_file() -> None:
 
 
 def _parse(raw: str) -> dict:
-    """厳密→寛容（末尾カンマ/コメント除去）の順にパースを試みる。"""
+    """厳密→寛容（コメント/カンマ抜け/末尾カンマを補正）の順にパースを試みる。"""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        cleaned = _TRAILING_COMMA.sub(r"\1", _LINE_COMMENT.sub("", raw))
+        cleaned = _LINE_COMMENT.sub("", raw)
+        cleaned = _MISSING_COMMA.sub('",', cleaned)   # カンマ抜けを補う
+        cleaned = _TRAILING_COMMA.sub(r"\1", cleaned)  # 末尾カンマを除く
         return json.loads(cleaned)  # まだ失敗するなら例外を上へ
 
 
@@ -126,10 +132,13 @@ def _refresh() -> None:
         if _cache["items"] is None or _cache["mtime"] != mtime:
             try:
                 _reload()
+                _cache["error"] = None
             except (OSError, json.JSONDecodeError, AttributeError) as exc:
+                msg = f"{type(exc).__name__}: {exc}"
+                _cache["error"] = msg
                 print(
-                    f"[VoxCraft] userdict.json を読めません（{exc}）。"
-                    f"直前の辞書を使用します。末尾カンマ等を確認してください: {_PATH}"
+                    f"[VoxCraft] userdict.json を読めません（{msg}）。"
+                    f"直前の辞書を使用します。カンマ等を確認してください: {_PATH}"
                 )
                 if _cache["items"] is None:
                     _cache["items"] = _items_from(_DEFAULTS["replacements"])
@@ -154,3 +163,9 @@ def get_hotwords() -> str:
     """辞書の英数字表記を Whisper のヒント語として渡す文字列。"""
     _refresh()
     return _cache["hotwords"] or ""
+
+
+def get_error() -> str | None:
+    """辞書が読めていない場合のエラー文字列（正常時は None）。"""
+    _refresh()
+    return _cache["error"]

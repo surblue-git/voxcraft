@@ -32,7 +32,7 @@ from asr import transcriber
 from config import config
 from postproc import postprocess
 from reconvert import reconvert
-from userdict import get_hotwords, get_replacements, get_symbols
+from userdict import get_error, get_hotwords, get_replacements, get_symbols
 from vad import VadChunker
 
 app = FastAPI(title="VoxCraft ASR Server")
@@ -122,6 +122,13 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if ctype == "start":
                     strip_space = bool(cmd.get("stripSpace", config.strip_ja_alnum_space))
                     symbols = bool(cmd.get("symbols", config.enable_symbol_dictation))
+                    # 辞書が壊れていたらクライアントに知らせる（無言で無効化しない）。
+                    dict_err = get_error()
+                    if dict_err:
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "message": f"辞書(userdict.json)を読めません: {dict_err}",
+                        }))
 
                 elif ctype == "stop":
                     tail = chunker.flush()
