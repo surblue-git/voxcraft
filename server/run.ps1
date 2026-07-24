@@ -18,4 +18,7 @@ if (Test-Path ".\.venv\Scripts\Activate.ps1") {
     & .\.venv\Scripts\Activate.ps1
 }
 
-python -m uvicorn main:app --host $($env:VOXCRAFT_HOST ?? "0.0.0.0") --port $($env:VOXCRAFT_PORT ?? "8760")
+$h = if ($env:VOXCRAFT_HOST) { $env:VOXCRAFT_HOST } else { "0.0.0.0" }
+$p = if ($env:VOXCRAFT_PORT) { $env:VOXCRAFT_PORT } else { "8760" }
+
+python -m uvicorn main:app --host $h --port $p
