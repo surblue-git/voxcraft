@@ -1,11 +1,15 @@
-import { Editor, MarkdownView, Notice, Plugin } from "obsidian";
+import { Editor, MarkdownView, Menu, Notice, Plugin } from "obsidian";
 import { EditorView } from "@codemirror/view";
 
 import { MicRecorder } from "./audio";
 import { parseCommand } from "./commands";
 import { ReconvertModal } from "./suggest";
 import {
+    AUTO,
     DEFAULT_SETTINGS,
+    labelForUrl,
+    migrateSettings,
+    resolveUrls,
     VoxCraftSettingTab,
     VoxCraftSettings,
 } from "./settings";
@@ -42,6 +46,11 @@ export default class VoxCraftPlugin extends Plugin {
         this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft 音声入力の開始/停止", () => {
             this.toggleRecording();
         });
+        // マイクのリボンを右クリック（モバイルは長押し）で接続先メニューを出す。
+        this.registerDomEvent(this.ribbonEl, "contextmenu", (evt: MouseEvent) => {
+            evt.preventDefault();
+            this.openEndpointMenu(evt);
+        });
 
         this.statusEl = this.addStatusBarItem();
         this.setStatus("停止中");
@@ -60,6 +69,11 @@ export default class VoxCraftPlugin extends Plugin {
             id: "reconvert-last",
             name: "直前の入力を変換戻し",
             callback: () => this.requestReconvert(),
+        });
+        this.addCommand({
+            id: "select-endpoint",
+            name: "接続先を選択",
+            callback: () => this.openEndpointMenu(),
         });
 
         this.addSettingTab(new VoxCraftSettingTab(this.app, this));
@@ -84,9 +98,19 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
 
-        this.setStatus("接続中…");
-        this.socket = new AsrSocket(this.settings.serverUrl, {
-            onReady: () => this.setStatus("待機中… 話してください"),
+        const urls = resolveUrls(this.settings);
+        if (urls.length === 0) {
+            new Notice("VoxCraft: 接続先が未設定です。設定でエンドポイントを追加してください。");
+            return;
+        }
+
+        this.setStatus(urls.length > 1 ? "接続中…（つながる方を選択）" : "接続中…");
+        this.socket = new AsrSocket(urls, {
+            onReady: () => {
+                const url = this.socket?.activeUrl;
+                const label = url ? labelForUrl(this.settings, url) : "";
+                this.setStatus(label ? `待機中… 話してください（${label}）` : "待機中… 話してください");
+            },
             onPartial: () => {
                 this.transcribing = true;
                 this.setStatus("認識中…");
@@ -109,9 +133,10 @@ export default class VoxCraftPlugin extends Plugin {
         try {
             await this.socket.connect();
         } catch (e) {
+            const tried = urls.map((u) => labelForUrl(this.settings, u)).join(" / ");
             new Notice(
-                `VoxCraft: サーバーに接続できません（${this.settings.serverUrl}）。` +
-                "認識サーバーが起動しているか確認してください。"
+                `VoxCraft: サーバーに接続できません（${tried}）。` +
+                "認識サーバーが起動しているか、接続先の設定を確認してください。"
             );
             this.socket = null;
             this.setStatus("停止中");
@@ -328,6 +353,61 @@ export default class VoxCraftPlugin extends Plugin {
         if (this.chunks.length > 0) this.chunks[this.chunks.length - 1] = newText;
     }
 
+    // ---- 接続先の切り替え ----
+
+    // 接続先メニューを表示する。evt があればその位置、無ければリボン脇に出す。
+    private openEndpointMenu(evt?: MouseEvent): void {
+        const menu = new Menu();
+        const sel = this.settings.selection;
+
+        menu.addItem((i) =>
+            i
+                .setTitle("自動（つながる方）")
+                .setChecked(sel === AUTO)
+                .onClick(() => void this.setSelection(AUTO))
+        );
+        menu.addSeparator();
+        for (const ep of this.settings.endpoints) {
+            const url = ep.url.trim();
+            if (!url) continue;
+            menu.addItem((i) =>
+                i
+                    .setTitle(ep.label || url)
+                    .setChecked(sel === url)
+                    .onClick(() => void this.setSelection(url))
+            );
+        }
+        menu.addSeparator();
+        menu.addItem((i) =>
+            i
+                .setTitle("設定を開く…")
+                .setIcon("gear")
+                .onClick(() => {
+                    const setting = (this.app as unknown as {
+                        setting?: { open?: () => void; openTabById?: (id: string) => void };
+                    }).setting;
+                    setting?.open?.();
+                    setting?.openTabById?.("voxcraft");
+                })
+        );
+
+        if (evt) {
+            menu.showAtMouseEvent(evt);
+        } else if (this.ribbonEl) {
+            const r = this.ribbonEl.getBoundingClientRect();
+            menu.showAtPosition({ x: r.right, y: r.top });
+        } else {
+            menu.showAtPosition({ x: 0, y: 0 });
+        }
+    }
+
+    private async setSelection(sel: string): Promise<void> {
+        this.settings.selection = sel;
+        await this.saveSettings();
+        const label = sel === AUTO ? "自動（つながる方）" : labelForUrl(this.settings, sel);
+        new Notice(`VoxCraft: 接続先を「${label}」にしました。`);
+    }
+
     // ---- ユーティリティ ----
 
     // アクティブな Markdown エディタの CodeMirror6 ビューを得る。
@@ -354,7 +434,9 @@ export default class VoxCraftPlugin extends Plugin {
     }
 
     async loadSettings(): Promise<void> {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        this.settings = migrateSettings(
+            Object.assign({}, DEFAULT_SETTINGS, await this.loadData())
+        );
     }
 
     async saveSettings(): Promise<void> {
