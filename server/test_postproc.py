@@ -28,6 +28,31 @@ def test_symbol_dictation_off_keeps_reading():
     assert "まる" in out
 
 
+def test_symbol_standalone_variants():
+    # 単独チャンクで言った記号（変種・Whisperの漢字化/句点付きも吸収）。
+    assert postprocess("まる", symbol_dictation=True) == "。"
+    assert postprocess("丸。", symbol_dictation=True) == "。"
+    assert postprocess("てん", symbol_dictation=True) == "、"
+    assert postprocess("改行", symbol_dictation=True) == "\n"
+
+
+def test_symbol_trailing_kanji():
+    # 文末が漢字「丸」でも句点化する。
+    assert postprocess("今日は晴れです丸", symbol_dictation=True) == "今日は晴れです。"
+
+
+def test_symbol_no_false_positive_midword():
+    # 本文中の同綴りは壊さない（「困る」「かっこいい」）。
+    assert postprocess("それは困る", symbol_dictation=True) == "それは困る"
+    assert postprocess("それはかっこいい", symbol_dictation=True) == "それはかっこいい"
+
+
+def test_user_dict_english():
+    reps = [("ウィンドウズ", "Windows"), ("アンドロイド", "Android")]
+    out = postprocess("ウィンドウズとアンドロイドを使う", replacements=reps, strip_space=True)
+    assert out == "WindowsとAndroidを使う"
+
+
 def test_collapse_duplicate_punctuation():
     out = postprocess("はい。。そうです", strip_space=True, symbol_dictation=False)
     assert out == "はい。そうです"

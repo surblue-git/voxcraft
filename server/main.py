@@ -32,6 +32,7 @@ from asr import transcriber
 from config import config
 from postproc import postprocess
 from reconvert import reconvert
+from userdict import get_replacements
 from vad import VadChunker
 
 app = FastAPI(title="VoxCraft ASR Server")
@@ -86,7 +87,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
         # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
         await ws.send_text(json.dumps({"type": "partial", "reason": reason}))
         text = await _transcribe_chunk(audio)
-        text = postprocess(text, strip_space=strip_space, symbol_dictation=symbols)
+        text = postprocess(
+            text,
+            strip_space=strip_space,
+            symbol_dictation=symbols,
+            replacements=get_replacements(),
+        )
         if text:
             await ws.send_text(json.dumps({"type": "chunk", "text": text}))
 
