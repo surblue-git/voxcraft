@@ -32,7 +32,7 @@ from asr import transcriber
 from config import config
 from postproc import postprocess
 from reconvert import reconvert
-from userdict import get_hotwords, get_replacements
+from userdict import get_hotwords, get_replacements, get_symbols
 from vad import VadChunker
 
 app = FastAPI(title="VoxCraft ASR Server")
@@ -92,6 +92,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             strip_space=strip_space,
             symbol_dictation=symbols,
             replacements=get_replacements(),
+            symbols=get_symbols(),
         )
         if text:
             await ws.send_text(json.dumps({"type": "chunk", "text": text}))

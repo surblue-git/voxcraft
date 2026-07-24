@@ -44,7 +44,8 @@ class Config:
     # --- VAD（区切り検出。停止判断はしない） ---
     # 無音がこの秒数続いたら「息継ぎ」とみなしチャンクを確定する。
     # どれだけ長く黙ってもセッション自体は切らない。
-    silence_sec: float = float(_env("VOXCRAFT_SILENCE_SEC", "0.8"))
+    # 小さいほど、記号語（まる/てん/かいぎょう）を短い間で独立させやすい。
+    silence_sec: float = float(_env("VOXCRAFT_SILENCE_SEC", "0.5"))
     # チャンクが長くなりすぎた場合の強制確定（秒）。
     max_chunk_sec: float = float(_env("VOXCRAFT_MAX_CHUNK_SEC", "12.0"))
     # 発話とみなす最小長（秒）。これ未満の音はノイズとして捨てる。

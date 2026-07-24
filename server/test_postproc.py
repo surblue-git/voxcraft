@@ -65,6 +65,15 @@ def test_symbol_homophone_not_standalone_kept():
     assert postprocess("公表し、点、広く", symbol_dictation=True) == "公表し、点、広く"
 
 
+def test_user_symbols_standalone():
+    # ユーザー登録の記号語（単独チャンク）を記号化。改行別名も解釈。
+    syms = {"当点": "、", "海業": "\n"}
+    assert postprocess("当点", symbol_dictation=True, symbols=syms) == "、"
+    assert postprocess("海業", symbol_dictation=True, symbols=syms) == "\n"
+    # 単独でなければ温存（本文中の同綴りを壊さない）。
+    assert postprocess("当点について", symbol_dictation=True, symbols=syms) == "当点について"
+
+
 def test_user_dict_english():
     reps = [("ウィンドウズ", "Windows"), ("アンドロイド", "Android")]
     out = postprocess("ウィンドウズとアンドロイドを使う", replacements=reps, strip_space=True)

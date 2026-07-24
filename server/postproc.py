@@ -80,11 +80,12 @@ def strip_ja_alnum_space(text: str) -> str:
     return _JA_ALNUM_SPACE.sub("", text)
 
 
-def apply_symbol_dictation(text: str) -> str:
+def apply_symbol_dictation(text: str, extra: dict[str, str] | None = None) -> str:
     """句読点・記号の読み上げを記号へ変換する（誤爆を避けるため限定的に）。
 
     方針:
       1. チャンク全体がその読みだけ（少し間を置いて言った）→ 記号に置換。
+         extra（ユーザー登録の記号語 例 当点→、）も単独一致で使う。
       2. 文末が「まる/てん」等 → その文末読みだけを記号に置換。
     本文の途中に紛れた同綴りには反応しない（例「困る」「かっこいい」は無傷）。
 
@@ -96,7 +97,9 @@ def apply_symbol_dictation(text: str) -> str:
 
     bare = t.rstrip(_TRAIL)
 
-    # 1) 単独チャンク一致。
+    # 1) 単独チャンク一致（ユーザー登録の記号語を優先）。
+    if extra and bare in extra:
+        return extra[bare]
     for readings, sym in _ENDERS + _STANDALONE:
         if bare in readings:
             return sym
@@ -138,13 +141,14 @@ def postprocess(
     strip_space: bool = True,
     symbol_dictation: bool = False,
     replacements: list[tuple[str, str]] | None = None,
+    symbols: dict[str, str] | None = None,
 ) -> str:
     """確定チャンクに対する後処理をまとめて適用する。"""
     if not text:
         return text
     result = text.strip()
     if symbol_dictation:
-        result = apply_symbol_dictation(result)
+        result = apply_symbol_dictation(result, symbols)
     # 辞書適用の前に全角英数を半角化（「Ａトック」→「Aトック」を拾えるように）。
     result = normalize_fullwidth_ascii(result)
     if replacements:
