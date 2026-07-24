@@ -90,9 +90,11 @@ class VadChunker:
         max_chunk_sec: float = 12.0,
         min_speech_sec: float = 0.3,
         vad_threshold: float = 0.5,
+        speech_pad_sec: float = 0.2,
     ):
         self._sr = sample_rate
         self._silence_frames = max(1, int(silence_sec * sample_rate / _FRAME))
+        self._pad_frames = max(1, int(speech_pad_sec * sample_rate / _FRAME))
         self._max_samples = int(max_chunk_sec * sample_rate)
         self._min_samples = int(min_speech_sec * sample_rate)
         self._detector = build_detector(sample_rate, vad_threshold)
@@ -101,6 +103,7 @@ class VadChunker:
         self._residual = np.zeros(0, dtype=np.float32)  # フレーム未満の端数
         self._silence_run = 0
         self._has_speech = False
+        self._last_speech_idx = 0
         self._cur_len = 0
 
     def push(self, pcm: np.ndarray) -> list[Chunk]:
@@ -120,6 +123,7 @@ class VadChunker:
             if speech:
                 self._has_speech = True
                 self._silence_run = 0
+                self._last_speech_idx = len(self._buf)
             else:
                 self._silence_run += 1
 
@@ -148,7 +152,14 @@ class VadChunker:
         if not self._buf or not self._has_speech or self._cur_len < self._min_samples:
             self._reset_chunk()
             return None
-        audio = np.concatenate(self._buf)
+        # 無音確定時は、最後の発話フレーム + パディング分だけに切り詰めて余分な長無音をカットする。
+        if reason == "silence" and self._last_speech_idx > 0:
+            keep_count = min(len(self._buf), self._last_speech_idx + self._pad_frames)
+            audio_buf = self._buf[:keep_count]
+        else:
+            audio_buf = self._buf
+
+        audio = np.concatenate(audio_buf)
         self._reset_chunk()
         self._detector.reset()
         return Chunk(audio=audio, reason=reason)
@@ -157,4 +168,5 @@ class VadChunker:
         self._buf = []
         self._silence_run = 0
         self._has_speech = False
+        self._last_speech_idx = 0
         self._cur_len = 0

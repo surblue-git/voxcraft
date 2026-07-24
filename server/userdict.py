@@ -27,6 +27,8 @@ _DEFAULTS = {
     "_README": (
         "replacements=語の置換（英語・日本語可、本文中どこでも）。"
         "symbols=単独で言った記号語→記号（例 当点→、、海業→改行）。"
+        "hotwords=認識精度を上げるヒント語リスト（任意）。"
+        "hallucinations=丸ごと一致時に無視する誤認識テキスト（任意）。"
         "実際にWhisperが出す綴りを登録するのが確実。保存で自動反映（再起動不要）。"
     ),
     "replacements": {
@@ -46,11 +48,23 @@ _DEFAULTS = {
         "当店": "、",
         "海業": "改行",
     },
+    "hotwords": [
+        "Obsidian",
+        "VoxCraft",
+        "情プラ法",
+    ],
+    "hallucinations": [],
 }
 
 _lock = threading.Lock()
 _cache: dict = {
-    "mtime": None, "items": None, "symbols": None, "hotwords": None, "error": None,
+    "mtime": None,
+    "items": None,
+    "symbols": None,
+    "hotwords": None,
+    "hallucinations": None,
+    "reverse_items": None,
+    "error": None,
 }
 
 _TRAILING_COMMA = re.compile(r",(\s*[}\]])")
@@ -89,6 +103,13 @@ def _items_from(reps: dict) -> list[tuple[str, str]]:
     return items
 
 
+def _reverse_items_from(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """表記 -> 読みの逆引きリスト（表記の長さ降順）。"""
+    rev = [(v, k) for k, v in items if v and k]
+    rev.sort(key=lambda kv: len(kv[0]), reverse=True)
+    return rev
+
+
 def _symbols_from(syms: dict) -> dict[str, str]:
     out: dict[str, str] = {}
     for k, v in syms.items():
@@ -98,24 +119,45 @@ def _symbols_from(syms: dict) -> dict[str, str]:
     return out
 
 
+def _hallucinations_from(halls: list) -> set[str]:
+    if not isinstance(halls, list):
+        return set()
+    return {h for h in halls if isinstance(h, str) and h.strip()}
+
+
 def _reload() -> None:
-    """ファイルを読み直して items / symbols / hotwords を再構築する。"""
+    """ファイルを読み直して items / symbols / hotwords / hallucinations を再構築する。"""
     with open(_PATH, encoding="utf-8") as f:
         data = _parse(f.read())
     items = _items_from(data.get("replacements", {}) or {})
     symbols = _symbols_from(data.get("symbols", {}) or {})
-    hotwords = _build_hotwords(items)
+    custom_hotwords = data.get("hotwords", [])
+    hallucinations = _hallucinations_from(data.get("hallucinations", []))
+    hotwords = _build_hotwords(custom_hotwords, items)
+    reverse_items = _reverse_items_from(items)
+
     _cache["items"] = items
     _cache["symbols"] = symbols
     _cache["hotwords"] = hotwords
+    _cache["hallucinations"] = hallucinations
+    _cache["reverse_items"] = reverse_items
 
 
-def _build_hotwords(items: list[tuple[str, str]], limit: int = 40) -> str:
+def _build_hotwords(custom_hotwords: list | None, items: list[tuple[str, str]], limit: int = 50) -> str:
     vals, seen = [], set()
-    for _k, v in items:
-        if v and v not in seen and re.search(r"[A-Za-z0-9]", v):
-            seen.add(v)
-            vals.append(v)
+    if isinstance(custom_hotwords, list):
+        for w in custom_hotwords:
+            if isinstance(w, str) and w and w not in seen:
+                seen.add(w)
+                vals.append(w)
+
+    for k, v in items:
+        for w in (v, k):
+            if w and w not in seen and len(w) >= 2:
+                seen.add(w)
+                vals.append(w)
+            if len(vals) >= limit:
+                break
         if len(vals) >= limit:
             break
     return " ".join(vals)
@@ -143,7 +185,11 @@ def _refresh() -> None:
                 if _cache["items"] is None:
                     _cache["items"] = _items_from(_DEFAULTS["replacements"])
                     _cache["symbols"] = _symbols_from(_DEFAULTS["symbols"])
-                    _cache["hotwords"] = _build_hotwords(_cache["items"])
+                    _cache["hotwords"] = _build_hotwords(
+                        _DEFAULTS.get("hotwords"), _cache["items"]
+                    )
+                    _cache["hallucinations"] = set()
+                    _cache["reverse_items"] = _reverse_items_from(_cache["items"])
             _cache["mtime"] = mtime
 
 
@@ -153,6 +199,12 @@ def get_replacements() -> list[tuple[str, str]]:
     return list(_cache["items"] or [])
 
 
+def get_reverse_replacements() -> list[tuple[str, str]]:
+    """(表記, 読み) のリストを表記の長さ降順で返す。"""
+    _refresh()
+    return list(_cache["reverse_items"] or [])
+
+
 def get_symbols() -> dict[str, str]:
     """単独チャンク時に記号化する {綴り: 記号} を返す。"""
     _refresh()
@@ -160,9 +212,15 @@ def get_symbols() -> dict[str, str]:
 
 
 def get_hotwords() -> str:
-    """辞書の英数字表記を Whisper のヒント語として渡す文字列。"""
+    """辞書の表記・読みを Whisper のヒント語として渡す文字列。"""
     _refresh()
     return _cache["hotwords"] or ""
+
+
+def get_hallucinations() -> set[str]:
+    """ユーザー追加の誤認識除去文字列セットを返す。"""
+    _refresh()
+    return set(_cache["hallucinations"] or set())
 
 
 def get_error() -> str | None:

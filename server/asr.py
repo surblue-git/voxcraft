@@ -78,12 +78,25 @@ class Transcriber:
         from faster_whisper import WhisperModel  # 遅延インポート
 
         device, compute = _resolve_device_compute()
+        kwargs = {"device": device, "compute_type": compute}
+        if config.flash_attention and device == "cuda":
+            kwargs["flash_attention"] = True
+
         try:
-            self._model = WhisperModel(config.model, device=device, compute_type=compute)
-        except Exception as exc:  # GPU 初期化失敗時は CPU へフォールバック
-            print(f"[VoxCraft] {device}/{compute} 初期化失敗（{str(exc)[:120]}）。CPUに切替。")
-            device, compute = "cpu", "int8"
-            self._model = WhisperModel(config.model, device=device, compute_type=compute)
+            self._model = WhisperModel(config.model, **kwargs)
+        except Exception as exc:  # GPU 初期化失敗（または flash_attention 非対応）時はフォールバック
+            if "flash_attention" in kwargs:
+                kwargs.pop("flash_attention")
+                try:
+                    self._model = WhisperModel(config.model, **kwargs)
+                except Exception as inner_exc:
+                    exc = inner_exc
+                    self._model = None
+            if self._model is None:
+                print(f"[VoxCraft] {device}/{compute} 初期化失敗（{str(exc)[:120]}）。CPUに切替。")
+                device, compute = "cpu", "int8"
+                self._model = WhisperModel(config.model, device=device, compute_type=compute)
+
         self.device = device
         self.compute = compute
 
@@ -99,6 +112,8 @@ class Transcriber:
         """
         if self._model is None:
             raise RuntimeError("model not loaded")
+
+        from userdict import get_hallucinations
 
         with self._lock:
             segments, _info = self._model.transcribe(
@@ -123,7 +138,8 @@ class Transcriber:
             text = "".join(kept).strip()
 
         # 丸ごと定番の幻覚なら捨てる（本文中に混ざった場合は残す）。
-        if text in _HALLUCINATIONS:
+        user_halls = get_hallucinations()
+        if text in _HALLUCINATIONS or text in user_halls:
             return ""
         return text
 

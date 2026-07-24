@@ -96,6 +96,24 @@ def test_empty():
     assert postprocess("") == ""
 
 
+def test_userdict_hotwords_and_reverse():
+    from userdict import _build_hotwords, _reverse_items_from
+    items = [("じょうぷらほう", "情プラ法"), ("ウィンドウズ", "Windows")]
+    hotwords = _build_hotwords(["Obsidian"], items)
+    assert "Obsidian" in hotwords
+    assert "情プラ法" in hotwords
+    assert "Windows" in hotwords
+
+    rev = _reverse_items_from(items)
+    assert rev[0] == ("情プラ法", "じょうぷらほう") or rev[0] == ("Windows", "ウィンドウズ")
+
+
+def test_reconvert_reverse_userdict():
+    from reconvert import _reading
+    hira = _reading.to_hiragana("情プラ法を使う")
+    assert "じょうぷらほう" in hira
+
+
 def _run_all():
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failed = 0
@@ -103,7 +121,7 @@ def _run_all():
         try:
             fn()
             print(f"PASS {fn.__name__}")
-        except AssertionError as e:
+        except Exception as e:
             failed += 1
             print(f"FAIL {fn.__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")

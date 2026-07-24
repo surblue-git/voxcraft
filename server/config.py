@@ -52,6 +52,12 @@ class Config:
     min_speech_sec: float = float(_env("VOXCRAFT_MIN_SPEECH_SEC", "0.3"))
     # silero-vad のしきい値（0-1、大きいほど厳しい）。
     vad_threshold: float = float(_env("VOXCRAFT_VAD_THRESHOLD", "0.5"))
+    # 発話チャンク後方のパディング（秒）。語尾切れ（「です」「ます」が途切れる現象）を防ぐ。
+    speech_pad_sec: float = float(_env("VOXCRAFT_SPEECH_PAD_SEC", "0.2"))
+
+    # --- 高速化・GPU最適化 ---
+    # CTranslate2 の FlashAttention 有効化（RTX 30xx/40xx 等で速度向上）。
+    flash_attention: bool = _env("VOXCRAFT_FLASH_ATTENTION", "0") == "1"
 
     # --- 後処理 ---
     # 日本語と英数字の間に入る半角スペースを除去する。

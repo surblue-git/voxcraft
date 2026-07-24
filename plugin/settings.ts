@@ -201,5 +201,14 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     })
             );
+
+        // ---- オーディオエンジン情報 ----
+        containerEl.createEl("h3", { text: "マイク入力エンジン" });
+        containerEl.createEl("p", {
+            text:
+                "音声処理エンジン: AudioWorklet 優先動作（UI描画と独立した高音質・低レイテンシスレッド）。" +
+                "非対応ブラウザ・環境では ScriptProcessorNode へ自動フォールバックされます。",
+            cls: "setting-item-description",
+        });
     }
 }

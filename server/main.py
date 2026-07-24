@@ -77,6 +77,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         max_chunk_sec=config.max_chunk_sec,
         min_speech_sec=config.min_speech_sec,
         vad_threshold=config.vad_threshold,
+        speech_pad_sec=config.speech_pad_sec,
     )
     strip_space = config.strip_ja_alnum_space
     symbols = config.enable_symbol_dictation

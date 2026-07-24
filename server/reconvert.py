@@ -40,10 +40,21 @@ class _Reading:
             self._tokenizer = None
 
     def to_hiragana(self, text: str) -> str:
-        """テキスト全体の読み（ひらがな）を返す。"""
+        """テキスト全体の読み（ひらがな）を返す。
+
+        ユーザー辞書の表記→読みを最優先で適用し、残りを Sudachi でひらがな化する。
+        """
+        from userdict import get_reverse_replacements
+
+        # 1. ユーザー辞書の逆引き（表記 → 読み）を適用
+        for surface, hira in get_reverse_replacements():
+            if surface and surface in text:
+                text = text.replace(surface, hira)
+
         if self._tokenizer is None:
             # フォールバック: カタカナだけひらがな化して返す（漢字は読めない）。
             return _kata_to_hira(text)
+
         from sudachipy import tokenizer as _t  # type: ignore
 
         mode = _t.Tokenizer.SplitMode.C

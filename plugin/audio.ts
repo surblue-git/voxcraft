@@ -1,17 +1,36 @@
 // マイク録音 → 16kHz / PCM16LE モノラルへのダウンサンプリング。
 //
-// Obsidian は Electron(Desktop) / WebView(Mobile) の Chromium 上で動くため
-// getUserMedia + AudioContext が使える。AudioWorklet は別ファイルのロードが必要で
-// モバイルで面倒なので、互換性重視で ScriptProcessorNode を使う（非推奨だが全環境で動く）。
+// UIメインスレッド非依存で音飛びを防ぐため AudioWorklet を優先使用。
+// Blob URL により単一モジュール（main.js）のまま追加ファイルのロードなしで動作する。
+// 万が一 AudioWorklet が使えない環境では ScriptProcessorNode にフォールバックする。
 
 export type PcmHandler = (pcm16: ArrayBuffer) => void;
 export type LevelHandler = (level: number) => void; // 0..1 の入力レベル
+
+const WORKLET_CODE = `
+class VoxCraftAudioProcessor extends AudioWorkletProcessor {
+    process(inputs, outputs, parameters) {
+        const input = inputs[0];
+        if (input && input.length > 0) {
+            const channelData = input[0];
+            if (channelData && channelData.length > 0) {
+                // Float32Array のコピーをメッセージで送出
+                this.port.postMessage(new Float32Array(channelData));
+            }
+        }
+        return true;
+    }
+}
+registerProcessor('voxcraft-audio-processor', VoxCraftAudioProcessor);
+`;
 
 export class MicRecorder {
     private ctx: AudioContext | null = null;
     private stream: MediaStream | null = null;
     private source: MediaStreamAudioSourceNode | null = null;
-    private processor: ScriptProcessorNode | null = null;
+    private workletNode: AudioWorkletNode | null = null;
+    private scriptProcessor: ScriptProcessorNode | null = null;
+    private workletBlobUrl: string | null = null;
     private onPcm: PcmHandler;
     private onLevel: LevelHandler | null;
     private targetRate: number;
@@ -38,32 +57,69 @@ export class MicRecorder {
         });
         this.ctx = new AudioContext();
         this.source = this.ctx.createMediaStreamSource(this.stream);
-
-        // 4096 サンプルごとにコールバック。入力1ch、出力1ch。
-        this.processor = this.ctx.createScriptProcessor(4096, 1, 1);
         const inputRate = this.ctx.sampleRate;
 
-        this.processor.onaudioprocess = (ev: AudioProcessingEvent) => {
-            const input = ev.inputBuffer.getChannelData(0);
-            if (this.onLevel) this.onLevel(rms(input));
-            const down = downsample(input, inputRate, this.targetRate);
-            this.onPcm(floatToPcm16(down));
-        };
+        // AudioWorklet のロードを試みる
+        let workletLoaded = false;
+        if (this.ctx.audioWorklet) {
+            try {
+                const blob = new Blob([WORKLET_CODE], { type: "application/javascript" });
+                const blobUrl = URL.createObjectURL(blob);
+                this.workletBlobUrl = blobUrl;
+                await this.ctx.audioWorklet.addModule(blobUrl);
+                this.workletNode = new AudioWorkletNode(this.ctx, "voxcraft-audio-processor");
 
-        this.source.connect(this.processor);
-        // ScriptProcessor は destination に繋がないと発火しない環境がある。
-        // 無音を出さないよう GainNode(0) を挟んで destination へ。
-        const mute = this.ctx.createGain();
-        mute.gain.value = 0;
-        this.processor.connect(mute);
-        mute.connect(this.ctx.destination);
+                this.workletNode.port.onmessage = (e: MessageEvent<Float32Array>) => {
+                    const input = e.data;
+                    if (this.onLevel) this.onLevel(rms(input));
+                    const down = downsample(input, inputRate, this.targetRate);
+                    this.onPcm(floatToPcm16(down));
+                };
+
+                this.source.connect(this.workletNode);
+                const mute = this.ctx.createGain();
+                mute.gain.value = 0;
+                this.workletNode.connect(mute);
+                mute.connect(this.ctx.destination);
+                workletLoaded = true;
+            } catch (err) {
+                console.warn("VoxCraft: AudioWorklet の起動に失敗したため ScriptProcessorNode へフォールバックします。", err);
+                workletLoaded = false;
+            }
+        }
+
+        // AudioWorklet 非対応、または起動失敗時は ScriptProcessorNode へフォールバック
+        if (!workletLoaded) {
+            this.scriptProcessor = this.ctx.createScriptProcessor(4096, 1, 1);
+            this.scriptProcessor.onaudioprocess = (ev: AudioProcessingEvent) => {
+                const input = ev.inputBuffer.getChannelData(0);
+                if (this.onLevel) this.onLevel(rms(input));
+                const down = downsample(input, inputRate, this.targetRate);
+                this.onPcm(floatToPcm16(down));
+            };
+
+            this.source.connect(this.scriptProcessor);
+            const mute = this.ctx.createGain();
+            mute.gain.value = 0;
+            this.scriptProcessor.connect(mute);
+            mute.connect(this.ctx.destination);
+        }
     }
 
     async stop(): Promise<void> {
-        if (this.processor) {
-            this.processor.disconnect();
-            this.processor.onaudioprocess = null as unknown as never;
-            this.processor = null;
+        if (this.workletNode) {
+            this.workletNode.port.onmessage = null;
+            this.workletNode.disconnect();
+            this.workletNode = null;
+        }
+        if (this.workletBlobUrl) {
+            URL.revokeObjectURL(this.workletBlobUrl);
+            this.workletBlobUrl = null;
+        }
+        if (this.scriptProcessor) {
+            this.scriptProcessor.disconnect();
+            this.scriptProcessor.onaudioprocess = null as unknown as never;
+            this.scriptProcessor = null;
         }
         if (this.source) {
             this.source.disconnect();
