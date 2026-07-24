@@ -1,8 +1,11 @@
 name: Release Obsidian plugin
 
-# バージョンタグ（例: 0.2.0）を push すると、プラグインをビルドして
-# main.js / manifest.json / styles.css を添付したリリースを自動作成する。
-# BRAT はこのリリース資産を読み込んでインストール／更新する。
+# バージョンタグ（例: 0.2.0）を push すると:
+#   1. プラグインをビルド
+#   2. main.js / manifest.json / styles.css をリポジトリのルートへ同期してコミット
+#      （BRAT はルートの manifest.json でプラグインを認識・バージョン判定する）
+#   3. 同じ3ファイルを添付したリリースを作成（BRAT はリリース資産をDLする）
+# ルートとリリースの両方を最新に保つことで、BRAT のどの参照経路でも更新が届く。
 
 on:
   push:
@@ -17,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - uses: actions/setup-node@v4
         with:
@@ -25,11 +30,19 @@ jobs:
       - name: Build plugin
         working-directory: plugin
         env:
-          # esbuild.config.mjs の出力先。CI では dist/ に出す。
           OBSIDIAN_PLUGIN_DIR: dist
         run: |
           npm install
           npm run build
+
+      - name: Sync root files for BRAT
+        run: |
+          cp plugin/dist/main.js plugin/dist/manifest.json plugin/dist/styles.css .
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add main.js manifest.json styles.css
+          git commit -m "chore: sync root plugin files for ${GITHUB_REF_NAME}" || echo "no changes to commit"
+          git push origin HEAD:main
 
       - name: Create release
         env:
