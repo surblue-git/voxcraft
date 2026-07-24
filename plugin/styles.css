@@ -1,0 +1,49 @@
+/* VoxCraft 音声入力プラグイン */
+
+/* 録音中のリボンアイコンを目立たせる */
+.voxcraft-recording {
+    color: var(--text-error) !important;
+}
+.voxcraft-recording svg {
+    animation: voxcraft-pulse 1.2s ease-in-out infinite;
+}
+@keyframes voxcraft-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+/* 変換戻しモーダル */
+.voxcraft-reconvert .voxcraft-hint {
+    color: var(--text-muted);
+    font-size: 0.85em;
+    margin-top: -0.3em;
+}
+.voxcraft-reconvert .voxcraft-seg {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    padding: 0.5em 0.6em;
+    margin-bottom: 0.6em;
+}
+.voxcraft-reconvert .voxcraft-seg.is-active {
+    border-color: var(--interactive-accent);
+    box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+.voxcraft-reconvert .voxcraft-reading {
+    display: block;
+    font-size: 0.8em;
+    color: var(--text-muted);
+    margin-bottom: 0.3em;
+}
+.voxcraft-reconvert .voxcraft-cands {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35em;
+}
+.voxcraft-reconvert .voxcraft-cand {
+    cursor: pointer;
+    border-radius: 6px;
+}
+.voxcraft-reconvert .voxcraft-cand.is-selected {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+}

@@ -1,0 +1,14 @@
+# Node / Obsidian plugin
+plugin/node_modules/
+plugin/main.js
+plugin/*.map
+
+# Python server
+server/.venv/
+server/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Models / caches
+server/models/
+.cache/

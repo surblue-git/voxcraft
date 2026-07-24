@@ -1,0 +1,68 @@
+"""VoxCraft 認識サーバーの設定。
+
+環境変数で上書きできる。既定値は自分用（CPU・日本語特化モデル）を想定。
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+
+
+def _env(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+@dataclass
+class Config:
+    # --- ネットワーク ---
+    host: str = _env("VOXCRAFT_HOST", "0.0.0.0")
+    port: int = int(_env("VOXCRAFT_PORT", "8760"))
+
+    # --- ASR モデル ---
+    # kotoba-whisper-v2.0 の faster-whisper(CTranslate2) 版。
+    # 精度優先なら "large-v3"、速度優先なら "small" 等に差し替え可能。
+    model: str = _env("VOXCRAFT_MODEL", "kotoba-tech/kotoba-whisper-v2.0-faster")
+    # "cpu" / "cuda"
+    device: str = _env("VOXCRAFT_DEVICE", "cpu")
+    # cpu なら "int8"、cuda なら "float16" が定番。
+    compute_type: str = _env("VOXCRAFT_COMPUTE_TYPE", "int8")
+    language: str = _env("VOXCRAFT_LANG", "ja")
+
+    # --- 音声フォーマット（クライアントと合わせる） ---
+    sample_rate: int = int(_env("VOXCRAFT_SAMPLE_RATE", "16000"))
+
+    # --- VAD（区切り検出。停止判断はしない） ---
+    # 無音がこの秒数続いたら「息継ぎ」とみなしチャンクを確定する。
+    # どれだけ長く黙ってもセッション自体は切らない。
+    silence_sec: float = float(_env("VOXCRAFT_SILENCE_SEC", "0.8"))
+    # チャンクが長くなりすぎた場合の強制確定（秒）。
+    max_chunk_sec: float = float(_env("VOXCRAFT_MAX_CHUNK_SEC", "12.0"))
+    # 発話とみなす最小長（秒）。これ未満の音はノイズとして捨てる。
+    min_speech_sec: float = float(_env("VOXCRAFT_MIN_SPEECH_SEC", "0.3"))
+    # silero-vad のしきい値（0-1、大きいほど厳しい）。
+    vad_threshold: float = float(_env("VOXCRAFT_VAD_THRESHOLD", "0.5"))
+
+    # --- 後処理 ---
+    # 日本語と英数字の間に入る半角スペースを除去する。
+    strip_ja_alnum_space: bool = _env("VOXCRAFT_STRIP_SPACE", "1") == "1"
+    # 記号読み上げ（「まる」→「。」など）を有効化する。
+    enable_symbol_dictation: bool = _env("VOXCRAFT_SYMBOLS", "1") == "1"
+
+    # --- 再変換（変換戻し） ---
+    # Google CGI API for Japanese Input を使う（無料・非公式・要オンライン）。
+    use_google_cgi: bool = _env("VOXCRAFT_GOOGLE_CGI", "1") == "1"
+    google_cgi_url: str = _env(
+        "VOXCRAFT_GOOGLE_CGI_URL", "https://www.google.com/transliterate"
+    )
+    http_timeout_sec: float = float(_env("VOXCRAFT_HTTP_TIMEOUT", "5.0"))
+
+    # 認識時の初期プロンプト（口語・句読点を促す）。
+    initial_prompt: str = _env(
+        "VOXCRAFT_INITIAL_PROMPT",
+        "以下は日本語の口述です。句読点を適切に付けてください。",
+    )
+
+    aliases: dict = field(default_factory=dict)
+
+
+config = Config()

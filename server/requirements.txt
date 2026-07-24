@@ -1,0 +1,15 @@
+# VoxCraft 認識サーバーの依存。
+# Python 3.10–3.12 を推奨（faster-whisper / onnxruntime のホイール都合）。
+
+fastapi>=0.110
+uvicorn[standard]>=0.29
+numpy>=1.24
+faster-whisper>=1.0.3
+
+# VAD（無くても簡易エネルギーVADにフォールバックする）
+silero-vad>=5.1
+onnxruntime>=1.17
+
+# 再変換の読み抽出（無くてもカタカナのみ読み化にフォールバック）
+sudachipy>=0.6.8
+sudachidict-core>=20240409
