@@ -282,14 +282,38 @@ var ReconvertModal = class extends import_obsidian.Modal {
 
 // settings.ts
 var import_obsidian2 = require("obsidian");
+var AUTO = "auto";
 var DEFAULT_SETTINGS = {
-  serverUrl: "ws://localhost:8760/ws",
+  endpoints: [{ label: "\u3053\u306EPC", url: "ws://localhost:8760/ws" }],
+  selection: AUTO,
   stripJaAlnumSpace: true,
   symbolDictation: true,
   enableCommands: true,
   commandPrefix: "",
   autoReconvertLast: true
 };
+function migrateSettings(s) {
+  if ((!s.endpoints || s.endpoints.length === 0) && s.serverUrl) {
+    s.endpoints = [{ label: "\u30B5\u30FC\u30D0\u30FC", url: s.serverUrl }];
+  }
+  if (!s.endpoints || s.endpoints.length === 0) {
+    s.endpoints = [...DEFAULT_SETTINGS.endpoints];
+  }
+  if (!s.selection)
+    s.selection = AUTO;
+  delete s.serverUrl;
+  return s;
+}
+function resolveUrls(s) {
+  const all = s.endpoints.map((e) => e.url.trim()).filter(Boolean);
+  if (s.selection === AUTO || !s.selection)
+    return all;
+  return all.includes(s.selection) ? [s.selection] : all;
+}
+function labelForUrl(s, url) {
+  const ep = s.endpoints.find((e) => e.url.trim() === url);
+  return ep ? ep.label : url;
+}
 var VoxCraftSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -299,14 +323,63 @@ var VoxCraftSettingTab = class extends import_obsidian2.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "VoxCraft \u97F3\u58F0\u5165\u529B" });
-    new import_obsidian2.Setting(containerEl).setName("\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC URL").setDesc(
-      "\u81EA\u5B85PC\u3067\u52D5\u304F\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\u306E WebSocket \u30A2\u30C9\u30EC\u30B9\u3002Desktop \u306F ws://localhost:8760/ws\u3001Android \u306F ws://<Tailscale\u306EPC IP>:8760/ws\u3002"
-    ).addText(
-      (t) => t.setPlaceholder("ws://localhost:8760/ws").setValue(this.plugin.settings.serverUrl).onChange(async (v) => {
-        this.plugin.settings.serverUrl = v.trim();
+    containerEl.createEl("h3", { text: "\u63A5\u7D9A\u5148" });
+    new import_obsidian2.Setting(containerEl).setName("\u63A5\u7D9A\u5148\u306E\u9078\u629E").setDesc(
+      "\u300C\u81EA\u52D5\u300D\u306A\u3089\u3001\u9332\u97F3\u958B\u59CB\u6642\u306B\u4E0B\u306E\u5019\u88DC\u3059\u3079\u3066\u3078\u540C\u6642\u63A5\u7D9A\u3057\u3001\u6700\u521D\u306B\u7E4B\u304C\u3063\u305F\u65B9\u3092\u4F7F\u3046\u3002\u81EA\u5B85\u3067\u306FLAN\u3001\u5916\u51FA\u5148\u3067\u306FTailscale\u304C\u81EA\u52D5\u7684\u306B\u9078\u3070\u308C\u308B\u3002\u7279\u5B9A\u306E\u5019\u88DC\u306B\u56FA\u5B9A\u3059\u308B\u3053\u3068\u3082\u3067\u304D\u308B\u3002\u30DE\u30A4\u30AF\u306E\u30EA\u30DC\u30F3\u30A2\u30A4\u30B3\u30F3\u3092\u53F3\u30AF\u30EA\u30C3\u30AF\uFF08\u9577\u62BC\u3057\uFF09\u3001\u307E\u305F\u306F\u30B3\u30DE\u30F3\u30C9\u300C\u63A5\u7D9A\u5148\u3092\u9078\u629E\u300D\u304B\u3089\u3082\u3053\u3053\u3092\u5207\u308A\u66FF\u3048\u3089\u308C\u308B\u3002"
+    ).addDropdown((d) => {
+      d.addOption(AUTO, "\u81EA\u52D5\uFF08\u3064\u306A\u304C\u308B\u65B9\uFF09");
+      for (const ep of this.plugin.settings.endpoints) {
+        if (ep.url.trim())
+          d.addOption(ep.url.trim(), `${ep.label}`);
+      }
+      d.setValue(this.plugin.settings.selection);
+      d.onChange(async (v) => {
+        this.plugin.settings.selection = v;
         await this.plugin.saveSettings();
+      });
+    });
+    containerEl.createEl("h3", { text: "\u63A5\u7D9A\u5148\u306E\u5019\u88DC\uFF08\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\uFF09" });
+    containerEl.createEl("p", {
+      text: "\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\uFF08\u81EA\u5B85PC\uFF09\u306E\u30A2\u30C9\u30EC\u30B9\u3092\u5019\u88DC\u3068\u3057\u3066\u767B\u9332\u3059\u308B\u3002\u4F8B: \u81EA\u5B85LAN = ws://192.168.x.x:8760/ws\u3001Tailscale = ws://100.x.x.x:8760/ws\u3001\u3053\u306EPC\u81EA\u8EAB = ws://localhost:8760/ws\u3002",
+      cls: "setting-item-description"
+    });
+    this.plugin.settings.endpoints.forEach((ep, i) => {
+      const setting = new import_obsidian2.Setting(containerEl).setName(`\u5019\u88DC ${i + 1}`).addText(
+        (t) => t.setPlaceholder("\u8868\u793A\u540D\uFF08\u4F8B: \u81EA\u5B85LAN\uFF09").setValue(ep.label).onChange(async (v) => {
+          ep.label = v;
+          await this.plugin.saveSettings();
+        })
+      ).addText((t) => {
+        t.setPlaceholder("ws://host:8760/ws").setValue(ep.url).onChange(async (v) => {
+          const prev = ep.url.trim();
+          ep.url = v;
+          if (this.plugin.settings.selection === prev) {
+            this.plugin.settings.selection = v.trim();
+          }
+          await this.plugin.saveSettings();
+        });
+        t.inputEl.style.minWidth = "22em";
+      }).addExtraButton(
+        (b) => b.setIcon("trash").setTooltip("\u3053\u306E\u5019\u88DC\u3092\u524A\u9664").onClick(async () => {
+          const removed = this.plugin.settings.endpoints[i].url.trim();
+          this.plugin.settings.endpoints.splice(i, 1);
+          if (this.plugin.settings.selection === removed) {
+            this.plugin.settings.selection = AUTO;
+          }
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+      setting.controlEl.style.flexWrap = "wrap";
+    });
+    new import_obsidian2.Setting(containerEl).addButton(
+      (b) => b.setButtonText("\uFF0B \u5019\u88DC\u3092\u8FFD\u52A0").onClick(async () => {
+        this.plugin.settings.endpoints.push({ label: "", url: "" });
+        await this.plugin.saveSettings();
+        this.display();
       })
     );
+    containerEl.createEl("h3", { text: "\u8A8D\u8B58\u30FB\u6574\u5F62" });
     new import_obsidian2.Setting(containerEl).setName("\u82F1\u6570\u5B57\u307E\u308F\u308A\u306E\u534A\u89D2\u30B9\u30DA\u30FC\u30B9\u3092\u9664\u53BB").setDesc("\u65E5\u672C\u8A9E\u3068\u82F1\u6570\u5B57\u306E\u9593\u306B\u52DD\u624B\u306B\u5165\u308B\u534A\u89D2\u30B9\u30DA\u30FC\u30B9\u3092\u53D6\u308A\u9664\u304F\u3002").addToggle(
       (t) => t.setValue(this.plugin.settings.stripJaAlnumSpace).onChange(async (v) => {
         this.plugin.settings.stripJaAlnumSpace = v;
@@ -337,52 +410,106 @@ var VoxCraftSettingTab = class extends import_obsidian2.PluginSettingTab {
 };
 
 // ws.ts
+function safeClose(ws) {
+  try {
+    ws.onopen = null;
+    ws.onerror = null;
+    ws.onclose = null;
+    ws.onmessage = null;
+    ws.close();
+  } catch (e) {
+  }
+}
 var AsrSocket = class {
-  constructor(url, handlers) {
+  constructor(urls, handlers) {
     this.ws = null;
-    this.url = url;
+    // レースで採用した URL（どの接続先が使われたかの表示に使う）。
+    this.activeUrl = null;
+    this.urls = (Array.isArray(urls) ? urls : [urls]).map((u) => u.trim()).filter(Boolean);
     this.handlers = handlers;
   }
   get connected() {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
+  // 候補すべてへ同時接続を試み、最初に開いた接続を採用する（残りは破棄）。
+  // 自宅ならLAN、外出先ならTailscaleが自然に勝つ。候補が1つならそのまま接続。
   connect() {
     return new Promise((resolve, reject) => {
-      try {
-        this.ws = new WebSocket(this.url);
-      } catch (e) {
-        reject(e);
+      const urls = this.urls;
+      if (urls.length === 0) {
+        reject(new Error("\u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093"));
         return;
       }
-      this.ws.binaryType = "arraybuffer";
+      let settled = false;
+      let pending = urls.length;
+      const probes = [];
       const timer = window.setTimeout(() => {
+        if (settled)
+          return;
+        settled = true;
+        probes.forEach(safeClose);
         reject(new Error("\u63A5\u7D9A\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8"));
-        this.close();
       }, 8e3);
-      this.ws.onopen = () => {
-        window.clearTimeout(timer);
-        resolve();
-      };
-      this.ws.onerror = () => {
-        window.clearTimeout(timer);
-        reject(new Error("\u63A5\u7D9A\u30A8\u30E9\u30FC"));
-      };
-      this.ws.onclose = () => {
-        var _a, _b;
-        (_b = (_a = this.handlers).onClose) == null ? void 0 : _b.call(_a);
-      };
-      this.ws.onmessage = (ev) => {
-        if (typeof ev.data !== "string")
-          return;
-        let msg;
-        try {
-          msg = JSON.parse(ev.data);
-        } catch (e) {
-          return;
+      const onFail = () => {
+        pending -= 1;
+        if (pending <= 0 && !settled) {
+          settled = true;
+          window.clearTimeout(timer);
+          reject(new Error("\u63A5\u7D9A\u30A8\u30E9\u30FC"));
         }
-        this.dispatch(msg);
       };
+      for (const url of urls) {
+        let ws;
+        try {
+          ws = new WebSocket(url);
+        } catch (e) {
+          onFail();
+          continue;
+        }
+        ws.binaryType = "arraybuffer";
+        probes.push(ws);
+        ws.onopen = () => {
+          if (settled) {
+            safeClose(ws);
+            return;
+          }
+          settled = true;
+          window.clearTimeout(timer);
+          for (const p of probes)
+            if (p !== ws)
+              safeClose(p);
+          this.adopt(ws, url);
+          resolve();
+        };
+        ws.onerror = () => {
+          if (settled)
+            return;
+          onFail();
+        };
+      }
     });
+  }
+  // レースの勝者を本採用し、メッセージ／切断ハンドラを張り直す。
+  adopt(ws, url) {
+    this.ws = ws;
+    this.activeUrl = url;
+    ws.onopen = null;
+    ws.onerror = null;
+    ws.onclose = () => {
+      var _a, _b;
+      (_b = (_a = this.handlers).onClose) == null ? void 0 : _b.call(_a);
+    };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data !== "string")
+        return;
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch (e) {
+        return;
+      }
+      this.dispatch(msg);
+    };
   }
   dispatch(msg) {
     var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
@@ -512,6 +639,10 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft \u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB/\u505C\u6B62", () => {
       this.toggleRecording();
     });
+    this.registerDomEvent(this.ribbonEl, "contextmenu", (evt) => {
+      evt.preventDefault();
+      this.openEndpointMenu(evt);
+    });
     this.statusEl = this.addStatusBarItem();
     this.setStatus("\u505C\u6B62\u4E2D");
     this.addCommand({
@@ -528,6 +659,11 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
       id: "reconvert-last",
       name: "\u76F4\u524D\u306E\u5165\u529B\u3092\u5909\u63DB\u623B\u3057",
       callback: () => this.requestReconvert()
+    });
+    this.addCommand({
+      id: "select-endpoint",
+      name: "\u63A5\u7D9A\u5148\u3092\u9078\u629E",
+      callback: () => this.openEndpointMenu()
     });
     this.addSettingTab(new VoxCraftSettingTab(this.app, this));
   }
@@ -549,9 +685,19 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
       new import_obsidian3.Notice("VoxCraft: \u633F\u5165\u5148\u306E\u30CE\u30FC\u30C8\uFF08\u7DE8\u96C6\u30E2\u30FC\u30C9\uFF09\u3092\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
-    this.setStatus("\u63A5\u7D9A\u4E2D\u2026");
-    this.socket = new AsrSocket(this.settings.serverUrl, {
-      onReady: () => this.setStatus("\u5F85\u6A5F\u4E2D\u2026 \u8A71\u3057\u3066\u304F\u3060\u3055\u3044"),
+    const urls = resolveUrls(this.settings);
+    if (urls.length === 0) {
+      new import_obsidian3.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A\u3067\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u3092\u8FFD\u52A0\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+      return;
+    }
+    this.setStatus(urls.length > 1 ? "\u63A5\u7D9A\u4E2D\u2026\uFF08\u3064\u306A\u304C\u308B\u65B9\u3092\u9078\u629E\uFF09" : "\u63A5\u7D9A\u4E2D\u2026");
+    this.socket = new AsrSocket(urls, {
+      onReady: () => {
+        var _a;
+        const url = (_a = this.socket) == null ? void 0 : _a.activeUrl;
+        const label = url ? labelForUrl(this.settings, url) : "";
+        this.setStatus(label ? `\u5F85\u6A5F\u4E2D\u2026 \u8A71\u3057\u3066\u304F\u3060\u3055\u3044\uFF08${label}\uFF09` : "\u5F85\u6A5F\u4E2D\u2026 \u8A71\u3057\u3066\u304F\u3060\u3055\u3044");
+      },
       onPartial: () => {
         this.transcribing = true;
         this.setStatus("\u8A8D\u8B58\u4E2D\u2026");
@@ -573,8 +719,9 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     try {
       await this.socket.connect();
     } catch (e) {
+      const tried = urls.map((u) => labelForUrl(this.settings, u)).join(" / ");
       new import_obsidian3.Notice(
-        `VoxCraft: \u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093\uFF08${this.settings.serverUrl}\uFF09\u3002\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u308B\u304B\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
+        `VoxCraft: \u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093\uFF08${tried}\uFF09\u3002\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u308B\u304B\u3001\u63A5\u7D9A\u5148\u306E\u8A2D\u5B9A\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
       );
       this.socket = null;
       this.setStatus("\u505C\u6B62\u4E2D");
@@ -783,6 +930,47 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     if (this.chunks.length > 0)
       this.chunks[this.chunks.length - 1] = newText;
   }
+  // ---- 接続先の切り替え ----
+  // 接続先メニューを表示する。evt があればその位置、無ければリボン脇に出す。
+  openEndpointMenu(evt) {
+    const menu = new import_obsidian3.Menu();
+    const sel = this.settings.selection;
+    menu.addItem(
+      (i) => i.setTitle("\u81EA\u52D5\uFF08\u3064\u306A\u304C\u308B\u65B9\uFF09").setChecked(sel === AUTO).onClick(() => void this.setSelection(AUTO))
+    );
+    menu.addSeparator();
+    for (const ep of this.settings.endpoints) {
+      const url = ep.url.trim();
+      if (!url)
+        continue;
+      menu.addItem(
+        (i) => i.setTitle(ep.label || url).setChecked(sel === url).onClick(() => void this.setSelection(url))
+      );
+    }
+    menu.addSeparator();
+    menu.addItem(
+      (i) => i.setTitle("\u8A2D\u5B9A\u3092\u958B\u304F\u2026").setIcon("gear").onClick(() => {
+        var _a, _b;
+        const setting = this.app.setting;
+        (_a = setting == null ? void 0 : setting.open) == null ? void 0 : _a.call(setting);
+        (_b = setting == null ? void 0 : setting.openTabById) == null ? void 0 : _b.call(setting, "voxcraft");
+      })
+    );
+    if (evt) {
+      menu.showAtMouseEvent(evt);
+    } else if (this.ribbonEl) {
+      const r = this.ribbonEl.getBoundingClientRect();
+      menu.showAtPosition({ x: r.right, y: r.top });
+    } else {
+      menu.showAtPosition({ x: 0, y: 0 });
+    }
+  }
+  async setSelection(sel) {
+    this.settings.selection = sel;
+    await this.saveSettings();
+    const label = sel === AUTO ? "\u81EA\u52D5\uFF08\u3064\u306A\u304C\u308B\u65B9\uFF09" : labelForUrl(this.settings, sel);
+    new import_obsidian3.Notice(`VoxCraft: \u63A5\u7D9A\u5148\u3092\u300C${label}\u300D\u306B\u3057\u307E\u3057\u305F\u3002`);
+  }
   // ---- ユーティリティ ----
   // アクティブな Markdown エディタの CodeMirror6 ビューを得る。
   getActiveCm() {
@@ -808,7 +996,9 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     this.statusEl.setText(`\u{1F399} VoxCraft: ${text}`);
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings = migrateSettings(
+      Object.assign({}, DEFAULT_SETTINGS, await this.loadData())
+    );
   }
   async saveSettings() {
     await this.saveData(this.settings);
