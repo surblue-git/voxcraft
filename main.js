@@ -29,12 +29,30 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian3 = require("obsidian");
 
 // audio.ts
+var WORKLET_CODE = `
+class VoxCraftAudioProcessor extends AudioWorkletProcessor {
+    process(inputs, outputs, parameters) {
+        const input = inputs[0];
+        if (input && input.length > 0) {
+            const channelData = input[0];
+            if (channelData && channelData.length > 0) {
+                // Float32Array \u306E\u30B3\u30D4\u30FC\u3092\u30E1\u30C3\u30BB\u30FC\u30B8\u3067\u9001\u51FA
+                this.port.postMessage(new Float32Array(channelData));
+            }
+        }
+        return true;
+    }
+}
+registerProcessor('voxcraft-audio-processor', VoxCraftAudioProcessor);
+`;
 var MicRecorder = class {
   constructor(onPcm, onLevel = null, targetRate = 16e3) {
     this.ctx = null;
     this.stream = null;
     this.source = null;
-    this.processor = null;
+    this.workletNode = null;
+    this.scriptProcessor = null;
+    this.workletBlobUrl = null;
     this.onPcm = onPcm;
     this.onLevel = onLevel;
     this.targetRate = targetRate;
@@ -55,26 +73,63 @@ var MicRecorder = class {
     });
     this.ctx = new AudioContext();
     this.source = this.ctx.createMediaStreamSource(this.stream);
-    this.processor = this.ctx.createScriptProcessor(4096, 1, 1);
     const inputRate = this.ctx.sampleRate;
-    this.processor.onaudioprocess = (ev) => {
-      const input = ev.inputBuffer.getChannelData(0);
-      if (this.onLevel)
-        this.onLevel(rms(input));
-      const down = downsample(input, inputRate, this.targetRate);
-      this.onPcm(floatToPcm16(down));
-    };
-    this.source.connect(this.processor);
-    const mute = this.ctx.createGain();
-    mute.gain.value = 0;
-    this.processor.connect(mute);
-    mute.connect(this.ctx.destination);
+    let workletLoaded = false;
+    if (this.ctx.audioWorklet) {
+      try {
+        const blob = new Blob([WORKLET_CODE], { type: "application/javascript" });
+        const blobUrl = URL.createObjectURL(blob);
+        this.workletBlobUrl = blobUrl;
+        await this.ctx.audioWorklet.addModule(blobUrl);
+        this.workletNode = new AudioWorkletNode(this.ctx, "voxcraft-audio-processor");
+        this.workletNode.port.onmessage = (e) => {
+          const input = e.data;
+          if (this.onLevel)
+            this.onLevel(rms(input));
+          const down = downsample(input, inputRate, this.targetRate);
+          this.onPcm(floatToPcm16(down));
+        };
+        this.source.connect(this.workletNode);
+        const mute = this.ctx.createGain();
+        mute.gain.value = 0;
+        this.workletNode.connect(mute);
+        mute.connect(this.ctx.destination);
+        workletLoaded = true;
+      } catch (err) {
+        console.warn("VoxCraft: AudioWorklet \u306E\u8D77\u52D5\u306B\u5931\u6557\u3057\u305F\u305F\u3081 ScriptProcessorNode \u3078\u30D5\u30A9\u30FC\u30EB\u30D0\u30C3\u30AF\u3057\u307E\u3059\u3002", err);
+        workletLoaded = false;
+      }
+    }
+    if (!workletLoaded) {
+      this.scriptProcessor = this.ctx.createScriptProcessor(4096, 1, 1);
+      this.scriptProcessor.onaudioprocess = (ev) => {
+        const input = ev.inputBuffer.getChannelData(0);
+        if (this.onLevel)
+          this.onLevel(rms(input));
+        const down = downsample(input, inputRate, this.targetRate);
+        this.onPcm(floatToPcm16(down));
+      };
+      this.source.connect(this.scriptProcessor);
+      const mute = this.ctx.createGain();
+      mute.gain.value = 0;
+      this.scriptProcessor.connect(mute);
+      mute.connect(this.ctx.destination);
+    }
   }
   async stop() {
-    if (this.processor) {
-      this.processor.disconnect();
-      this.processor.onaudioprocess = null;
-      this.processor = null;
+    if (this.workletNode) {
+      this.workletNode.port.onmessage = null;
+      this.workletNode.disconnect();
+      this.workletNode = null;
+    }
+    if (this.workletBlobUrl) {
+      URL.revokeObjectURL(this.workletBlobUrl);
+      this.workletBlobUrl = null;
+    }
+    if (this.scriptProcessor) {
+      this.scriptProcessor.disconnect();
+      this.scriptProcessor.onaudioprocess = null;
+      this.scriptProcessor = null;
     }
     if (this.source) {
       this.source.disconnect();
@@ -406,6 +461,11 @@ var VoxCraftSettingTab = class extends import_obsidian2.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    containerEl.createEl("h3", { text: "\u30DE\u30A4\u30AF\u5165\u529B\u30A8\u30F3\u30B8\u30F3" });
+    containerEl.createEl("p", {
+      text: "\u97F3\u58F0\u51E6\u7406\u30A8\u30F3\u30B8\u30F3: AudioWorklet \u512A\u5148\u52D5\u4F5C\uFF08UI\u63CF\u753B\u3068\u72EC\u7ACB\u3057\u305F\u9AD8\u97F3\u8CEA\u30FB\u4F4E\u30EC\u30A4\u30C6\u30F3\u30B7\u30B9\u30EC\u30C3\u30C9\uFF09\u3002\u975E\u5BFE\u5FDC\u30D6\u30E9\u30A6\u30B6\u30FB\u74B0\u5883\u3067\u306F ScriptProcessorNode \u3078\u81EA\u52D5\u30D5\u30A9\u30FC\u30EB\u30D0\u30C3\u30AF\u3055\u308C\u307E\u3059\u3002",
+      cls: "setting-item-description"
+    });
   }
 };
 
