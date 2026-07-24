@@ -1,15 +1,12 @@
-# VoxCraft 認識サーバーの依存。
-# Python 3.10–3.12 を推奨（faster-whisper / onnxruntime のホイール都合）。
+# VoxCraft 認識サーバー — まず動く最小構成。
+# Python 3.10–3.12 推奨（faster-whisper / ctranslate2 のホイール都合）。
+#
+#   pip install -r requirements.txt
+#
+# これだけで音声入力は動く（VADは簡易エネルギー版、変換戻しはカタカナのみ読み化）。
+# 精度を上げたい場合は requirements-extra.txt も入れる。
 
 fastapi>=0.110
 uvicorn[standard]>=0.29
 numpy>=1.24
 faster-whisper>=1.0.3
-
-# VAD（無くても簡易エネルギーVADにフォールバックする）
-silero-vad>=5.1
-onnxruntime>=1.17
-
-# 再変換の読み抽出（無くてもカタカナのみ読み化にフォールバック）
-sudachipy>=0.6.8
-sudachidict-core>=20240409
