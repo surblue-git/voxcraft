@@ -30,12 +30,13 @@ var import_obsidian3 = require("obsidian");
 
 // audio.ts
 var MicRecorder = class {
-  constructor(onPcm, targetRate = 16e3) {
+  constructor(onPcm, onLevel = null, targetRate = 16e3) {
     this.ctx = null;
     this.stream = null;
     this.source = null;
     this.processor = null;
     this.onPcm = onPcm;
+    this.onLevel = onLevel;
     this.targetRate = targetRate;
   }
   get active() {
@@ -58,6 +59,8 @@ var MicRecorder = class {
     const inputRate = this.ctx.sampleRate;
     this.processor.onaudioprocess = (ev) => {
       const input = ev.inputBuffer.getChannelData(0);
+      if (this.onLevel)
+        this.onLevel(rms(input));
       const down = downsample(input, inputRate, this.targetRate);
       this.onPcm(floatToPcm16(down));
     };
@@ -87,6 +90,12 @@ var MicRecorder = class {
     }
   }
 };
+function rms(input) {
+  let sum = 0;
+  for (let i = 0; i < input.length; i++)
+    sum += input[i] * input[i];
+  return Math.sqrt(sum / input.length);
+}
 function downsample(input, inRate, outRate) {
   if (outRate >= inRate)
     return input;
@@ -376,20 +385,23 @@ var AsrSocket = class {
     });
   }
   dispatch(msg) {
-    var _a, _b, _c, _d, _e, _f, _g, _h;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
     switch (msg.type) {
       case "ready":
         (_b = (_a = this.handlers).onReady) == null ? void 0 : _b.call(_a);
         break;
+      case "partial":
+        (_d = (_c = this.handlers).onPartial) == null ? void 0 : _d.call(_c);
+        break;
       case "chunk":
         if (msg.text)
-          (_d = (_c = this.handlers).onChunk) == null ? void 0 : _d.call(_c, msg.text);
+          (_f = (_e = this.handlers).onChunk) == null ? void 0 : _f.call(_e, msg.text);
         break;
       case "reconvert":
-        (_f = (_e = this.handlers).onReconvert) == null ? void 0 : _f.call(_e, msg);
+        (_h = (_g = this.handlers).onReconvert) == null ? void 0 : _h.call(_g, msg);
         break;
       case "error":
-        (_h = (_g = this.handlers).onError) == null ? void 0 : _h.call(_g, msg.message || "unknown error");
+        (_j = (_i = this.handlers).onError) == null ? void 0 : _j.call(_i, msg.message || "unknown error");
         break;
     }
   }
@@ -490,6 +502,9 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     // 変換戻しの応答が返るまで対象範囲を覚えておく。
     this.pendingReconvert = null;
     this.reconvertModal = null;
+    // 入力レベルメーター表示のスロットリング用。
+    this.lastMeterAt = 0;
+    this.transcribing = false;
   }
   async onload() {
     await this.loadSettings();
@@ -537,7 +552,14 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     this.setStatus("\u63A5\u7D9A\u4E2D\u2026");
     this.socket = new AsrSocket(this.settings.serverUrl, {
       onReady: () => this.setStatus("\u5F85\u6A5F\u4E2D\u2026 \u8A71\u3057\u3066\u304F\u3060\u3055\u3044"),
-      onChunk: (text) => this.handleChunk(text),
+      onPartial: () => {
+        this.transcribing = true;
+        this.setStatus("\u8A8D\u8B58\u4E2D\u2026");
+      },
+      onChunk: (text) => {
+        this.transcribing = false;
+        this.handleChunk(text);
+      },
       onReconvert: (msg) => this.handleReconvert(msg),
       onError: (m) => new import_obsidian3.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`),
       onClose: () => {
@@ -562,10 +584,13 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
       this.settings.stripJaAlnumSpace,
       this.settings.symbolDictation
     );
-    this.recorder = new MicRecorder((pcm) => {
-      var _a;
-      return (_a = this.socket) == null ? void 0 : _a.sendAudio(pcm);
-    });
+    this.recorder = new MicRecorder(
+      (pcm) => {
+        var _a;
+        return (_a = this.socket) == null ? void 0 : _a.sendAudio(pcm);
+      },
+      (level) => this.showLevel(level)
+    );
     try {
       await this.recorder.start();
     } catch (e) {
@@ -765,6 +790,19 @@ var VoxCraftPlugin = class extends import_obsidian3.Plugin {
     const view = this.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
     const editor = view == null ? void 0 : view.editor;
     return (_a = editor == null ? void 0 : editor.cm) != null ? _a : null;
+  }
+  // 入力レベルをステータスバーにメーター表示（音声を拾えているかの確認用）。
+  showLevel(level) {
+    if (!this.recording || this.transcribing)
+      return;
+    const now = performance.now();
+    if (now - this.lastMeterAt < 100)
+      return;
+    this.lastMeterAt = now;
+    const segs = 10;
+    const filled = Math.max(0, Math.min(segs, Math.round(level * 40)));
+    const bar = "\u2588".repeat(filled) + "\u2591".repeat(segs - filled);
+    this.setStatus(`\u25CF \u9332\u97F3\u4E2D ${bar}`);
   }
   setStatus(text) {
     this.statusEl.setText(`\u{1F399} VoxCraft: ${text}`);

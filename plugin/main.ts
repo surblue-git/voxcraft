@@ -29,6 +29,10 @@ export default class VoxCraftPlugin extends Plugin {
     private pendingReconvert: { from: number; to: number } | null = null;
     private reconvertModal: ReconvertModal | null = null;
 
+    // 入力レベルメーター表示のスロットリング用。
+    private lastMeterAt = 0;
+    private transcribing = false;
+
     async onload(): Promise<void> {
         await this.loadSettings();
 
@@ -83,7 +87,14 @@ export default class VoxCraftPlugin extends Plugin {
         this.setStatus("接続中…");
         this.socket = new AsrSocket(this.settings.serverUrl, {
             onReady: () => this.setStatus("待機中… 話してください"),
-            onChunk: (text) => this.handleChunk(text),
+            onPartial: () => {
+                this.transcribing = true;
+                this.setStatus("認識中…");
+            },
+            onChunk: (text) => {
+                this.transcribing = false;
+                this.handleChunk(text);
+            },
             onReconvert: (msg) => this.handleReconvert(msg),
             onError: (m) => new Notice(`VoxCraft サーバーエラー: ${m}`),
             onClose: () => {
@@ -112,7 +123,10 @@ export default class VoxCraftPlugin extends Plugin {
             this.settings.symbolDictation
         );
 
-        this.recorder = new MicRecorder((pcm) => this.socket?.sendAudio(pcm));
+        this.recorder = new MicRecorder(
+            (pcm) => this.socket?.sendAudio(pcm),
+            (level) => this.showLevel(level)
+        );
         try {
             await this.recorder.start();
         } catch (e) {
@@ -321,6 +335,18 @@ export default class VoxCraftPlugin extends Plugin {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         const editor = view?.editor as (Editor & { cm?: EditorView }) | undefined;
         return editor?.cm ?? null;
+    }
+
+    // 入力レベルをステータスバーにメーター表示（音声を拾えているかの確認用）。
+    private showLevel(level: number): void {
+        if (!this.recording || this.transcribing) return;
+        const now = performance.now();
+        if (now - this.lastMeterAt < 100) return; // 約10fpsに間引く
+        this.lastMeterAt = now;
+        const segs = 10;
+        const filled = Math.max(0, Math.min(segs, Math.round(level * 40)));
+        const bar = "█".repeat(filled) + "░".repeat(segs - filled);
+        this.setStatus(`● 録音中 ${bar}`);
     }
 
     private setStatus(text: string): void {

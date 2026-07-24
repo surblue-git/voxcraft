@@ -39,14 +39,20 @@ app = FastAPI(title="VoxCraft ASR Server")
 
 @app.on_event("startup")
 def _startup() -> None:
-    print(f"[VoxCraft] loading model: {config.model} on {config.device} ...")
+    print(f"[VoxCraft] loading model: {config.model} (device={config.device}) ...")
     transcriber.load()
-    print("[VoxCraft] model ready.")
+    print(f"[VoxCraft] model ready on {transcriber.device}/{transcriber.compute} "
+          f"(beam={config.beam_size}).")
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"ready": transcriber.ready, "model": config.model}
+    return {
+        "ready": transcriber.ready,
+        "model": config.model,
+        "device": transcriber.device,
+        "compute": transcriber.compute,
+    }
 
 
 def _pcm16_to_float32(data: bytes) -> np.ndarray:
@@ -77,6 +83,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
     await ws.send_text(json.dumps({"type": "ready"}))
 
     async def emit_chunk(audio: np.ndarray, reason: str) -> None:
+        # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
+        await ws.send_text(json.dumps({"type": "partial", "reason": reason}))
         text = await _transcribe_chunk(audio)
         text = postprocess(text, strip_space=strip_space, symbol_dictation=symbols)
         if text:

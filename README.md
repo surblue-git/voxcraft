@@ -36,8 +36,17 @@ pip install -r requirements.txt
 .\run.ps1
 ```
 
-初回起動時にモデルを自動ダウンロード。GPUがあれば `$env:VOXCRAFT_DEVICE="cuda"; $env:VOXCRAFT_COMPUTE_TYPE="float16"`。
-動作確認: ブラウザで `http://localhost:8760/health` が `{"ready": true, ...}` を返せばOK。
+初回起動時にモデルを自動ダウンロード。
+動作確認: ブラウザで `http://localhost:8760/health` が `{"ready": true, "device": "...", ...}` を返せばOK。
+
+**GPU高速化（強く推奨）**: NVIDIA GPUがあれば以下でCPU比 約10倍速（RTF 2.1→0.2）。
+
+```powershell
+pip install -r requirements-gpu.txt
+```
+
+`device`/`compute_type` は自動判定（既定 `VOXCRAFT_DEVICE=auto`）。GPUがあれば `cuda + int8_float16` を選び、
+無ければ `cpu + int8` にフォールバックする。`/health` の `"device"` で実際の使用先を確認できる。
 
 ### 2. Obsidian プラグイン
 

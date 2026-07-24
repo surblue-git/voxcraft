@@ -13,6 +13,7 @@ export interface ServerMessage {
 
 export interface WsHandlers {
     onReady?: () => void;
+    onPartial?: () => void; // 発話検出→認識開始の合図
     onChunk?: (text: string) => void;
     onReconvert?: (msg: ServerMessage) => void;
     onError?: (message: string) => void;
@@ -76,6 +77,9 @@ export class AsrSocket {
         switch (msg.type) {
             case "ready":
                 this.handlers.onReady?.();
+                break;
+            case "partial":
+                this.handlers.onPartial?.();
                 break;
             case "chunk":
                 if (msg.text) this.handlers.onChunk?.(msg.text);

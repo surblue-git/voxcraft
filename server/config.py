@@ -22,11 +22,13 @@ class Config:
     # kotoba-whisper-v2.0 の faster-whisper(CTranslate2) 版。
     # 精度優先なら "large-v3"、速度優先なら "small" 等に差し替え可能。
     model: str = _env("VOXCRAFT_MODEL", "kotoba-tech/kotoba-whisper-v2.0-faster")
-    # "cpu" / "cuda"
-    device: str = _env("VOXCRAFT_DEVICE", "cpu")
-    # cpu なら "int8"、cuda なら "float16" が定番。
-    compute_type: str = _env("VOXCRAFT_COMPUTE_TYPE", "int8")
+    # "auto"（GPUがあれば cuda、無ければ cpu）/ "cpu" / "cuda"
+    device: str = _env("VOXCRAFT_DEVICE", "auto")
+    # "auto"（cuda→int8_float16 / cpu→int8）/ "int8" / "float16" / "int8_float16" ...
+    compute_type: str = _env("VOXCRAFT_COMPUTE_TYPE", "auto")
     language: str = _env("VOXCRAFT_LANG", "ja")
+    # デコードのビーム幅。1(貪欲)が最速、5が精度寄り。長文口述は1でも実用十分。
+    beam_size: int = int(_env("VOXCRAFT_BEAM_SIZE", "1"))
 
     # --- 音声フォーマット（クライアントと合わせる） ---
     sample_rate: int = int(_env("VOXCRAFT_SAMPLE_RATE", "16000"))

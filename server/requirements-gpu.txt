@@ -1,0 +1,13 @@
+# VoxCraft GPU 高速化（NVIDIA CUDA）。任意だが強く推奨。
+#
+#   pip install -r requirements-gpu.txt
+#
+# faster-whisper(CTranslate2) を GPU で動かすための CUDA12 ランタイム DLL。
+# これを入れると server は自動で cuda + int8_float16 を選び、CPU比 約10倍速になる
+# （例: GTX 1660 SUPER で RTF 2.1 → 0.2）。NVIDIA ドライバは別途必要。
+#
+# device/compute は自動判定（config.py の VOXCRAFT_DEVICE=auto）。
+# GPUが無い/初期化に失敗した場合は自動で CPU(int8) にフォールバックする。
+
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

@@ -5,6 +5,7 @@
 // モバイルで面倒なので、互換性重視で ScriptProcessorNode を使う（非推奨だが全環境で動く）。
 
 export type PcmHandler = (pcm16: ArrayBuffer) => void;
+export type LevelHandler = (level: number) => void; // 0..1 の入力レベル
 
 export class MicRecorder {
     private ctx: AudioContext | null = null;
@@ -12,10 +13,12 @@ export class MicRecorder {
     private source: MediaStreamAudioSourceNode | null = null;
     private processor: ScriptProcessorNode | null = null;
     private onPcm: PcmHandler;
+    private onLevel: LevelHandler | null;
     private targetRate: number;
 
-    constructor(onPcm: PcmHandler, targetRate = 16000) {
+    constructor(onPcm: PcmHandler, onLevel: LevelHandler | null = null, targetRate = 16000) {
         this.onPcm = onPcm;
+        this.onLevel = onLevel;
         this.targetRate = targetRate;
     }
 
@@ -42,6 +45,7 @@ export class MicRecorder {
 
         this.processor.onaudioprocess = (ev: AudioProcessingEvent) => {
             const input = ev.inputBuffer.getChannelData(0);
+            if (this.onLevel) this.onLevel(rms(input));
             const down = downsample(input, inputRate, this.targetRate);
             this.onPcm(floatToPcm16(down));
         };
@@ -74,6 +78,13 @@ export class MicRecorder {
             this.ctx = null;
         }
     }
+}
+
+// 入力ブロックの RMS を 0..1 目安に写像（メーター表示用）。
+function rms(input: Float32Array): number {
+    let sum = 0;
+    for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+    return Math.sqrt(sum / input.length);
 }
 
 // 線形補間による簡易ダウンサンプリング（48k/44.1k → 16k）。
