@@ -143,7 +143,18 @@ def _reload() -> None:
     _cache["reverse_items"] = reverse_items
 
 
-def _build_hotwords(custom_hotwords: list | None, items: list[tuple[str, str]], limit: int = 50) -> str:
+def _build_hotwords(
+    custom_hotwords: list | None,
+    items: list[tuple[str, str]],
+    limit: int = 50,
+    max_chars: int = 90,
+) -> str:
+    """認識ヒント語を組み立てる。
+
+    total が長すぎると kotoba-whisper が認識結果を丸ごと空にするため、総文字数を
+    安全域に収める（実測: 約120字超で全チャンク脱落。initial_prompt 分の余裕も見て
+    既定 90字上限）。先頭（＝重要語）から詰めて上限で打ち切る。
+    """
     vals, seen = [], set()
     if isinstance(custom_hotwords, list):
         for w in custom_hotwords:
@@ -160,7 +171,17 @@ def _build_hotwords(custom_hotwords: list | None, items: list[tuple[str, str]], 
                 break
         if len(vals) >= limit:
             break
-    return " ".join(vals)
+
+    # 総文字数の安全上限で打ち切る。
+    kept: list[str] = []
+    total = 0
+    for w in vals:
+        add = (1 if kept else 0) + len(w)  # スペース区切り分
+        if total + add > max_chars:
+            break
+        kept.append(w)
+        total += add
+    return " ".join(kept)
 
 
 def _refresh() -> None:

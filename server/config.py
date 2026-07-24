@@ -64,6 +64,11 @@ class Config:
     strip_ja_alnum_space: bool = _env("VOXCRAFT_STRIP_SPACE", "1") == "1"
     # 記号読み上げ（「まる」→「。」など）を有効化する。
     enable_symbol_dictation: bool = _env("VOXCRAFT_SYMBOLS", "1") == "1"
+    # 認識ヒント語(hotwords)を Whisper に渡すか。既定OFF。
+    # 辞書が育って hotwords が長くなると kotoba-whisper が認識結果を丸ごと空にする
+    # 不具合があるため（実測: hotwords 約120字超で全チャンクが脱落）。
+    # 用語の表記ゆれは replacements（後処理の文字列置換）で安全に矯正できる。
+    use_hotwords: bool = _env("VOXCRAFT_HOTWORDS", "0") == "1"
 
     # --- 再変換（変換戻し） ---
     # Google CGI API for Japanese Input を使う（無料・非公式・要オンライン）。

@@ -64,7 +64,9 @@ def _pcm16_to_float32(data: bytes) -> np.ndarray:
 
 async def _transcribe_chunk(audio: np.ndarray) -> str:
     """認識をスレッドプールで実行（イベントループを塞がない）。"""
-    return await asyncio.to_thread(transcriber.transcribe, audio, get_hotwords())
+    # hotwords は既定OFF（長いと kotoba-whisper が認識を空にするため。config 参照）。
+    hotwords = get_hotwords() if config.use_hotwords else None
+    return await asyncio.to_thread(transcriber.transcribe, audio, hotwords)
 
 
 @app.websocket("/ws")
