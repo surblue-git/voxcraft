@@ -17,6 +17,15 @@ import numpy as np
 
 from config import config
 
+# 丸ごと一致したら捨てる定番の幻覚（無音・BGM・吐息で頻出する決まり文句）。
+_HALLUCINATIONS = {
+    "はい", "はいはい", "はい。", "ん", "んー", "うん",
+    "ありがとうございました", "ありがとうございました。",
+    "ご視聴ありがとうございました", "ご視聴ありがとうございました。",
+    "おやすみなさい", "バイバイ", "はい、", "です。",
+    "チャンネル登録お願いします", "最後までご視聴いただきありがとうございます",
+}
+
 
 def _ensure_cuda_dll_dirs() -> None:
     """pip の nvidia-*-cu12 wheel に入った CUDA DLL を読み込めるようにする。
@@ -82,8 +91,12 @@ class Transcriber:
     def ready(self) -> bool:
         return self._model is not None
 
-    def transcribe(self, audio: np.ndarray) -> str:
-        """float32 16kHz モノラル音声を認識してテキストを返す。"""
+    def transcribe(self, audio: np.ndarray, hotwords: str | None = None) -> str:
+        """float32 16kHz モノラル音声を認識してテキストを返す。
+
+        吐息・無音由来の幻覚（「はい」等）を no_speech_prob / avg_logprob /
+        丸ごと一致ブロックリストで抑制する。
+        """
         if self._model is None:
             raise RuntimeError("model not loaded")
 
@@ -93,12 +106,26 @@ class Transcriber:
                 language=config.language,
                 task="transcribe",
                 initial_prompt=config.initial_prompt or None,
-                vad_filter=False,       # 区切りは自前 VAD で済ませている
+                hotwords=hotwords or None,
+                vad_filter=config.vad_filter,   # 内蔵VADで非発話部分を除去
                 condition_on_previous_text=False,  # 幻覚の連鎖を防ぐ
                 beam_size=config.beam_size,
             )
-            text = "".join(seg.text for seg in segments)
-        return text.strip()
+            kept: list[str] = []
+            for seg in segments:
+                nsp = getattr(seg, "no_speech_prob", 0.0) or 0.0
+                lp = getattr(seg, "avg_logprob", 0.0) or 0.0
+                if nsp > config.no_speech_threshold:
+                    continue  # 吐息・無音の幻覚
+                if lp < config.logprob_threshold:
+                    continue  # 低確信
+                kept.append(seg.text)
+            text = "".join(kept).strip()
+
+        # 丸ごと定番の幻覚なら捨てる（本文中に混ざった場合は残す）。
+        if text in _HALLUCINATIONS:
+            return ""
+        return text
 
 
 transcriber = Transcriber()

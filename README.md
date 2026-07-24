@@ -121,14 +121,26 @@ Whisper が自動で句読点を付けるほか、明示的にも入れられる
 
 キーは**カタカナ推奨**（誤爆が少ない）。よく使う用語・人名・社名を足していくほど賢くなる。
 
+**コツ:**
+- JSONは末尾カンマ・`//`コメントも寛容に読むが、壊れていると**サーバーのコンソールに警告**を出す（無言で無効化しない）。
+- 認識が音を落とす／全角化するケース（例「ATOK」→全角「Ａトック」）は、全角英数を自動で半角化してから辞書照合する。**実際にWhisperがカタカナでどう出すか**を見て、その綴りをキーに足すのが確実（例 `"Aトック": "ATOK"`）。
+- 音節が欠ける（例「ウィンドウズ」→「ウィンドウ」）のは認識側の限界。辞書の英語表記はヒント語(hotwords)としてWhisperにもフィードバックして認識を補助しているが、改善しなければ欠けた綴り自体をキーに登録する。
+
+### 吐息が「はい」等になる（幻覚）対策
+
+無音・吐息をWhisperが「はい」等と誤認識する現象は、内蔵VAD＋無音確率で抑制済み。強すぎ/弱すぎる場合は下表で調整。
+
 ## 主な設定（環境変数, `server/config.py`）
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
 | `VOXCRAFT_MODEL` | kotoba-whisper-v2.0-faster | 認識モデル。`large-v3` / `small` 等に変更可 |
-| `VOXCRAFT_DEVICE` | cpu | `cuda` でGPU |
+| `VOXCRAFT_DEVICE` | auto | `auto`(GPU優先) / `cuda` / `cpu` |
+| `VOXCRAFT_COMPUTE_TYPE` | auto | `auto` / `int8_float16`(GPU) / `int8`(CPU) |
+| `VOXCRAFT_BEAM_SIZE` | 1 | 1=最速・5=精度寄り |
+| `VOXCRAFT_VAD_FILTER` | 1 | 内蔵VADで非発話部分を除去（幻覚対策） |
+| `VOXCRAFT_NO_SPEECH_THRESHOLD` | 0.6 | これ超の無音確率セグメントを捨てる（上げると緩く） |
 | `VOXCRAFT_SILENCE_SEC` | 0.8 | 息継ぎ確定の無音長（秒） |
-| `VOXCRAFT_MAX_CHUNK_SEC` | 12.0 | チャンク強制確定の上限（秒） |
 | `VOXCRAFT_STRIP_SPACE` | 1 | 日本語/英数字間スペース除去 |
 | `VOXCRAFT_SYMBOLS` | 1 | 記号読み上げ変換 |
 | `VOXCRAFT_GOOGLE_CGI` | 1 | 変換戻しにGoogle CGI APIを使う |

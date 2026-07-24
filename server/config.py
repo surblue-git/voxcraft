@@ -30,6 +30,14 @@ class Config:
     # デコードのビーム幅。1(貪欲)が最速、5が精度寄り。長文口述は1でも実用十分。
     beam_size: int = int(_env("VOXCRAFT_BEAM_SIZE", "1"))
 
+    # --- 幻覚（吐息・無音を「はい」等と誤認識）対策 ---
+    # faster-whisper 内蔵VADで、チャンク内の非発話部分を除去する。
+    vad_filter: bool = _env("VOXCRAFT_VAD_FILTER", "1") == "1"
+    # セグメントの no_speech_prob がこれを超えたら捨てる（吐息の幻覚除去）。
+    no_speech_threshold: float = float(_env("VOXCRAFT_NO_SPEECH_THRESHOLD", "0.6"))
+    # avg_logprob がこれ未満の低確信セグメントは捨てる。
+    logprob_threshold: float = float(_env("VOXCRAFT_LOGPROB_THRESHOLD", "-1.0"))
+
     # --- 音声フォーマット（クライアントと合わせる） ---
     sample_rate: int = int(_env("VOXCRAFT_SAMPLE_RATE", "16000"))
 

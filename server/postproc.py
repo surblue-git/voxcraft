@@ -58,6 +58,16 @@ _STANDALONE: list[tuple[tuple[str, ...], str]] = [
 ]
 
 
+# 全角英数字・記号の一部 → 半角。「Ａトック」→「Aトック」等を辞書で拾えるように。
+_FW_ASCII = {c: chr(c - 0xFEE0) for c in range(0xFF01, 0xFF5F)}
+_FW_ASCII[0x3000] = ord(" ")  # 全角スペース→半角
+
+
+def normalize_fullwidth_ascii(text: str) -> str:
+    """全角の英数字・記号を半角へ正規化する（日本語のかな漢字はそのまま）。"""
+    return text.translate(_FW_ASCII)
+
+
 def strip_ja_alnum_space(text: str) -> str:
     """日本語と英数字の間の半角スペースだけを除去する。
 
@@ -131,6 +141,8 @@ def postprocess(
     result = text.strip()
     if symbol_dictation:
         result = apply_symbol_dictation(result)
+    # 辞書適用の前に全角英数を半角化（「Ａトック」→「Aトック」を拾えるように）。
+    result = normalize_fullwidth_ascii(result)
     if replacements:
         result = apply_user_dict(result, replacements)
     if strip_space:

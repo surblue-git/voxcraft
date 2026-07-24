@@ -53,6 +53,13 @@ def test_user_dict_english():
     assert out == "WindowsとAndroidを使う"
 
 
+def test_fullwidth_normalized_then_dict():
+    # Whisperが「Ａトック」(全角A) と出しても、半角化して辞書「Aトック」で拾える。
+    reps = [("Aトック", "ATOK")]
+    out = postprocess("Ａトックを使う", replacements=reps, strip_space=True)
+    assert out == "ATOKを使う"
+
+
 def test_collapse_duplicate_punctuation():
     out = postprocess("はい。。そうです", strip_space=True, symbol_dictation=False)
     assert out == "はい。そうです"

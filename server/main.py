@@ -32,7 +32,7 @@ from asr import transcriber
 from config import config
 from postproc import postprocess
 from reconvert import reconvert
-from userdict import get_replacements
+from userdict import get_hotwords, get_replacements
 from vad import VadChunker
 
 app = FastAPI(title="VoxCraft ASR Server")
@@ -64,7 +64,7 @@ def _pcm16_to_float32(data: bytes) -> np.ndarray:
 
 async def _transcribe_chunk(audio: np.ndarray) -> str:
     """認識をスレッドプールで実行（イベントループを塞がない）。"""
-    return await asyncio.to_thread(transcriber.transcribe, audio)
+    return await asyncio.to_thread(transcriber.transcribe, audio, get_hotwords())
 
 
 @app.websocket("/ws")
