@@ -116,11 +116,13 @@ def test_reconvert_reverse_userdict():
 
 def test_strip_trailing_hallucinations():
     from postproc import postprocess
+    # 句読点なしで癒着した定型句は幻覚とみなして除去する。
     out1 = postprocess("予定されているところでございますありがとうございます", strip_space=True)
     assert out1 == "予定されているところでございます"
 
+    # 句読点で正しく区切られた締めの挨拶は本物の発話なので残す（安全側）。
     out2 = postprocess("以上です。ありがとうございました。", strip_space=True)
-    assert out2 == "以上です。"
+    assert out2 == "以上です。ありがとうございました。"
 
 
 def _run_all():
