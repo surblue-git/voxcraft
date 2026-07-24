@@ -49,6 +49,25 @@ def _ensure_cuda_dll_dirs() -> None:
         os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
 
 
+_MODEL_ALIASES = {
+    "kotoba": "kotoba-tech/kotoba-whisper-v2.0-faster",
+    "kotoba-v2": "kotoba-tech/kotoba-whisper-v2.0-faster",
+    "kotoba-whisper-v2.0-faster": "kotoba-tech/kotoba-whisper-v2.0-faster",
+    "turbo": "Deepdml/faster-whisper-large-v3-turbo",
+    "large-v3-turbo": "Deepdml/faster-whisper-large-v3-turbo",
+    "v3-turbo": "Deepdml/faster-whisper-large-v3-turbo",
+    "large-v3": "Systran/faster-whisper-large-v3",
+    "medium": "Systran/faster-whisper-medium",
+    "small": "Systran/faster-whisper-small",
+}
+
+
+def resolve_model_name(name: str) -> str:
+    """設定名・略称（例: turbo, v3-turbo, kotoba）を HuggingFace ID に解決する。"""
+    cleaned = name.strip()
+    return _MODEL_ALIASES.get(cleaned.lower(), cleaned)
+
+
 def _resolve_device_compute() -> tuple[str, str]:
     """config の device/compute_type を実際の値に解決する（auto対応）。"""
     device = config.device
@@ -71,31 +90,34 @@ class Transcriber:
         self._lock = threading.Lock()  # faster-whisper は同時呼び出し非対応
         self.device = "?"
         self.compute = "?"
+        self.resolved_model = "?"
 
     def load(self) -> None:
         """モデルをロードする（起動時に呼ぶ）。"""
         _ensure_cuda_dll_dirs()
         from faster_whisper import WhisperModel  # 遅延インポート
 
+        target_model = resolve_model_name(config.model)
+        self.resolved_model = target_model
         device, compute = _resolve_device_compute()
         kwargs = {"device": device, "compute_type": compute}
         if config.flash_attention and device == "cuda":
             kwargs["flash_attention"] = True
 
         try:
-            self._model = WhisperModel(config.model, **kwargs)
+            self._model = WhisperModel(target_model, **kwargs)
         except Exception as exc:  # GPU 初期化失敗（または flash_attention 非対応）時はフォールバック
             if "flash_attention" in kwargs:
                 kwargs.pop("flash_attention")
                 try:
-                    self._model = WhisperModel(config.model, **kwargs)
+                    self._model = WhisperModel(target_model, **kwargs)
                 except Exception as inner_exc:
                     exc = inner_exc
                     self._model = None
             if self._model is None:
                 print(f"[VoxCraft] {device}/{compute} 初期化失敗（{str(exc)[:120]}）。CPUに切替。")
                 device, compute = "cpu", "int8"
-                self._model = WhisperModel(config.model, device=device, compute_type=compute)
+                self._model = WhisperModel(target_model, device=device, compute_type=compute)
 
         self.device = device
         self.compute = compute

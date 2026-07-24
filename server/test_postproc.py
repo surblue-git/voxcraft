@@ -114,6 +114,15 @@ def test_reconvert_reverse_userdict():
     assert "じょうぷらほう" in hira
 
 
+def test_strip_trailing_hallucinations():
+    from postproc import postprocess
+    out1 = postprocess("予定されているところでございますありがとうございます", strip_space=True)
+    assert out1 == "予定されているところでございます"
+
+    out2 = postprocess("以上です。ありがとうございました。", strip_space=True)
+    assert out2 == "以上です。"
+
+
 def _run_all():
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failed = 0

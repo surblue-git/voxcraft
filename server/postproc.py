@@ -127,6 +127,21 @@ def apply_user_dict(text: str, replacements: list[tuple[str, str]]) -> str:
     return text
 
 
+# 文末に勝手に挿入されがちな幻覚パターン（「〜ございますありがとうございます」等）
+_TRAILING_HALLUCINATIONS = [
+    re.compile(r"(?<=ございます)ありがとうございます[。、]?$"),
+    re.compile(r"(?<=ございます)ご視聴ありがとうございました[。、]?$"),
+    re.compile(r"(?<=[。、])\s*(?:ご視聴)?ありがとうございました[。、]?$"),
+]
+
+
+def strip_trailing_hallucinations(text: str) -> str:
+    """文末に勝手に付加される「ありがとうございます」等の定型幻覚を除去する。"""
+    for pattern in _TRAILING_HALLUCINATIONS:
+        text = pattern.sub("", text)
+    return text.strip()
+
+
 def collapse_symbols(text: str) -> str:
     """重複した句読点・空白を整理する。"""
     text = re.sub(r"、{2,}", "、", text)
@@ -147,6 +162,7 @@ def postprocess(
     if not text:
         return text
     result = text.strip()
+    result = strip_trailing_hallucinations(result)
     if symbol_dictation:
         result = apply_symbol_dictation(result, symbols)
     # 辞書適用の前に全角英数を半角化（「Ａトック」→「Aトック」を拾えるように）。
