@@ -47,6 +47,24 @@ def test_symbol_no_false_positive_midword():
     assert postprocess("それはかっこいい", symbol_dictation=True) == "それはかっこいい"
 
 
+def test_symbol_standalone_homophones():
+    # 単独で言った記号語をWhisperが同音異義漢字にしても拾う（実データより）。
+    assert postprocess("開業", symbol_dictation=True) == "\n"   # かいぎょう
+    assert postprocess("会場", symbol_dictation=True) == "\n"   # かいぎょう
+    assert postprocess("回教", symbol_dictation=True) == "\n"   # かいぎょう
+    assert postprocess("点", symbol_dictation=True) == "、"     # てん
+    assert postprocess("丸", symbol_dictation=True) == "。"     # まる
+    assert postprocess("終わる", symbol_dictation=True) == "。"  # まる
+
+
+def test_symbol_homophone_not_standalone_kept():
+    # 単独でなければ同音異義語は本物の語として温存（誤爆しない）。
+    assert postprocess("会場は広い", symbol_dictation=True) == "会場は広い"
+    assert postprocess("要点をまとめる", symbol_dictation=True) == "要点をまとめる"
+    # 文中に埋もれた「点」は安全のため変換しない（本物の点を壊さないため）。
+    assert postprocess("公表し、点、広く", symbol_dictation=True) == "公表し、点、広く"
+
+
 def test_user_dict_english():
     reps = [("ウィンドウズ", "Windows"), ("アンドロイド", "Android")]
     out = postprocess("ウィンドウズとアンドロイドを使う", replacements=reps, strip_space=True)
