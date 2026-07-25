@@ -26,13 +26,22 @@ import asyncio
 import json
 
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
 from asr import transcriber
 from config import config
 from postproc import postprocess
+from punctuate import available as punctuation_available
 from reconvert import reconvert
-from userdict import get_error, get_hotwords, get_replacements, get_symbols
+from userdict import (
+    DictValidationError,
+    get_error,
+    get_hotwords,
+    get_replacements,
+    get_symbols,
+    read_raw,
+    write_raw,
+)
 from vad import VadChunker
 
 app = FastAPI(title="VoxCraft ASR Server")
@@ -51,9 +60,36 @@ def health() -> dict:
     return {
         "ready": transcriber.ready,
         "model": config.model,
+        "resolvedModel": transcriber.resolved_model,
         "device": transcriber.device,
         "compute": transcriber.compute,
+        "beamSize": config.beam_size,
+        "autoPunctuation": config.enable_auto_punctuation and punctuation_available(),
+        "silenceSec": config.silence_sec,
+        "dictError": get_error(),
     }
+
+
+@app.get("/dict")
+def dict_get() -> dict:
+    """ユーザー辞書を返す（プラグインの編集UI用）。"""
+    return read_raw()
+
+
+@app.post("/dict")
+async def dict_post(payload: dict = Body(...)) -> dict:
+    """ユーザー辞書を保存する（検証あり）。保存後は自動でリロードされる。
+
+    サーバーは認証を持たないため、文字列マップであること・件数と長さの上限を
+    厳格に検証してからでないと書き込まない。
+    """
+    try:
+        counts = write_raw(payload.get("replacements", {}), payload.get("symbols", {}))
+    except DictValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"保存できません: {exc}") from exc
+    return {"ok": True, **counts}
 
 
 def _pcm16_to_float32(data: bytes) -> np.ndarray:

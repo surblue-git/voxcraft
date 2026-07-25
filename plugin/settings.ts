@@ -1,5 +1,6 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type VoxCraftPlugin from "./main";
+import { DictModal, fetchHealth, httpBase } from "./dict";
 
 export interface VoxEndpoint {
     label: string; // 表示名（例:「自宅LAN」「Tailscale」）
@@ -152,6 +153,72 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                     this.display();
                 })
         );
+
+        // ---- サーバーの状態確認 ----
+        containerEl.createEl("h3", { text: "サーバーの状態" });
+
+        const statusEl = containerEl.createEl("p", {
+            text: "「接続確認」を押すとサーバーの稼働状況を表示します。",
+            cls: "setting-item-description",
+        });
+
+        new Setting(containerEl)
+            .setName("接続確認")
+            .setDesc("選択中の接続先に問い合わせて、モデル・デバイス・設定を表示する。")
+            .addButton((b) =>
+                b.setButtonText("接続確認").onClick(async () => {
+                    const urls = resolveUrls(this.plugin.settings);
+                    if (urls.length === 0) {
+                        statusEl.setText("接続先が設定されていません。");
+                        return;
+                    }
+                    statusEl.setText("確認中…");
+                    const lines: string[] = [];
+                    for (const url of urls) {
+                        try {
+                            const h = await fetchHealth(url);
+                            const punct = h.autoPunctuation ? "自動句読点ON" : "自動句読点OFF";
+                            lines.push(
+                                `✅ ${labelForUrl(this.plugin.settings, url)} (${httpBase(url)}) — ` +
+                                `${h.resolvedModel ?? h.model} / ${h.device}・${h.compute} / ` +
+                                `beam=${h.beamSize ?? "?"} / ${punct}` +
+                                (h.dictError ? ` / ⚠ 辞書エラー: ${h.dictError}` : "")
+                            );
+                        } catch (e) {
+                            lines.push(
+                                `❌ ${labelForUrl(this.plugin.settings, url)} (${httpBase(url)}) — ` +
+                                `応答なし（${e instanceof Error ? e.message : e}）`
+                            );
+                        }
+                    }
+                    statusEl.setText(lines.join("\n"));
+                    statusEl.style.whiteSpace = "pre-wrap";
+                })
+            );
+
+        // ---- ユーザー辞書 ----
+        containerEl.createEl("h3", { text: "ユーザー辞書" });
+        containerEl.createEl("p", {
+            text:
+                "誤変換を望む表記に置き換える。サーバー上の userdict.json をここから編集でき、" +
+                "保存すると再起動なしで反映される（Androidからも編集可）。",
+            cls: "setting-item-description",
+        });
+
+        new Setting(containerEl)
+            .setName("辞書を編集")
+            .setDesc("置換（replacements）と記号語（symbols）の一覧を開く。")
+            .addButton((b) =>
+                b.setButtonText("辞書を開く").onClick(() => {
+                    const urls = resolveUrls(this.plugin.settings);
+                    const url = this.plugin.activeUrl() ?? urls[0];
+                    if (!url) {
+                        new Notice("VoxCraft: 接続先が設定されていません");
+                        return;
+                    }
+                    new DictModal(this.app, url).open();
+                })
+            );
 
         // ---- 認識・整形オプション ----
         containerEl.createEl("h3", { text: "認識・整形" });

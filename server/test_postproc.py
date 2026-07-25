@@ -174,6 +174,32 @@ def test_vad_carries_tail_instead_of_discarding():
     assert emitted == pushed, (emitted, pushed)
 
 
+def test_dict_api_validation():
+    """UIからの辞書保存は、文字列マップ・件数・長さ・文字コードを検証する。"""
+    from userdict import (
+        DictValidationError, MAX_ENTRIES, MAX_KEY_LEN, MAX_VALUE_LEN, _validate_map,
+    )
+
+    bad = [
+        ("非文字列", {"a": 123}),
+        ("マップでない", ["x"]),
+        ("キーが長い", {"x" * (MAX_KEY_LEN + 1): "y"}),
+        ("値が長い", {"x": "y" * (MAX_VALUE_LEN + 1)}),
+        ("件数超過", {str(i): "v" for i in range(MAX_ENTRIES + 1)}),
+        ("保存不能な文字", {"\ud881": "y"}),
+    ]
+    for label, obj in bad:
+        try:
+            _validate_map(obj, "replacements")
+        except DictValidationError:
+            continue
+        raise AssertionError(f"{label} が拒否されなかった")
+
+    # 正常系: 空キーは捨て、値はそのまま通る。
+    ok = _validate_map({"収集説明": "趣旨説明", "  ": "x", " 協裁 ": "共催"}, "replacements")
+    assert ok == {"収集説明": "趣旨説明", "協裁": "共催"}, ok
+
+
 def _run_all():
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failed = 0

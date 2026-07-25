@@ -248,3 +248,99 @@ def get_error() -> str | None:
     """辞書が読めていない場合のエラー文字列（正常時は None）。"""
     _refresh()
     return _cache["error"]
+
+
+# --- 編集API（プラグインのUIから読み書きする） -------------------------------
+#
+# サーバーは 0.0.0.0 で待ち受け、認証を持たない。書き込みを受ける以上、
+# 「文字列マップだけ・件数と長さに上限」を厳格に検証してから保存する。
+
+MAX_ENTRIES = 500      # replacements / symbols それぞれの最大件数
+MAX_KEY_LEN = 64       # キー1件の最大文字数
+MAX_VALUE_LEN = 128    # 値1件の最大文字数
+
+
+class DictValidationError(ValueError):
+    """UIから渡された辞書が制限に反する場合に送出する。"""
+
+
+def read_raw() -> dict:
+    """UI表示用に replacements / symbols をそのまま返す（記号は原文表記のまま）。"""
+    _ensure_file()
+    try:
+        with open(_PATH, encoding="utf-8") as f:
+            data = _parse(f.read())
+    except Exception:  # noqa: BLE001 - 壊れていても UI は開けるようにする
+        data = {}
+    reps = data.get("replacements") or {}
+    syms = data.get("symbols") or {}
+    return {
+        "replacements": {k: v for k, v in reps.items()
+                         if isinstance(k, str) and isinstance(v, str)},
+        "symbols": {k: v for k, v in syms.items()
+                    if isinstance(k, str) and isinstance(v, str)},
+        "path": _PATH,
+        "error": get_error(),
+    }
+
+
+def _validate_map(obj, name: str) -> dict[str, str]:
+    if not isinstance(obj, dict):
+        raise DictValidationError(f"{name} はオブジェクトである必要があります")
+    if len(obj) > MAX_ENTRIES:
+        raise DictValidationError(f"{name} の件数が上限（{MAX_ENTRIES}）を超えています: {len(obj)}")
+    out: dict[str, str] = {}
+    for k, v in obj.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise DictValidationError(f"{name} のキーと値は文字列である必要があります")
+        key = k.strip()
+        if not key:
+            continue  # 空キーは黙って捨てる（UIの空行）
+        if len(key) > MAX_KEY_LEN:
+            raise DictValidationError(f"{name} のキーが長すぎます（{MAX_KEY_LEN}文字まで）: {key[:20]}…")
+        if len(v) > MAX_VALUE_LEN:
+            raise DictValidationError(f"{name} の値が長すぎます（{MAX_VALUE_LEN}文字まで）: {v[:20]}…")
+        # UTF-8 にできない文字（孤立サロゲート等）は保存時に例外になるので先に弾く。
+        for s in (key, v):
+            try:
+                s.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise DictValidationError(f"{name} に保存できない文字が含まれています") from exc
+        out[key] = v
+    return out
+
+
+def write_raw(replacements, symbols) -> dict:
+    """UIから受け取った辞書を検証して保存する。他のキー（hotwords等）は保持する。"""
+    reps = _validate_map(replacements, "replacements")
+    syms = _validate_map(symbols, "symbols")
+
+    _ensure_file()
+    try:
+        with open(_PATH, encoding="utf-8") as f:
+            data = _parse(f.read())
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:  # noqa: BLE001 - 壊れていたら既定から作り直す
+        data = dict(_DEFAULTS)
+
+    data["replacements"] = reps
+    data["symbols"] = syms
+
+    # 一時ファイル経由で置き換え、書き込み途中の破損を避ける。
+    # 途中で失敗しても本体は無傷のまま。書きかけの一時ファイルは残さない。
+    tmp = _PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _PATH)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+    with _lock:
+        _cache["mtime"] = None  # 次の参照で確実に読み直す
+    return {"replacements": len(reps), "symbols": len(syms)}

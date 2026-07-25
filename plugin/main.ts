@@ -3,6 +3,7 @@ import { EditorView } from "@codemirror/view";
 
 import { MicRecorder } from "./audio";
 import { parseCommand } from "./commands";
+import { DictModal } from "./dict";
 import { ReconvertModal } from "./suggest";
 import {
     AUTO,
@@ -74,6 +75,11 @@ export default class VoxCraftPlugin extends Plugin {
             id: "select-endpoint",
             name: "接続先を選択",
             callback: () => this.openEndpointMenu(),
+        });
+        this.addCommand({
+            id: "edit-userdict",
+            name: "ユーザー辞書を編集",
+            callback: () => this.openDictModal(),
         });
 
         this.addSettingTab(new VoxCraftSettingTab(this.app, this));
@@ -406,6 +412,20 @@ export default class VoxCraftPlugin extends Plugin {
         await this.saveSettings();
         const label = sel === AUTO ? "自動（つながる方）" : labelForUrl(this.settings, sel);
         new Notice(`VoxCraft: 接続先を「${label}」にしました。`);
+    }
+
+    // 現在つながっている接続先（未接続なら設定上の第一候補）。辞書APIの宛先に使う。
+    activeUrl(): string | null {
+        return this.socket?.activeUrl ?? resolveUrls(this.settings)[0] ?? null;
+    }
+
+    private openDictModal(): void {
+        const url = this.activeUrl();
+        if (!url) {
+            new Notice("VoxCraft: 接続先が設定されていません");
+            return;
+        }
+        new DictModal(this.app, url).open();
     }
 
     // ---- ユーティリティ ----
