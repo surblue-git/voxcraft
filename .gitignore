@@ -12,3 +12,6 @@ server/__pycache__/
 # Models / caches
 server/models/
 .cache/
+
+# 自動起動時のサーバーログ
+server/server.log

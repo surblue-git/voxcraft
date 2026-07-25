@@ -39,6 +39,25 @@ pip install -r requirements.txt
 
 初回起動時にモデルを自動ダウンロード。
 動作確認: ブラウザで `http://localhost:8760/health` が `{"ready": true, "device": "...", ...}` を返せばOK。
+Obsidian側からは「設定 → サーバーの状態 → 接続確認」でも確認できる。
+
+#### ログオン時に自動起動する（推奨）
+
+毎回手で起動しなくて済むように、Windowsのスタートアップに登録できる。管理者権限は不要で、
+スタートアップフォルダにショートカットを置くだけ（システム設定は変更しない）。
+
+```powershell
+cd server
+.\install-autostart.ps1            # 登録（次回ログオンから有効）
+.\install-autostart.ps1 -Status    # 登録状況とサーバーの稼働状況を表示
+.\install-autostart.ps1 -Uninstall # 解除
+```
+
+- 今すぐ起動したいときは `autostart.vbs` をダブルクリック（コンソールを出さずに常駐する）。
+- ログは `server/server.log`（起動のたびに上書きするので際限なく太らない）。
+- 既に起動していれば何もしないので、二重起動でポートを奪い合うことはない。
+- 環境変数で設定を変えたい場合は、ログオン時にも効くようユーザー環境変数にする
+  （例 `setx VOXCRAFT_MODEL v3-turbo`）。
 
 **GPU高速化（強く推奨）**: NVIDIA GPUがあれば以下でCPU比 約10倍速（RTF 2.1→0.2）。
 
