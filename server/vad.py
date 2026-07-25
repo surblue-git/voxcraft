@@ -95,10 +95,13 @@ class VadChunker:
         min_speech_sec: float = 0.3,
         vad_threshold: float = 0.5,
         speech_pad_sec: float = 0.2,
+        maxlen_search_sec: float = 1.5,
     ):
         self._sr = sample_rate
         self._silence_frames = max(1, int(silence_sec * sample_rate / _FRAME))
         self._pad_frames = max(1, int(speech_pad_sec * sample_rate / _FRAME))
+        # 強制確定のとき、どれだけ遡って「いちばん静かな位置」を探すか。
+        self._maxlen_search_frames = max(1, int(maxlen_search_sec * sample_rate / _FRAME))
         self._max_samples = int(max_chunk_sec * sample_rate)
         self._min_samples = int(min_speech_sec * sample_rate)
         self._detector = build_detector(sample_rate, vad_threshold)
@@ -168,13 +171,17 @@ class VadChunker:
             self._reset_chunk()
             return None
         # 無音確定時は、最後の発話フレーム + パディング分だけに切り詰めて余分な長無音をカットする。
+        # 強制確定（max_len）は「無音でない場所で切る」ことになるので、直近のいちばん静かな
+        # 位置まで戻して切る。原稿読み上げのように息継ぎが短い話し方では全境界がここを通るため、
+        # 語の途中で断ち切るとその語が壊れる。
         carry: list[np.ndarray] = []
+        keep_count = len(self._buf)
         if reason == "silence" and self._last_speech_idx > 0:
             keep_count = min(len(self._buf), self._last_speech_idx + self._pad_frames)
-            audio_buf = self._buf[:keep_count]
-            carry = self._buf[keep_count:]
-        else:
-            audio_buf = self._buf
+        elif reason == "max_len":
+            keep_count = self._quietest_cut()
+        audio_buf = self._buf[:keep_count]
+        carry = self._buf[keep_count:]
 
         audio = np.concatenate(audio_buf)
         start = self._buf_start
@@ -190,6 +197,27 @@ class VadChunker:
             self._buf_start = end
         self._detector.reset()
         return Chunk(audio=audio, reason=reason, start=start, end=end)
+
+    def _quietest_cut(self) -> int:
+        """強制確定の切れ目を、直近でいちばん音量の低いフレーム境界に寄せる。
+
+        戻り値は前チャンクに残すフレーム数。残りは次チャンクへ繰り越されるので、
+        音声そのものは一切失われない。
+        """
+        n = len(self._buf)
+        win = min(self._maxlen_search_frames, n - 1)
+        if win <= 0:
+            return n
+        best_idx = n - 1
+        best_rms = float("inf")
+        for i in range(n - win, n):
+            frame = self._buf[i]
+            rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
+            if rms < best_rms:
+                best_rms = rms
+                best_idx = i
+        # いちばん静かなフレームは前チャンクの末尾として残し、その次から繰り越す。
+        return min(n, best_idx + 1)
 
     def _reset_chunk(self) -> None:
         self._buf = []

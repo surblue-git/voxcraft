@@ -154,11 +154,14 @@ def _build_chunker(mode: str) -> VadChunker:
             vad_threshold=config.vad_threshold,
             speech_pad_sec=config.speech_pad_sec,
         )
-    # 文字起こしは切れ目なく喋り続ける音声が相手。長めに取り、語尾を厚く残す。
+    # 文字起こしは切れ目なく喋り続ける音声が相手。
+    # 原稿の読み上げは息継ぎが短く、無音を長く待つと強制確定でしか切れなくなる。
+    # 強制確定は語の途中を断ち切るので、短い息継ぎでも拾える側に寄せた方が
+    # 待ち時間も精度も良くなる。語尾は口述より厚めに残す。
     return VadChunker(
         sample_rate=config.sample_rate,
-        silence_sec=max(config.silence_sec, 0.7),
-        max_chunk_sec=max(config.max_chunk_sec, 20.0),
+        silence_sec=min(config.silence_sec, 0.35),
+        max_chunk_sec=min(config.max_chunk_sec, 12.0),
         min_speech_sec=0.1,
         vad_threshold=config.vad_threshold,
         speech_pad_sec=max(config.speech_pad_sec, 0.5),
@@ -203,6 +206,26 @@ async def ws_endpoint(ws: WebSocket) -> None:
             msg["dropped"] = result.dropped
         await ws.send_text(json.dumps(msg))
 
+    # 認識は受信ループから切り離してキューで回す。
+    # 直列に await すると、認識中（数秒）は ws.receive() が呼ばれず音声が溜まり、
+    # 終わった瞬間にまとめて流れ込む＝結果が塊で出る。キューにすれば受信は止まらない。
+    # 認識自体はモデルのロックで直列化されるため、ワーカーは1本で足りる（順序も保たれる）。
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def worker() -> None:
+        while True:
+            item = await queue.get()
+            try:
+                if item is None:
+                    return
+                await emit_chunk(*item)
+            except Exception as exc:  # noqa: BLE001 - 1チャンクの失敗で全体を止めない
+                print(f"[VoxCraft] チャンクの認識に失敗: {exc}")
+            finally:
+                queue.task_done()
+
+    worker_task = asyncio.create_task(worker())
+
     try:
         while True:
             msg = await ws.receive()
@@ -218,7 +241,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if session is not None:
                     session.append(pcm)
                 for chunk in chunker.push(pcm):
-                    await emit_chunk(chunk.audio, chunk.reason, chunk.start, chunk.end)
+                    queue.put_nowait((chunk.audio, chunk.reason, chunk.start, chunk.end))
                 continue
 
             # --- 制御コマンド（テキスト JSON） ---
@@ -256,7 +279,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 elif ctype == "stop":
                     tail = chunker.flush()
                     if tail is not None:
-                        await emit_chunk(tail.audio, tail.reason, tail.start, tail.end)
+                        queue.put_nowait((tail.audio, tail.reason, tail.start, tail.end))
+                    # 溜まっている分を全部出し切ってから停止を通知する。
+                    await queue.join()
                     await ws.send_text(json.dumps({"type": "stopped"}))
 
                 elif ctype == "reconvert":
@@ -271,6 +296,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        worker_task.cancel()
         # 録音は必ず閉じる（異常終了しても、そこまでの音声は再認識に使える）。
         if session is not None:
             session.close()
