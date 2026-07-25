@@ -105,6 +105,7 @@ class VadChunker:
         self._has_speech = False
         self._last_speech_idx = 0
         self._cur_len = 0
+        self._carried = 0  # 前チャンクから繰り越した無音の長さ（最小長判定から除外する）
 
     def push(self, pcm: np.ndarray) -> list[Chunk]:
         """float32 音声ブロックを流し込み、確定したチャンクのリストを返す。"""
@@ -149,18 +150,29 @@ class VadChunker:
         return self._finalize("silence")
 
     def _finalize(self, reason: str) -> Chunk | None:
-        if not self._buf or not self._has_speech or self._cur_len < self._min_samples:
+        # 繰り越した無音は「発話の長さ」に数えない（ノイズ判定を繰り越し前と同じ厳しさに保つ）。
+        own_len = self._cur_len - self._carried
+        if not self._buf or not self._has_speech or own_len < self._min_samples:
             self._reset_chunk()
             return None
         # 無音確定時は、最後の発話フレーム + パディング分だけに切り詰めて余分な長無音をカットする。
+        carry: list[np.ndarray] = []
         if reason == "silence" and self._last_speech_idx > 0:
             keep_count = min(len(self._buf), self._last_speech_idx + self._pad_frames)
             audio_buf = self._buf[:keep_count]
+            carry = self._buf[keep_count:]
         else:
             audio_buf = self._buf
 
         audio = np.concatenate(audio_buf)
         self._reset_chunk()
+        # 切り詰めた末尾は捨てずに次チャンクへ繰り越す。
+        # VADが小声・語尾・フィラー（「ま、」等）を無音と誤判定した場合でも、
+        # そこに実音声があれば次のチャンクに含まれるので発話を取りこぼさない。
+        if carry:
+            self._buf = list(carry)
+            self._cur_len = sum(len(f) for f in carry)
+            self._carried = self._cur_len
         self._detector.reset()
         return Chunk(audio=audio, reason=reason)
 
@@ -170,3 +182,4 @@ class VadChunker:
         self._has_speech = False
         self._last_speech_idx = 0
         self._cur_len = 0
+        self._carried = 0

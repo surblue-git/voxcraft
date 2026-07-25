@@ -4,11 +4,9 @@
 #   pip install -r requirements-extra.txt
 #
 # - silero-vad + torch: 息継ぎ検出の精度向上（無いとエネルギーVADにフォールバック）
-# - sudachipy + 辞書:   漢字→読みの復元で「変換戻し」の候補が正確に（無いとカタカナのみ）
+#
+# ※ sudachipy は句読点の自動付与に必須になったため requirements.txt へ移動した。
 
 silero-vad>=5.1
 onnxruntime>=1.17
 torch>=2.2
-
-sudachipy>=0.6.8
-sudachidict-core>=20240409

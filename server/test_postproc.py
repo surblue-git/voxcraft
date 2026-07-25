@@ -125,6 +125,55 @@ def test_strip_trailing_hallucinations():
     assert out2 == "以上です。ありがとうございました。"
 
 
+def test_auto_punctuation():
+    # sudachipy 未導入環境では no-op（依存なしで実行可を保つためスキップ扱い）。
+    from punctuate import available, add_punctuation
+    if not available():
+        print("SKIP test_auto_punctuation (sudachipy 未導入)")
+        return
+    out = add_punctuation("これはテストです明日会議があります")
+    assert out == "これはテストです。明日会議があります。", out
+    # 文中の連体「た」には打たない。
+    assert add_punctuation("食べた人がいる") == "食べた人がいる。"
+    # 接続助詞は読点。
+    assert add_punctuation("行きますが時間がない") == "行きますが、時間がない。"
+    # postprocess 経由でも動く。
+    from postproc import postprocess
+    assert postprocess("これはテストです明日会議があります",
+                       auto_punctuate=True) == "これはテストです。明日会議があります。"
+
+
+def test_vad_carries_tail_instead_of_discarding():
+    """VADが無音とみなしたチャンク末尾も次へ繰り越す（発話を取りこぼさない）。"""
+    try:
+        import numpy as np
+    except ImportError:
+        print("SKIP test_vad_carries_tail_instead_of_discarding (numpy 未導入)")
+        return
+    from vad import VadChunker, _EnergyDetector
+
+    sr = 16000
+    ch = VadChunker(sample_rate=sr, silence_sec=0.5, max_chunk_sec=12.0,
+                    min_speech_sec=0.3, vad_threshold=0.5, speech_pad_sec=0.2)
+    ch._detector = _EnergyDetector(sr, 0.5)  # 判定を決定的にする
+
+    loud = np.full(sr, 0.3, dtype=np.float32)             # 1秒の発話
+    quiet = np.full(int(sr * 0.6), 0.001, dtype=np.float32)  # 0.6秒の無音
+    blocks = (loud, quiet, loud)
+    pushed = sum(len(b) for b in blocks)
+
+    emitted = 0
+    for block in blocks:
+        for c in ch.push(block):
+            emitted += len(c.audio)
+    tail = ch.flush()
+    if tail is not None:
+        emitted += len(tail.audio)
+
+    # 繰り越さない実装では末尾フレーム分が失われる。
+    assert emitted == pushed, (emitted, pushed)
+
+
 def _run_all():
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failed = 0

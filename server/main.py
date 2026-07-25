@@ -96,6 +96,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             symbol_dictation=symbols,
             replacements=get_replacements(),
             symbols=get_symbols(),
+            auto_punctuate=config.enable_auto_punctuation,
         )
         if text:
             await ws.send_text(json.dumps({"type": "chunk", "text": text}))

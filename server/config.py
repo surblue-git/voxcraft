@@ -27,8 +27,11 @@ class Config:
     # "auto"（cuda→int8_float16 / cpu→int8）/ "int8" / "float16" / "int8_float16" ...
     compute_type: str = _env("VOXCRAFT_COMPUTE_TYPE", "auto")
     language: str = _env("VOXCRAFT_LANG", "ja")
-    # デコードのビーム幅。1(貪欲)が最速、5が精度寄り。長文口述は1でも実用十分。
-    beam_size: int = int(_env("VOXCRAFT_BEAM_SIZE", "1"))
+    # デコードのビーム幅。1(貪欲)が最速、5が精度寄り。
+    # GPUでは並列化されるため 5 でも速度はほぼ変わらず（実測 8秒音声で 1.15s→1.17s）、
+    # 誤変換が目に見えて減る（意見交換会/脅威/陥らない 等）ので既定は 5。
+    # CPU運用で遅い場合は VOXCRAFT_BEAM_SIZE=1 に下げる。
+    beam_size: int = int(_env("VOXCRAFT_BEAM_SIZE", "5"))
 
     # --- 幻覚（吐息・無音を「はい」等と誤認識）対策 ---
     # faster-whisper 内蔵VADで、チャンク内の非発話部分を除去する。
@@ -64,6 +67,10 @@ class Config:
     strip_ja_alnum_space: bool = _env("VOXCRAFT_STRIP_SPACE", "1") == "1"
     # 記号読み上げ（「まる」→「。」など）を有効化する。
     enable_symbol_dictation: bool = _env("VOXCRAFT_SYMBOLS", "1") == "1"
+    # 句読点の自動付与（sudachipy 形態素ルール）。既定ON。
+    # kotoba-whisper は自然発話にほぼ句読点を打たないため、認識後テキストへ
+    # 「。」「、」を自動挿入する（句読点を発話せずに済む）。sudachipy 未導入なら自動で無効。
+    enable_auto_punctuation: bool = _env("VOXCRAFT_AUTO_PUNCT", "1") == "1"
     # 認識ヒント語(hotwords)を Whisper に渡すか。既定OFF。
     # 辞書が育って hotwords が長くなると kotoba-whisper が認識結果を丸ごと空にする
     # 不具合があるため（実測: hotwords 約120字超で全チャンクが脱落）。

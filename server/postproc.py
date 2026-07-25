@@ -159,6 +159,7 @@ def postprocess(
     symbol_dictation: bool = False,
     replacements: list[tuple[str, str]] | None = None,
     symbols: dict[str, str] | None = None,
+    auto_punctuate: bool = False,
 ) -> str:
     """確定チャンクに対する後処理をまとめて適用する。"""
     if not text:
@@ -173,5 +174,9 @@ def postprocess(
         result = apply_user_dict(result, replacements)
     if strip_space:
         result = strip_ja_alnum_space(result)
+    # 句読点の自動付与（sudachi 形態素ルール。未導入なら no-op）。辞書適用後に行う。
+    if auto_punctuate:
+        from punctuate import add_punctuation
+        result = add_punctuation(result)
     result = collapse_symbols(result)
     return result
