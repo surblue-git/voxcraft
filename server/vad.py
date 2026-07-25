@@ -22,6 +22,10 @@ class Chunk:
 
     audio: np.ndarray  # float32 モノラル 16kHz
     reason: str        # "silence" | "max_len"
+    # ストリーム先頭からのサンプル位置。録音を残す運用で、テキストと音声を
+    # 対応づけて後から同じ区間を再認識（復旧）するために使う。
+    start: int = 0
+    end: int = 0
 
 
 class _SileroDetector:
@@ -106,6 +110,8 @@ class VadChunker:
         self._last_speech_idx = 0
         self._cur_len = 0
         self._carried = 0  # 前チャンクから繰り越した無音の長さ（最小長判定から除外する）
+        self._stream_pos = 0  # フレーム化して処理済みのサンプル数（ストリーム上の現在位置）
+        self._buf_start = 0   # _buf の先頭がストリーム上の何サンプル目か
 
     def push(self, pcm: np.ndarray) -> list[Chunk]:
         """float32 音声ブロックを流し込み、確定したチャンクのリストを返す。"""
@@ -118,8 +124,11 @@ class VadChunker:
             frame = data[i * _FRAME:(i + 1) * _FRAME]
             speech = self._detector.is_speech(frame)
 
+            if not self._buf:
+                self._buf_start = self._stream_pos
             self._buf.append(frame)
             self._cur_len += _FRAME
+            self._stream_pos += _FRAME
 
             if speech:
                 self._has_speech = True
@@ -144,8 +153,11 @@ class VadChunker:
     def flush(self) -> Chunk | None:
         """停止時に、残っている音声を最後のチャンクとして確定する。"""
         if self._residual.size:
+            if not self._buf:
+                self._buf_start = self._stream_pos
             self._buf.append(self._residual)
             self._cur_len += self._residual.size
+            self._stream_pos += self._residual.size
             self._residual = np.zeros(0, dtype=np.float32)
         return self._finalize("silence")
 
@@ -165,6 +177,8 @@ class VadChunker:
             audio_buf = self._buf
 
         audio = np.concatenate(audio_buf)
+        start = self._buf_start
+        end = start + audio.size
         self._reset_chunk()
         # 切り詰めた末尾は捨てずに次チャンクへ繰り越す。
         # VADが小声・語尾・フィラー（「ま、」等）を無音と誤判定した場合でも、
@@ -173,8 +187,9 @@ class VadChunker:
             self._buf = list(carry)
             self._cur_len = sum(len(f) for f in carry)
             self._carried = self._cur_len
+            self._buf_start = end
         self._detector.reset()
-        return Chunk(audio=audio, reason=reason)
+        return Chunk(audio=audio, reason=reason, start=start, end=end)
 
     def _reset_chunk(self) -> None:
         self._buf = []

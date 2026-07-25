@@ -12,6 +12,7 @@ import glob
 import os
 import site
 import threading
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -26,6 +27,75 @@ _HALLUCINATIONS = {
     "おやすみなさい", "バイバイ", "はい、", "です。",
     "チャンネル登録お願いします", "最後までご視聴いただきありがとうございます",
 }
+
+
+@dataclass(frozen=True)
+class AsrOptions:
+    """認識1回ぶんの挙動。セッション（モード）ごとに切り替える。
+
+    口述（dictation）は従来どおり config の既定値をそのまま使う ＝ 挙動不変。
+    文字起こし（transcription）と復旧（recovery）だけ、取りこぼしを嫌って緩める。
+    """
+
+    vad_filter: bool
+    no_speech_threshold: float
+    logprob_threshold: float
+    beam_size: int
+    block_hallucinations: bool
+    condition_on_previous: bool
+
+    @staticmethod
+    def dictation() -> "AsrOptions":
+        """自分の声での音声入力。既存の挙動を1ミリも変えない。"""
+        return AsrOptions(
+            vad_filter=config.vad_filter,
+            no_speech_threshold=config.no_speech_threshold,
+            logprob_threshold=config.logprob_threshold,
+            beam_size=config.beam_size,
+            block_hallucinations=True,
+            condition_on_previous=False,
+        )
+
+    @staticmethod
+    def transcription() -> "AsrOptions":
+        """動画・会議の文字起こし。脱落を最小化する側に倒す。
+
+        - 二重VADをやめる（自前 VadChunker で既に切っているため内側は不要）
+        - 低確信セグメントの破棄をほぼ無効化（正しい発話まで消えるのを防ぐ）
+        - 「はい」等の丸ごと一致破棄をしない（会見の冒頭が消えるのを防ぐ）
+        """
+        return AsrOptions(
+            vad_filter=False,
+            no_speech_threshold=0.95,
+            logprob_threshold=-3.0,
+            beam_size=max(config.beam_size, 5),
+            block_hallucinations=False,
+            condition_on_previous=False,
+        )
+
+    @staticmethod
+    def recovery() -> "AsrOptions":
+        """録音済み音声からの再認識（復旧）。速度を捨てて精度に全振りする。"""
+        return AsrOptions(
+            vad_filter=False,
+            no_speech_threshold=0.99,
+            logprob_threshold=-5.0,
+            beam_size=max(config.beam_size, 8),
+            block_hallucinations=False,
+            condition_on_previous=False,
+        )
+
+
+@dataclass
+class TranscribeResult:
+    """認識結果と、フィルタで捨てたテキスト。
+
+    捨てた分を保持するのは「無言で消える」のを避けるため。ログにも残し、
+    クライアントには警告として通知する。
+    """
+
+    text: str
+    dropped: list[str]
 
 
 def _ensure_cuda_dll_dirs() -> None:
@@ -127,16 +197,24 @@ class Transcriber:
     def ready(self) -> bool:
         return self._model is not None
 
-    def transcribe(self, audio: np.ndarray, hotwords: str | None = None) -> str:
-        """float32 16kHz モノラル音声を認識してテキストを返す。
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        hotwords: str | None = None,
+        opts: AsrOptions | None = None,
+    ) -> TranscribeResult:
+        """float32 16kHz モノラル音声を認識する。
 
         吐息・無音由来の幻覚（「はい」等）を no_speech_prob / avg_logprob /
-        丸ごと一致ブロックリストで抑制する。
+        丸ごと一致ブロックリストで抑制する。何を捨てたかは戻り値に残す。
         """
         if self._model is None:
             raise RuntimeError("model not loaded")
 
         from userdict import get_hallucinations
+
+        o = opts or AsrOptions.dictation()
+        dropped: list[str] = []
 
         with self._lock:
             segments, _info = self._model.transcribe(
@@ -145,26 +223,33 @@ class Transcriber:
                 task="transcribe",
                 initial_prompt=config.initial_prompt or None,
                 hotwords=hotwords or None,
-                vad_filter=config.vad_filter,   # 内蔵VADで非発話部分を除去
-                condition_on_previous_text=False,  # 幻覚の連鎖を防ぐ
-                beam_size=config.beam_size,
+                vad_filter=o.vad_filter,   # 内蔵VADで非発話部分を除去
+                condition_on_previous_text=o.condition_on_previous,
+                beam_size=o.beam_size,
             )
             kept: list[str] = []
             for seg in segments:
                 nsp = getattr(seg, "no_speech_prob", 0.0) or 0.0
                 lp = getattr(seg, "avg_logprob", 0.0) or 0.0
-                if nsp > config.no_speech_threshold:
+                if nsp > o.no_speech_threshold:
+                    dropped.append(f"{seg.text.strip()}（no_speech={nsp:.2f}）")
                     continue  # 吐息・無音の幻覚
-                if lp < config.logprob_threshold:
+                if lp < o.logprob_threshold:
+                    dropped.append(f"{seg.text.strip()}（logprob={lp:.2f}）")
                     continue  # 低確信
                 kept.append(seg.text)
             text = "".join(kept).strip()
 
         # 丸ごと定番の幻覚なら捨てる（本文中に混ざった場合は残す）。
-        user_halls = get_hallucinations()
-        if text in _HALLUCINATIONS or text in user_halls:
-            return ""
-        return text
+        if o.block_hallucinations:
+            user_halls = get_hallucinations()
+            if text in _HALLUCINATIONS or text in user_halls:
+                dropped.append(f"{text}（幻覚ブロックリスト）")
+                text = ""
+
+        for d in dropped:
+            print(f"[VoxCraft] 破棄: {d}")
+        return TranscribeResult(text=text, dropped=dropped)
 
 
 transcriber = Transcriber()

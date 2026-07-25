@@ -1,4 +1,4 @@
-import { Editor, MarkdownView, Menu, Notice, Plugin } from "obsidian";
+import { Editor, MarkdownView, Menu, Notice, Platform, Plugin } from "obsidian";
 import { EditorView } from "@codemirror/view";
 
 import { MicRecorder } from "./audio";
@@ -14,8 +14,20 @@ import {
     VoxCraftSettingTab,
     VoxCraftSettings,
 } from "./settings";
-import { AsrSocket, ServerMessage } from "./ws";
+import {
+    AudioSpan,
+    RecoverModal,
+    formatTime,
+    recognizeRange,
+    spanRangeFor,
+} from "./recover";
+import { AsrMode, AsrSocket, ServerMessage } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
+
+// 右クリック相当（Mac では Ctrl+クリックも）か。メニュー用の操作なので録音トグルからは除外する。
+function isSecondaryClick(evt: MouseEvent): boolean {
+    return evt.button !== 0 || (Platform.isMacOS && evt.ctrlKey);
+}
 
 export default class VoxCraftPlugin extends Plugin {
     settings: VoxCraftSettings;
@@ -38,20 +50,47 @@ export default class VoxCraftPlugin extends Plugin {
     private lastMeterAt = 0;
     private transcribing = false;
 
+    // 接続先メニューを開いた時刻。直後に飛んでくるクリックで録音を始めないための目印。
+    private menuOpenedAt = 0;
+
+    // ---- 文字起こしモード（自分の声での口述には一切関与しない） ----
+    private mode: AsrMode = "dictation";
+    // サーバーが音声を保存しているセッションID。復旧の材料。
+    private session: string | null = null;
+    // 挿入したテキストと、その元になった音声の位置（秒）。再認識の宛先を引くのに使う。
+    private spans: AudioSpan[] = [];
+    // 直前チャンクの音声終端。次チャンクとの間が空いていれば、そこは捨てられた音声。
+    private lastAudioEnd = 0;
+
     async onload(): Promise<void> {
         await this.loadSettings();
 
         // 口述アンカー（CM6 拡張）を全エディタに登録。
         this.registerEditorExtension(anchorExtension);
 
-        this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft 音声入力の開始/停止", () => {
+        this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft 音声入力の開始/停止", (evt) => {
+            // 右クリック（Macは Ctrl+クリック）はメニュー専用。長押し直後の合成クリックも弾く。
+            if (isSecondaryClick(evt)) return;
+            if (Date.now() - this.menuOpenedAt < 700) return;
             this.toggleRecording();
         });
         // マイクのリボンを右クリック（モバイルは長押し）で接続先メニューを出す。
         this.registerDomEvent(this.ribbonEl, "contextmenu", (evt: MouseEvent) => {
             evt.preventDefault();
+            this.menuOpenedAt = Date.now();
             this.openEndpointMenu(evt);
         });
+        // Obsidian 本体のリボン用ハンドラが押下系イベントで発火する場合に備え、
+        // 副ボタンのイベントはリボンに届く前（親のキャプチャ段階）で止める。
+        const swallowSecondary = (evt: MouseEvent) => {
+            const target = evt.target;
+            if (!(target instanceof Node) || !this.ribbonEl.contains(target)) return;
+            if (isSecondaryClick(evt)) evt.stopPropagation();
+        };
+        const ribbonParent = this.ribbonEl.parentElement ?? this.ribbonEl;
+        this.registerDomEvent(ribbonParent, "mousedown", swallowSecondary, { capture: true });
+        this.registerDomEvent(ribbonParent, "mouseup", swallowSecondary, { capture: true });
+        this.registerDomEvent(ribbonParent, "auxclick", swallowSecondary, { capture: true });
 
         this.statusEl = this.addStatusBarItem();
         this.setStatus("停止中");
@@ -65,6 +104,19 @@ export default class VoxCraftPlugin extends Plugin {
             id: "stop-recording",
             name: "音声入力を停止",
             callback: () => this.stopRecording(),
+        });
+        this.addCommand({
+            id: "toggle-transcribe",
+            name: "文字起こし（動画・会議）の開始/停止",
+            callback: () => {
+                if (this.recording) this.stopRecording();
+                else void this.startRecording("transcribe");
+            },
+        });
+        this.addCommand({
+            id: "recover-selection",
+            name: "選択範囲を音声から再認識（復旧）",
+            callback: () => void this.recoverSelection(),
         });
         this.addCommand({
             id: "reconvert-last",
@@ -96,7 +148,7 @@ export default class VoxCraftPlugin extends Plugin {
         else void this.startRecording();
     }
 
-    private async startRecording(): Promise<void> {
+    private async startRecording(mode: AsrMode = "dictation"): Promise<void> {
         if (this.recording) return;
         const cm = this.getActiveCm();
         if (!cm) {
@@ -121,9 +173,12 @@ export default class VoxCraftPlugin extends Plugin {
                 this.transcribing = true;
                 this.setStatus("認識中…");
             },
-            onChunk: (text) => {
+            onSession: (id) => {
+                this.session = id;
+            },
+            onChunk: (text, msg) => {
                 this.transcribing = false;
-                this.handleChunk(text);
+                this.handleChunk(text, msg);
             },
             onReconvert: (msg) => this.handleReconvert(msg),
             onError: (m) => new Notice(`VoxCraft サーバーエラー: ${m}`),
@@ -149,9 +204,11 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
 
+        this.mode = mode;
         this.socket.sendStart(
             this.settings.stripJaAlnumSpace,
-            this.settings.symbolDictation
+            this.settings.symbolDictation,
+            mode
         );
 
         this.recorder = new MicRecorder(
@@ -173,9 +230,15 @@ export default class VoxCraftPlugin extends Plugin {
         this.pendingReconvert = null;
         setAnchor(cm, cm.state.selection.main.head);
 
+        if (mode === "transcribe") {
+            this.spans = [];
+            this.lastAudioEnd = 0;
+            this.session = null;
+        }
+
         this.recording = true;
         this.ribbonEl.addClass("voxcraft-recording");
-        this.setStatus("● 録音中");
+        this.setStatus(mode === "transcribe" ? "● 文字起こし中" : "● 録音中");
     }
 
     stopRecording(): void {
@@ -214,7 +277,12 @@ export default class VoxCraftPlugin extends Plugin {
 
     // ---- 確定チャンクの処理 ----
 
-    private handleChunk(text: string): void {
+    private handleChunk(text: string, msg?: ServerMessage): void {
+        if (this.mode === "transcribe") {
+            this.handleTranscribeChunk(text, msg);
+            return;
+        }
+        // 以下は従来どおりの口述処理（音声コマンドの判定を含む）。
         if (this.settings.enableCommands) {
             const cmd = parseCommand(text, this.settings.commandPrefix);
             if (cmd) {
@@ -223,6 +291,39 @@ export default class VoxCraftPlugin extends Plugin {
             }
         }
         this.insertText(text);
+    }
+
+    // 文字起こしモードのチャンク処理。
+    // 音声コマンドは判定しない（動画側の発話で勝手にコマンドが走るのを防ぐ）。
+    // 捨てられた音声区間は欠落マーカーとして本文に残し、後から復旧できるようにする。
+    private handleTranscribeChunk(text: string, msg?: ServerMessage): void {
+        const start = msg?.start;
+        const end = msg?.end;
+
+        if (msg?.dropped?.length) {
+            new Notice(
+                `VoxCraft: ${msg.dropped.length}件のセグメントを低確信として除外しました` +
+                "（サーバーログに全文あり）。"
+            );
+        }
+
+        // 前チャンクの終端と今回の開始が離れていれば、その間の音声はどこにも出ていない。
+        // 黙って消さずに位置を残す ＝ 選んで再認識すれば取り戻せる。
+        if (start !== undefined && this.lastAudioEnd > 0 && start - this.lastAudioEnd >= 0.35) {
+            const gapStart = this.lastAudioEnd;
+            const marker = `⟨未認識 ${formatTime(gapStart)}–${formatTime(start)}⟩`;
+            this.insertText(marker);
+            this.spans.push({ text: marker, start: gapStart, end: start });
+        }
+
+        if (text) {
+            this.insertText(text);
+            if (start !== undefined && end !== undefined) {
+                this.spans.push({ text, start, end });
+                if (this.spans.length > 2000) this.spans.shift();
+            }
+        }
+        if (end !== undefined) this.lastAudioEnd = end;
     }
 
     private runCommand(cmd: NonNullable<ReturnType<typeof parseCommand>>): void {
@@ -299,6 +400,53 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
         cm.dispatch({ changes: { from: idx, to: idx + from.length, insert: to } });
+    }
+
+    // ---- 復旧（音声からの再認識） ----
+
+    // 選択したテキストの元になった音声区間を、精度優先でもう一度認識し直す。
+    // 誤変換（例:「一昨日」→「昨日」）も、欠落マーカーの区間も、これで戻せる。
+    private async recoverSelection(): Promise<void> {
+        const cm = this.getActiveCm();
+        if (!cm) {
+            new Notice("VoxCraft: ノートを編集モードで開いてください。");
+            return;
+        }
+        const sel = cm.state.selection.main;
+        if (sel.empty) {
+            new Notice("VoxCraft: 復旧したい範囲を選択してください。");
+            return;
+        }
+        if (!this.session) {
+            new Notice("VoxCraft: 復旧できる録音がありません（文字起こしモードで録音した分のみ対象）。");
+            return;
+        }
+        const url = this.activeUrl();
+        if (!url) {
+            new Notice("VoxCraft: 接続先が設定されていません。");
+            return;
+        }
+
+        const selected = cm.state.doc.sliceString(sel.from, sel.to);
+        const range = spanRangeFor(this.spans, selected);
+        if (!range) {
+            new Notice("VoxCraft: 選択範囲に対応する音声が見つかりません（この録音の出力を選んでください）。");
+            return;
+        }
+
+        this.setStatus("音声から再認識中…");
+        try {
+            const result = await recognizeRange(url, this.session, range.start, range.end);
+            this.setStatus(this.recording ? "● 文字起こし中" : "停止中");
+            new RecoverModal(this.app, selected, result, (text) => {
+                cm.dispatch({ changes: { from: sel.from, to: sel.to, insert: text } });
+                // 置き換えた範囲も、元の音声とひも付け直しておく（再度やり直せるように）。
+                this.spans.push({ text, start: range.start, end: range.end });
+            }).open();
+        } catch (e) {
+            this.setStatus(this.recording ? "● 文字起こし中" : "停止中");
+            new Notice(`VoxCraft: 再認識に失敗しました（${e instanceof Error ? e.message : String(e)}）`);
+        }
     }
 
     // ---- 変換戻し ----

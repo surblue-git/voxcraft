@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => VoxCraftPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // audio.ts
 var WORKLET_CODE = `
@@ -659,11 +659,84 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    containerEl.createEl("h3", { text: "\u30DE\u30A4\u30AF\u5165\u529B\u30A8\u30F3\u30B8\u30F3" });
-    containerEl.createEl("p", {
-      text: "\u97F3\u58F0\u51E6\u7406\u30A8\u30F3\u30B8\u30F3: AudioWorklet \u512A\u5148\u52D5\u4F5C\uFF08UI\u63CF\u753B\u3068\u72EC\u7ACB\u3057\u305F\u9AD8\u97F3\u8CEA\u30FB\u4F4E\u30EC\u30A4\u30C6\u30F3\u30B7\u30B9\u30EC\u30C3\u30C9\uFF09\u3002\u975E\u5BFE\u5FDC\u30D6\u30E9\u30A6\u30B6\u30FB\u74B0\u5883\u3067\u306F ScriptProcessorNode \u3078\u81EA\u52D5\u30D5\u30A9\u30FC\u30EB\u30D0\u30C3\u30AF\u3055\u308C\u307E\u3059\u3002",
-      cls: "setting-item-description"
-    });
+  }
+};
+
+// recover.ts
+var import_obsidian4 = require("obsidian");
+async function recognizeRange(wsUrl, session, start, end, margin = 1) {
+  const res = await (0, import_obsidian4.requestUrl)({
+    url: `${httpBase(wsUrl)}/recognize`,
+    method: "POST",
+    contentType: "application/json",
+    body: JSON.stringify({ session, start, end, margin }),
+    throw: false
+  });
+  if (res.status >= 400) {
+    const detail = res.json && res.json.detail || `HTTP ${res.status}`;
+    throw new Error(detail);
+  }
+  return res.json;
+}
+function spanRangeFor(spans, selected) {
+  const needle = selected.trim();
+  if (!needle)
+    return null;
+  const hits = spans.filter((s) => {
+    const t = s.text.trim();
+    if (!t)
+      return false;
+    return t.includes(needle) || needle.includes(t);
+  });
+  if (hits.length === 0)
+    return null;
+  return {
+    start: Math.min(...hits.map((h) => h.start)),
+    end: Math.max(...hits.map((h) => h.end))
+  };
+}
+function formatTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = sec - m * 60;
+  return `${m}:${s.toFixed(1).padStart(4, "0")}`;
+}
+var RecoverModal = class extends import_obsidian4.Modal {
+  constructor(app, before, result, onApply) {
+    super(app);
+    this.before = before;
+    this.after = result.text || "";
+    this.dropped = result.dropped || [];
+    this.onApply = onApply;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: "\u97F3\u58F0\u304B\u3089\u518D\u8A8D\u8B58" });
+    contentEl.createEl("div", { text: "\u73FE\u5728", cls: "setting-item-description" });
+    contentEl.createEl("pre", { text: this.before || "\uFF08\u306A\u3057\uFF09" });
+    contentEl.createEl("div", { text: "\u518D\u8A8D\u8B58\u306E\u7D50\u679C", cls: "setting-item-description" });
+    const edit = contentEl.createEl("textarea", { text: this.after });
+    edit.rows = 5;
+    edit.style.width = "100%";
+    if (this.dropped.length > 0) {
+      contentEl.createEl("div", {
+        text: `\u203B \u518D\u8A8D\u8B58\u3067\u3082 ${this.dropped.length} \u4EF6\u306E\u30BB\u30B0\u30E1\u30F3\u30C8\u304C\u4F4E\u78BA\u4FE1\u3068\u3057\u3066\u9664\u5916\u3055\u308C\u307E\u3057\u305F\u3002`,
+        cls: "setting-item-description"
+      });
+    }
+    new import_obsidian4.Setting(contentEl).addButton(
+      (b) => b.setButtonText("\u7F6E\u304D\u63DB\u3048\u308B").setCta().onClick(() => {
+        const text = edit.value;
+        if (!text.trim()) {
+          new import_obsidian4.Notice("VoxCraft: \u7F6E\u304D\u63DB\u3048\u308B\u5185\u5BB9\u304C\u7A7A\u3067\u3059\u3002");
+          return;
+        }
+        this.onApply(text);
+        this.close();
+      })
+    ).addButton((b) => b.setButtonText("\u9589\u3058\u308B").onClick(() => this.close()));
+  }
+  onClose() {
+    this.contentEl.empty();
   }
 };
 
@@ -770,7 +843,7 @@ var AsrSocket = class {
     };
   }
   dispatch(msg) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
     switch (msg.type) {
       case "ready":
         (_b = (_a = this.handlers).onReady) == null ? void 0 : _b.call(_a);
@@ -779,14 +852,17 @@ var AsrSocket = class {
         (_d = (_c = this.handlers).onPartial) == null ? void 0 : _d.call(_c);
         break;
       case "chunk":
-        if (msg.text)
-          (_f = (_e = this.handlers).onChunk) == null ? void 0 : _f.call(_e, msg.text);
+        (_f = (_e = this.handlers).onChunk) == null ? void 0 : _f.call(_e, msg.text || "", msg);
+        break;
+      case "session":
+        if (msg.session)
+          (_h = (_g = this.handlers).onSession) == null ? void 0 : _h.call(_g, msg.session);
         break;
       case "reconvert":
-        (_h = (_g = this.handlers).onReconvert) == null ? void 0 : _h.call(_g, msg);
+        (_j = (_i = this.handlers).onReconvert) == null ? void 0 : _j.call(_i, msg);
         break;
       case "error":
-        (_j = (_i = this.handlers).onError) == null ? void 0 : _j.call(_i, msg.message || "unknown error");
+        (_l = (_k = this.handlers).onError) == null ? void 0 : _l.call(_k, msg.message || "unknown error");
         break;
     }
   }
@@ -794,8 +870,8 @@ var AsrSocket = class {
     if (this.connected)
       this.ws.send(pcm16);
   }
-  sendStart(stripSpace, symbols) {
-    this.send({ type: "start", stripSpace, symbols });
+  sendStart(stripSpace, symbols, mode = "dictation") {
+    this.send({ type: "start", stripSpace, symbols, mode });
   }
   sendStop() {
     this.send({ type: "stop" });
@@ -874,7 +950,10 @@ function getAnchor(cm) {
 }
 
 // main.ts
-var VoxCraftPlugin = class extends import_obsidian4.Plugin {
+function isSecondaryClick(evt) {
+  return evt.button !== 0 || import_obsidian5.Platform.isMacOS && evt.ctrlKey;
+}
+var VoxCraftPlugin = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     this.socket = null;
@@ -890,17 +969,44 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     // 入力レベルメーター表示のスロットリング用。
     this.lastMeterAt = 0;
     this.transcribing = false;
+    // 接続先メニューを開いた時刻。直後に飛んでくるクリックで録音を始めないための目印。
+    this.menuOpenedAt = 0;
+    // ---- 文字起こしモード（自分の声での口述には一切関与しない） ----
+    this.mode = "dictation";
+    // サーバーが音声を保存しているセッションID。復旧の材料。
+    this.session = null;
+    // 挿入したテキストと、その元になった音声の位置（秒）。再認識の宛先を引くのに使う。
+    this.spans = [];
+    // 直前チャンクの音声終端。次チャンクとの間が空いていれば、そこは捨てられた音声。
+    this.lastAudioEnd = 0;
   }
   async onload() {
+    var _a;
     await this.loadSettings();
     this.registerEditorExtension(anchorExtension);
-    this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft \u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB/\u505C\u6B62", () => {
+    this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft \u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB/\u505C\u6B62", (evt) => {
+      if (isSecondaryClick(evt))
+        return;
+      if (Date.now() - this.menuOpenedAt < 700)
+        return;
       this.toggleRecording();
     });
     this.registerDomEvent(this.ribbonEl, "contextmenu", (evt) => {
       evt.preventDefault();
+      this.menuOpenedAt = Date.now();
       this.openEndpointMenu(evt);
     });
+    const swallowSecondary = (evt) => {
+      const target = evt.target;
+      if (!(target instanceof Node) || !this.ribbonEl.contains(target))
+        return;
+      if (isSecondaryClick(evt))
+        evt.stopPropagation();
+    };
+    const ribbonParent = (_a = this.ribbonEl.parentElement) != null ? _a : this.ribbonEl;
+    this.registerDomEvent(ribbonParent, "mousedown", swallowSecondary, { capture: true });
+    this.registerDomEvent(ribbonParent, "mouseup", swallowSecondary, { capture: true });
+    this.registerDomEvent(ribbonParent, "auxclick", swallowSecondary, { capture: true });
     this.statusEl = this.addStatusBarItem();
     this.setStatus("\u505C\u6B62\u4E2D");
     this.addCommand({
@@ -912,6 +1018,21 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
       id: "stop-recording",
       name: "\u97F3\u58F0\u5165\u529B\u3092\u505C\u6B62",
       callback: () => this.stopRecording()
+    });
+    this.addCommand({
+      id: "toggle-transcribe",
+      name: "\u6587\u5B57\u8D77\u3053\u3057\uFF08\u52D5\u753B\u30FB\u4F1A\u8B70\uFF09\u306E\u958B\u59CB/\u505C\u6B62",
+      callback: () => {
+        if (this.recording)
+          this.stopRecording();
+        else
+          void this.startRecording("transcribe");
+      }
+    });
+    this.addCommand({
+      id: "recover-selection",
+      name: "\u9078\u629E\u7BC4\u56F2\u3092\u97F3\u58F0\u304B\u3089\u518D\u8A8D\u8B58\uFF08\u5FA9\u65E7\uFF09",
+      callback: () => void this.recoverSelection()
     });
     this.addCommand({
       id: "reconvert-last",
@@ -940,17 +1061,17 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     else
       void this.startRecording();
   }
-  async startRecording() {
+  async startRecording(mode = "dictation") {
     if (this.recording)
       return;
     const cm = this.getActiveCm();
     if (!cm) {
-      new import_obsidian4.Notice("VoxCraft: \u633F\u5165\u5148\u306E\u30CE\u30FC\u30C8\uFF08\u7DE8\u96C6\u30E2\u30FC\u30C9\uFF09\u3092\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
+      new import_obsidian5.Notice("VoxCraft: \u633F\u5165\u5148\u306E\u30CE\u30FC\u30C8\uFF08\u7DE8\u96C6\u30E2\u30FC\u30C9\uFF09\u3092\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
     const urls = resolveUrls(this.settings);
     if (urls.length === 0) {
-      new import_obsidian4.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A\u3067\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u3092\u8FFD\u52A0\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+      new import_obsidian5.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A\u3067\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u3092\u8FFD\u52A0\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
     this.setStatus(urls.length > 1 ? "\u63A5\u7D9A\u4E2D\u2026\uFF08\u3064\u306A\u304C\u308B\u65B9\u3092\u9078\u629E\uFF09" : "\u63A5\u7D9A\u4E2D\u2026");
@@ -965,15 +1086,18 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
         this.transcribing = true;
         this.setStatus("\u8A8D\u8B58\u4E2D\u2026");
       },
-      onChunk: (text) => {
+      onSession: (id) => {
+        this.session = id;
+      },
+      onChunk: (text, msg) => {
         this.transcribing = false;
-        this.handleChunk(text);
+        this.handleChunk(text, msg);
       },
       onReconvert: (msg) => this.handleReconvert(msg),
-      onError: (m) => new import_obsidian4.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`),
+      onError: (m) => new import_obsidian5.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`),
       onClose: () => {
         if (this.recording) {
-          new import_obsidian4.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u63A5\u7D9A\u304C\u5207\u308C\u307E\u3057\u305F\u3002");
+          new import_obsidian5.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u63A5\u7D9A\u304C\u5207\u308C\u307E\u3057\u305F\u3002");
           void this.teardownSession();
           this.setStatus("\u505C\u6B62\u4E2D");
         }
@@ -983,16 +1107,18 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
       await this.socket.connect();
     } catch (e) {
       const tried = urls.map((u) => labelForUrl(this.settings, u)).join(" / ");
-      new import_obsidian4.Notice(
+      new import_obsidian5.Notice(
         `VoxCraft: \u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093\uFF08${tried}\uFF09\u3002\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u308B\u304B\u3001\u63A5\u7D9A\u5148\u306E\u8A2D\u5B9A\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
       );
       this.socket = null;
       this.setStatus("\u505C\u6B62\u4E2D");
       return;
     }
+    this.mode = mode;
     this.socket.sendStart(
       this.settings.stripJaAlnumSpace,
-      this.settings.symbolDictation
+      this.settings.symbolDictation,
+      mode
     );
     this.recorder = new MicRecorder(
       (pcm) => {
@@ -1004,7 +1130,7 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     try {
       await this.recorder.start();
     } catch (e) {
-      new import_obsidian4.Notice("VoxCraft: \u30DE\u30A4\u30AF\u306B\u30A2\u30AF\u30BB\u30B9\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+      new import_obsidian5.Notice("VoxCraft: \u30DE\u30A4\u30AF\u306B\u30A2\u30AF\u30BB\u30B9\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
       await this.teardownSession();
       this.setStatus("\u505C\u6B62\u4E2D");
       return;
@@ -1013,9 +1139,14 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     this.chunks = [];
     this.pendingReconvert = null;
     setAnchor(cm, cm.state.selection.main.head);
+    if (mode === "transcribe") {
+      this.spans = [];
+      this.lastAudioEnd = 0;
+      this.session = null;
+    }
     this.recording = true;
     this.ribbonEl.addClass("voxcraft-recording");
-    this.setStatus("\u25CF \u9332\u97F3\u4E2D");
+    this.setStatus(mode === "transcribe" ? "\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D" : "\u25CF \u9332\u97F3\u4E2D");
   }
   stopRecording() {
     var _a, _b;
@@ -1052,7 +1183,11 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     this.cm = null;
   }
   // ---- 確定チャンクの処理 ----
-  handleChunk(text) {
+  handleChunk(text, msg) {
+    if (this.mode === "transcribe") {
+      this.handleTranscribeChunk(text, msg);
+      return;
+    }
     if (this.settings.enableCommands) {
       const cmd = parseCommand(text, this.settings.commandPrefix);
       if (cmd) {
@@ -1061,6 +1196,35 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
       }
     }
     this.insertText(text);
+  }
+  // 文字起こしモードのチャンク処理。
+  // 音声コマンドは判定しない（動画側の発話で勝手にコマンドが走るのを防ぐ）。
+  // 捨てられた音声区間は欠落マーカーとして本文に残し、後から復旧できるようにする。
+  handleTranscribeChunk(text, msg) {
+    var _a;
+    const start = msg == null ? void 0 : msg.start;
+    const end = msg == null ? void 0 : msg.end;
+    if ((_a = msg == null ? void 0 : msg.dropped) == null ? void 0 : _a.length) {
+      new import_obsidian5.Notice(
+        `VoxCraft: ${msg.dropped.length}\u4EF6\u306E\u30BB\u30B0\u30E1\u30F3\u30C8\u3092\u4F4E\u78BA\u4FE1\u3068\u3057\u3066\u9664\u5916\u3057\u307E\u3057\u305F\uFF08\u30B5\u30FC\u30D0\u30FC\u30ED\u30B0\u306B\u5168\u6587\u3042\u308A\uFF09\u3002`
+      );
+    }
+    if (start !== void 0 && this.lastAudioEnd > 0 && start - this.lastAudioEnd >= 0.35) {
+      const gapStart = this.lastAudioEnd;
+      const marker = `\u27E8\u672A\u8A8D\u8B58 ${formatTime(gapStart)}\u2013${formatTime(start)}\u27E9`;
+      this.insertText(marker);
+      this.spans.push({ text: marker, start: gapStart, end: start });
+    }
+    if (text) {
+      this.insertText(text);
+      if (start !== void 0 && end !== void 0) {
+        this.spans.push({ text, start, end });
+        if (this.spans.length > 2e3)
+          this.spans.shift();
+      }
+    }
+    if (end !== void 0)
+      this.lastAudioEnd = end;
   }
   runCommand(cmd) {
     switch (cmd.kind) {
@@ -1117,7 +1281,7 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     const from = Math.max(0, anchor - last.length);
     const current = cm.state.doc.sliceString(from, anchor);
     if (current !== last) {
-      new import_obsidian4.Notice("VoxCraft: \u76F4\u524D\u306E\u5165\u529B\u304C\u7DE8\u96C6\u3055\u308C\u3066\u3044\u308B\u305F\u3081\u53D6\u308A\u6D88\u305B\u307E\u305B\u3093\u3002");
+      new import_obsidian5.Notice("VoxCraft: \u76F4\u524D\u306E\u5165\u529B\u304C\u7DE8\u96C6\u3055\u308C\u3066\u3044\u308B\u305F\u3081\u53D6\u308A\u6D88\u305B\u307E\u305B\u3093\u3002");
       return;
     }
     this.chunks.pop();
@@ -1132,10 +1296,52 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     const doc = cm.state.doc.toString();
     const idx = doc.lastIndexOf(from);
     if (idx < 0) {
-      new import_obsidian4.Notice(`VoxCraft: \u300C${from}\u300D\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F\u3002`);
+      new import_obsidian5.Notice(`VoxCraft: \u300C${from}\u300D\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F\u3002`);
       return;
     }
     cm.dispatch({ changes: { from: idx, to: idx + from.length, insert: to } });
+  }
+  // ---- 復旧（音声からの再認識） ----
+  // 選択したテキストの元になった音声区間を、精度優先でもう一度認識し直す。
+  // 誤変換（例:「一昨日」→「昨日」）も、欠落マーカーの区間も、これで戻せる。
+  async recoverSelection() {
+    const cm = this.getActiveCm();
+    if (!cm) {
+      new import_obsidian5.Notice("VoxCraft: \u30CE\u30FC\u30C8\u3092\u7DE8\u96C6\u30E2\u30FC\u30C9\u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
+      return;
+    }
+    const sel = cm.state.selection.main;
+    if (sel.empty) {
+      new import_obsidian5.Notice("VoxCraft: \u5FA9\u65E7\u3057\u305F\u3044\u7BC4\u56F2\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+      return;
+    }
+    if (!this.session) {
+      new import_obsidian5.Notice("VoxCraft: \u5FA9\u65E7\u3067\u304D\u308B\u9332\u97F3\u304C\u3042\u308A\u307E\u305B\u3093\uFF08\u6587\u5B57\u8D77\u3053\u3057\u30E2\u30FC\u30C9\u3067\u9332\u97F3\u3057\u305F\u5206\u306E\u307F\u5BFE\u8C61\uFF09\u3002");
+      return;
+    }
+    const url = this.activeUrl();
+    if (!url) {
+      new import_obsidian5.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002");
+      return;
+    }
+    const selected = cm.state.doc.sliceString(sel.from, sel.to);
+    const range = spanRangeFor(this.spans, selected);
+    if (!range) {
+      new import_obsidian5.Notice("VoxCraft: \u9078\u629E\u7BC4\u56F2\u306B\u5BFE\u5FDC\u3059\u308B\u97F3\u58F0\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\uFF08\u3053\u306E\u9332\u97F3\u306E\u51FA\u529B\u3092\u9078\u3093\u3067\u304F\u3060\u3055\u3044\uFF09\u3002");
+      return;
+    }
+    this.setStatus("\u97F3\u58F0\u304B\u3089\u518D\u8A8D\u8B58\u4E2D\u2026");
+    try {
+      const result = await recognizeRange(url, this.session, range.start, range.end);
+      this.setStatus(this.recording ? "\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D" : "\u505C\u6B62\u4E2D");
+      new RecoverModal(this.app, selected, result, (text) => {
+        cm.dispatch({ changes: { from: sel.from, to: sel.to, insert: text } });
+        this.spans.push({ text, start: range.start, end: range.end });
+      }).open();
+    } catch (e) {
+      this.setStatus(this.recording ? "\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D" : "\u505C\u6B62\u4E2D");
+      new import_obsidian5.Notice(`VoxCraft: \u518D\u8A8D\u8B58\u306B\u5931\u6557\u3057\u307E\u3057\u305F\uFF08${e instanceof Error ? e.message : String(e)}\uFF09`);
+    }
   }
   // ---- 変換戻し ----
   requestReconvert() {
@@ -1143,16 +1349,16 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     const cm = this.cm;
     const last = this.chunks[this.chunks.length - 1];
     if (!cm || !cm.dom.isConnected) {
-      new import_obsidian4.Notice("VoxCraft: \u9332\u97F3\u4E2D\u306B\u300C\u5909\u63DB\u623B\u3057\u300D\u3092\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\u3002");
+      new import_obsidian5.Notice("VoxCraft: \u9332\u97F3\u4E2D\u306B\u300C\u5909\u63DB\u623B\u3057\u300D\u3092\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
     const anchor = getAnchor(cm);
     if (anchor === null || last === void 0 || !last.trim()) {
-      new import_obsidian4.Notice("VoxCraft: \u5909\u63DB\u623B\u3057\u306E\u5BFE\u8C61\u304C\u3042\u308A\u307E\u305B\u3093\u3002");
+      new import_obsidian5.Notice("VoxCraft: \u5909\u63DB\u623B\u3057\u306E\u5BFE\u8C61\u304C\u3042\u308A\u307E\u305B\u3093\u3002");
       return;
     }
     if (!((_a = this.socket) == null ? void 0 : _a.connected)) {
-      new import_obsidian4.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u672A\u63A5\u7D9A\u306E\u305F\u3081\u5909\u63DB\u623B\u3057\u3067\u304D\u307E\u305B\u3093\u3002");
+      new import_obsidian5.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u672A\u63A5\u7D9A\u306E\u305F\u3081\u5909\u63DB\u623B\u3057\u3067\u304D\u307E\u305B\u3093\u3002");
       return;
     }
     const from = Math.max(0, anchor - last.length);
@@ -1167,7 +1373,7 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     const target = this.pendingReconvert;
     this.pendingReconvert = null;
     if (segments.length === 0 || !target) {
-      new import_obsidian4.Notice("VoxCraft: \u5909\u63DB\u5019\u88DC\u304C\u5F97\u3089\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+      new import_obsidian5.Notice("VoxCraft: \u5909\u63DB\u5019\u88DC\u304C\u5F97\u3089\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
       return;
     }
     const modal = new ReconvertModal(this.app, segments, (chosen) => {
@@ -1196,7 +1402,7 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
   // ---- 接続先の切り替え ----
   // 接続先メニューを表示する。evt があればその位置、無ければリボン脇に出す。
   openEndpointMenu(evt) {
-    const menu = new import_obsidian4.Menu();
+    const menu = new import_obsidian5.Menu();
     const sel = this.settings.selection;
     menu.addItem(
       (i) => i.setTitle("\u81EA\u52D5\uFF08\u3064\u306A\u304C\u308B\u65B9\uFF09").setChecked(sel === AUTO).onClick(() => void this.setSelection(AUTO))
@@ -1232,7 +1438,7 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
     this.settings.selection = sel;
     await this.saveSettings();
     const label = sel === AUTO ? "\u81EA\u52D5\uFF08\u3064\u306A\u304C\u308B\u65B9\uFF09" : labelForUrl(this.settings, sel);
-    new import_obsidian4.Notice(`VoxCraft: \u63A5\u7D9A\u5148\u3092\u300C${label}\u300D\u306B\u3057\u307E\u3057\u305F\u3002`);
+    new import_obsidian5.Notice(`VoxCraft: \u63A5\u7D9A\u5148\u3092\u300C${label}\u300D\u306B\u3057\u307E\u3057\u305F\u3002`);
   }
   // 現在つながっている接続先（未接続なら設定上の第一候補）。辞書APIの宛先に使う。
   activeUrl() {
@@ -1242,7 +1448,7 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
   openDictModal() {
     const url = this.activeUrl();
     if (!url) {
-      new import_obsidian4.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093");
+      new import_obsidian5.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093");
       return;
     }
     new DictModal(this.app, url).open();
@@ -1251,7 +1457,7 @@ var VoxCraftPlugin = class extends import_obsidian4.Plugin {
   // アクティブな Markdown エディタの CodeMirror6 ビューを得る。
   getActiveCm() {
     var _a;
-    const view = this.app.workspace.getActiveViewOfType(import_obsidian4.MarkdownView);
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
     const editor = view == null ? void 0 : view.editor;
     return (_a = editor == null ? void 0 : editor.cm) != null ? _a : null;
   }

@@ -1,20 +1,29 @@
 // 認識サーバー（自宅PC）との WebSocket クライアント。
 // Desktop では ws://localhost:8760/ws、Android では ws://<Tailscale IP>:8760/ws を想定。
 
+export type AsrMode = "dictation" | "transcribe";
+
 export interface ServerMessage {
-    type: "ready" | "chunk" | "stopped" | "reconvert" | "error" | "partial";
+    type: "ready" | "chunk" | "stopped" | "reconvert" | "error" | "partial" | "session";
     text?: string;
     reason?: string;
     reading?: string;
     segments?: { reading: string; candidates: string[] }[];
     online?: boolean;
     message?: string;
+    // 文字起こしモードのみ: 録音セッションIDと、このチャンクに対応する音声の秒数範囲。
+    // これがあると後から同じ音声を再認識して復旧できる。
+    session?: string;
+    start?: number;
+    end?: number;
+    dropped?: string[]; // サーバー側フィルタで捨てたテキスト（無言で消さないための通知）
 }
 
 export interface WsHandlers {
     onReady?: () => void;
     onPartial?: () => void; // 発話検出→認識開始の合図
-    onChunk?: (text: string) => void;
+    onChunk?: (text: string, msg: ServerMessage) => void;
+    onSession?: (id: string) => void;
     onReconvert?: (msg: ServerMessage) => void;
     onError?: (message: string) => void;
     onClose?: () => void;
@@ -140,7 +149,10 @@ export class AsrSocket {
                 this.handlers.onPartial?.();
                 break;
             case "chunk":
-                if (msg.text) this.handlers.onChunk?.(msg.text);
+                this.handlers.onChunk?.(msg.text || "", msg);
+                break;
+            case "session":
+                if (msg.session) this.handlers.onSession?.(msg.session);
                 break;
             case "reconvert":
                 this.handlers.onReconvert?.(msg);
@@ -155,8 +167,8 @@ export class AsrSocket {
         if (this.connected) this.ws!.send(pcm16);
     }
 
-    sendStart(stripSpace: boolean, symbols: boolean): void {
-        this.send({ type: "start", stripSpace, symbols });
+    sendStart(stripSpace: boolean, symbols: boolean, mode: AsrMode = "dictation"): void {
+        this.send({ type: "start", stripSpace, symbols, mode });
     }
 
     sendStop(): void {
