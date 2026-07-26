@@ -17,6 +17,7 @@ export interface VoxCraftSettings {
     enableCommands: boolean;    // 音声コマンドを有効化
     commandPrefix: string;      // 空なら常時判定、非空なら「この語で始まる発話」のみ
     autoReconvertLast: boolean; // 「変換戻し」時、直前チャンクを対象にする
+    insertAt: "anchor" | "cursor"; // 口述の挿入位置。anchor=固定アンカー（既定）/ cursor=カーソル追従
     serverUrl?: string;         // 後方互換: 旧・単一URL（読み込み時に endpoints へ移行）
 }
 
@@ -28,6 +29,7 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     enableCommands: true,
     commandPrefix: "",
     autoReconvertLast: true,
+    insertAt: "anchor",
 };
 
 // 旧バージョン（単一 serverUrl）の設定を新モデルへ移行する。
@@ -39,6 +41,7 @@ export function migrateSettings(s: VoxCraftSettings): VoxCraftSettings {
         s.endpoints = [...DEFAULT_SETTINGS.endpoints];
     }
     if (!s.selection) s.selection = AUTO;
+    if (s.insertAt !== "cursor") s.insertAt = "anchor";
     delete s.serverUrl;
     return s;
 }
@@ -244,8 +247,24 @@ export class VoxCraftSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
+            .setName("挿入位置をカーソルに追従")
+            .setDesc(
+                "OFF（既定）: 録音開始時に立てた固定アンカーへ追記し続ける（カーソル移動や背面作業の影響を受けない）。" +
+                "ON: 口述中にカーソルを動かすと、次の発話からその位置に挿入される（誤タップで挿入位置が飛ぶ点に注意）。" +
+                "文字起こしモードは常にアンカー固定。"
+            )
+            .addToggle((t) =>
+                t.setValue(this.plugin.settings.insertAt === "cursor").onChange(async (v) => {
+                    this.plugin.settings.insertAt = v ? "cursor" : "anchor";
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        new Setting(containerEl)
             .setName("音声コマンドを有効化")
-            .setDesc("「取り消し」「変換戻し」「AをBに修正」「入力終了」等を認識する。")
+            .setDesc(
+                "「取り消し」「変換戻し」「AをBに修正」「Aを再変換」「ここを言い直し」「入力終了」等を認識する。"
+            )
             .addToggle((t) =>
                 t.setValue(this.plugin.settings.enableCommands).onChange(async (v) => {
                     this.plugin.settings.enableCommands = v;

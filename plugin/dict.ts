@@ -35,6 +35,29 @@ export async function fetchHealth(wsUrl: string): Promise<HealthData> {
     return res.json as HealthData;
 }
 
+// /reconvert の応答（server/reconvert.py の戻り値と対）。
+export interface ReconvertPayload {
+    reading: string;
+    segments: { reading: string; candidates: string[] }[];
+    online: boolean;
+}
+
+// テキストの再変換候補を REST で取得する（WS 接続不要。録音外でも使える）。
+export async function fetchReconvert(wsUrl: string, text: string): Promise<ReconvertPayload> {
+    const res = await requestUrl({
+        url: `${httpBase(wsUrl)}/reconvert`,
+        method: "POST",
+        contentType: "application/json",
+        body: JSON.stringify({ text }),
+        throw: false,
+    });
+    if (res.status >= 400) {
+        const detail = (res.json && (res.json as { detail?: string }).detail) || `HTTP ${res.status}`;
+        throw new Error(detail);
+    }
+    return res.json as ReconvertPayload;
+}
+
 export async function fetchDict(wsUrl: string): Promise<DictData> {
     const res = await requestUrl({ url: `${httpBase(wsUrl)}/dict`, method: "GET" });
     return res.json as DictData;

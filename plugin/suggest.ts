@@ -12,18 +12,50 @@ export interface ReconvertSegment {
 
 type SelectHandler = (chosen: string[]) => void;
 
+// 新規経路（「Aを再変換」「選択範囲を再変換」）向けの追加オプション。
+// 既存の変換戻し呼び出しは省略のまま動く（後方互換）。
+export interface ReconvertModalOpts {
+    // 置換対象の元表記。「確定して辞書に登録」の登録キーと初期選択の照合に使う。
+    originalText?: string;
+    // 「確定して辞書に登録」ボタンを押したときに呼ばれる（元表記, 確定表記）。
+    onRegister?: (from: string, to: string) => void;
+}
+
 export class ReconvertModal extends Modal {
     private segments: ReconvertSegment[];
     private selection: number[];       // 各文節で選択中の候補 index
     private activeSeg = 0;              // 音声「N番」の対象となる文節
     private onSubmit: SelectHandler;
     private segEls: HTMLElement[] = [];
+    private opts: ReconvertModalOpts;
 
-    constructor(app: App, segments: ReconvertSegment[], onSubmit: SelectHandler) {
+    constructor(
+        app: App,
+        segments: ReconvertSegment[],
+        onSubmit: SelectHandler,
+        opts: ReconvertModalOpts = {}
+    ) {
         super(app);
         this.segments = segments;
         this.selection = segments.map(() => 0);
         this.onSubmit = onSubmit;
+        this.opts = opts;
+        // 元表記が分かっているときは、それに一致する候補を初期選択にする
+        // （文書中の何を直そうとしているかが一目で分かる）。
+        if (opts.originalText) this.preselect(opts.originalText);
+    }
+
+    // 元表記を文節候補の連結で貪欲に辿り、一致した候補を初期選択にする。
+    private preselect(original: string): void {
+        let rest = original;
+        for (let si = 0; si < this.segments.length; si++) {
+            const ci = this.segments[si].candidates.findIndex(
+                (c) => c.length > 0 && rest.startsWith(c)
+            );
+            if (ci < 0) return; // 途中で辿れなくなったら既定(先頭候補)のまま
+            this.selection[si] = ci;
+            rest = rest.slice(this.segments[si].candidates[ci].length);
+        }
     }
 
     onOpen(): void {
@@ -53,11 +85,19 @@ export class ReconvertModal extends Modal {
             this.paintSeg(si);
         });
 
-        new Setting(contentEl)
+        const buttons = new Setting(contentEl)
             .addButton((b) =>
                 b.setButtonText("確定").setCta().onClick(() => this.submit())
-            )
-            .addButton((b) => b.setButtonText("キャンセル").onClick(() => this.close()));
+            );
+        if (this.opts.onRegister && this.opts.originalText) {
+            buttons.addButton((b) =>
+                b
+                    .setButtonText("確定して辞書に登録")
+                    .setTooltip("以後、同じ誤変換を自動で修正する")
+                    .onClick(() => this.submit(true))
+            );
+        }
+        buttons.addButton((b) => b.setButtonText("キャンセル").onClick(() => this.close()));
 
         this.scope.register([], "Enter", () => {
             this.submit();
@@ -79,6 +119,11 @@ export class ReconvertModal extends Modal {
     // 音声「N番」からの選択（1始まり）を外部から呼べる。
     pickByVoice(oneBased: number): void {
         this.choose(oneBased - 1);
+    }
+
+    // 音声「確定」から呼べる（「N番」→「確定」で音声のみで完結する）。
+    confirmByVoice(): void {
+        this.submit();
     }
 
     private choose(ci: number): void {
@@ -104,10 +149,16 @@ export class ReconvertModal extends Modal {
         );
     }
 
-    private submit(): void {
+    private submit(register = false): void {
         const chosen = this.segments.map((seg, i) => seg.candidates[this.selection[i]]);
         this.close();
         this.onSubmit(chosen);
+        if (register && this.opts.onRegister && this.opts.originalText) {
+            const joined = chosen.join("");
+            if (joined && joined !== this.opts.originalText) {
+                this.opts.onRegister(this.opts.originalText, joined);
+            }
+        }
     }
 
     onClose(): void {

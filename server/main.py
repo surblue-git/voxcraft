@@ -99,6 +99,21 @@ async def dict_post(payload: dict = Body(...)) -> dict:
     return {"ok": True, **counts}
 
 
+@app.post("/reconvert")
+async def reconvert_post(payload: dict = Body(...)) -> dict:
+    """テキストの再変換候補を返す（録音中でなくても使える REST 版）。
+
+    WS の {"type": "reconvert"} と同じ reconvert() を呼ぶ。
+    選択範囲の再変換や「Aを再変換」コマンドがこちらを使う。
+    """
+    text = str(payload.get("text", ""))
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="text を指定してください")
+    if len(text) > 1000:
+        raise HTTPException(status_code=400, detail="text が長すぎます（1000文字まで）")
+    return await asyncio.to_thread(reconvert, text)
+
+
 def _pcm16_to_float32(data: bytes) -> np.ndarray:
     """PCM16LE バイト列を float32(-1..1) に変換する。"""
     ints = np.frombuffer(data, dtype="<i2")
