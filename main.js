@@ -375,17 +375,36 @@ async function saveDict(wsUrl, data) {
     throw new Error(detail);
   }
 }
-function toRows(map) {
-  return Object.entries(map || {}).map(([key, value]) => ({ key, value }));
+var KEY_SPLIT_RE = /[、,，／/\n]+/;
+function splitKeys(keys) {
+  return keys.split(KEY_SPLIT_RE).map((s) => s.trim()).filter(Boolean);
 }
-function toMap(rows) {
-  const out = {};
-  for (const r of rows) {
-    const k = r.key.trim();
-    if (k)
-      out[k] = r.value;
+function toGroups(map) {
+  const order = [];
+  const byValue = /* @__PURE__ */ new Map();
+  for (const [k, v] of Object.entries(map || {})) {
+    if (!byValue.has(v)) {
+      byValue.set(v, []);
+      order.push(v);
+    }
+    byValue.get(v).push(k);
   }
-  return out;
+  return order.map((v) => ({ keys: byValue.get(v).join("\u3001"), value: v }));
+}
+function flattenGroups(groups) {
+  const out = {};
+  const dup = [];
+  for (const g of groups) {
+    for (const k of splitKeys(g.keys)) {
+      if (k in out && out[k] !== g.value && !dup.includes(k))
+        dup.push(k);
+      out[k] = g.value;
+    }
+  }
+  return { map: out, dup };
+}
+function countKeys(groups) {
+  return groups.reduce((n, g) => n + splitKeys(g.keys).length, 0);
 }
 var DictModal = class extends import_obsidian.Modal {
   constructor(app, wsUrl) {
@@ -404,8 +423,8 @@ var DictModal = class extends import_obsidian.Modal {
     });
     try {
       const d = await fetchDict(this.wsUrl);
-      this.reps = toRows(d.replacements);
-      this.syms = toRows(d.symbols);
+      this.reps = toGroups(d.replacements);
+      this.syms = toGroups(d.symbols);
       this.loaded = true;
     } catch (e) {
       this.loadError = e instanceof Error ? e.message : String(e);
@@ -431,29 +450,40 @@ var DictModal = class extends import_obsidian.Modal {
       cls: "setting-item-description"
     });
     contentEl.createEl("p", {
-      text: "\u6CE8\u610F: \u77ED\u304F\u3066\u4E00\u822C\u7684\u306A\u8A9E\u3092\u30AD\u30FC\u306B\u3059\u308B\u3068\u672C\u6587\u3092\u58CA\u3059\u3002\u4F8B\u300C\u8A73\u7D30\u300D\u306F\u8AA4\u8A8D\u8B58\u3067\u3082\u3042\u308A\u6B63\u3057\u3044\u8A9E\u3067\u3082\u3042\u308B\u305F\u3081\u3001\u524D\u5F8C\u3092\u542B\u3081\u305F\u9577\u3044\u30AD\u30FC\u306B\u3059\u308B\u3002",
+      text: "\u540C\u3058\u6B63\u89E3\u306B\u5BFE\u3059\u308B\u8AA4\u8A8D\u8B58\u306F\u30011\u3064\u306E\u884C\u306B\u300C\u3001\u300D\u533A\u5207\u308A\u3067\u307E\u3068\u3081\u3066\u66F8\u3051\u308B\uFF08\u4F8B: \u518D\u5909\u66F4\u3001\u518D\u5909\u5316\u3001\u518D\u5909\u611F \u2192 \u518D\u5909\u63DB\uFF09\u3002\u6CE8\u610F: \u77ED\u304F\u3066\u4E00\u822C\u7684\u306A\u8A9E\u3092\u30AD\u30FC\u306B\u3059\u308B\u3068\u672C\u6587\u3092\u58CA\u3059\u3002\u4F8B\u300C\u8A73\u7D30\u300D\u306F\u8AA4\u8A8D\u8B58\u3067\u3082\u3042\u308A\u6B63\u3057\u3044\u8A9E\u3067\u3082\u3042\u308B\u305F\u3081\u3001\u524D\u5F8C\u3092\u542B\u3081\u305F\u9577\u3044\u30AD\u30FC\u306B\u3059\u308B\u3002",
       cls: "setting-item-description"
     });
     this.renderRows(
       contentEl,
       "\u7F6E\u63DB\uFF08replacements\uFF09",
       this.reps,
-      "Whisper\u306E\u51FA\u529B\uFF08\u4F8B: \u53CE\u96C6\u8AAC\u660E\uFF09",
-      "\u6B63\u3057\u3044\u8868\u8A18\uFF08\u4F8B: \u8DA3\u65E8\u8AAC\u660E\uFF09"
+      "\u8AA4\u8A8D\u8B58\u3092\u300C\u3001\u300D\u533A\u5207\u308A\u3067\uFF08\u4F8B: \u518D\u5909\u66F4\u3001\u518D\u5909\u5316\uFF09",
+      "\u6B63\u3057\u3044\u8868\u8A18\uFF08\u4F8B: \u518D\u5909\u63DB\uFF09"
     );
     this.renderRows(
       contentEl,
       "\u8A18\u53F7\u8A9E\uFF08symbols\u30FB\u5358\u72EC\u3067\u8A00\u3063\u305F\u3068\u304D\u3060\u3051\u5909\u63DB\uFF09",
       this.syms,
-      "Whisper\u306E\u51FA\u529B\uFF08\u4F8B: \u5F53\u70B9\uFF09",
+      "\u8AA4\u8A8D\u8B58\u3092\u300C\u3001\u300D\u533A\u5207\u308A\u3067\uFF08\u4F8B: \u5F53\u70B9\u3001\u3068\u3046\u3066\u3093\u3066\u3093\uFF09",
       "\u8A18\u53F7\uFF08\u4F8B: \u3001 / \u6539\u884C\uFF09"
     );
     new import_obsidian.Setting(contentEl).addButton(
       (b) => b.setButtonText("\u4FDD\u5B58").setCta().onClick(async () => {
+        const reps = flattenGroups(this.reps);
+        const syms = flattenGroups(this.syms);
+        const dup = [...reps.dup, ...syms.dup];
+        if (dup.length > 0) {
+          new import_obsidian.Notice(
+            `VoxCraft: \u540C\u3058\u30AD\u30FC\u304C\u8907\u6570\u306E\u884C\u306B\u3042\u308A\u307E\u3059 \u2014 ${dup.join("\u3001")}
+\u3069\u306E\u884C\u306B\u6B8B\u3059\u304B\u6574\u7406\u3057\u3066\u304B\u3089\u4FDD\u5B58\u3057\u3066\u304F\u3060\u3055\u3044\u3002`,
+            1e4
+          );
+          return;
+        }
         try {
           await saveDict(this.wsUrl, {
-            replacements: toMap(this.reps),
-            symbols: toMap(this.syms)
+            replacements: reps.map,
+            symbols: syms.map
           });
           new import_obsidian.Notice("VoxCraft: \u8F9E\u66F8\u3092\u4FDD\u5B58\u3057\u307E\u3057\u305F\uFF08\u5373\u6642\u53CD\u6620\uFF09");
           this.close();
@@ -464,23 +494,25 @@ var DictModal = class extends import_obsidian.Modal {
     ).addButton((b) => b.setButtonText("\u30AD\u30E3\u30F3\u30BB\u30EB").onClick(() => this.close()));
   }
   renderRows(parent, title, rows, keyPlaceholder, valPlaceholder) {
-    const heading = parent.createEl("h3", { text: `${title} \u2014 ${rows.length}\u4EF6` });
+    const headingText = () => `${title} \u2014 ${rows.length}\u884C\u30FB${countKeys(rows)}\u30AD\u30FC`;
+    const heading = parent.createEl("h3", { text: headingText() });
     const list = parent.createDiv();
     list.style.maxHeight = "40vh";
     list.style.overflowY = "auto";
     const renderRow = (row, i) => {
       const s = new import_obsidian.Setting(list).addText((t) => {
-        t.setPlaceholder(keyPlaceholder).setValue(row.key).onChange((v) => {
-          row.key = v;
+        t.setPlaceholder(keyPlaceholder).setValue(row.keys).onChange((v) => {
+          row.keys = v;
         });
-        t.inputEl.style.minWidth = "12em";
+        t.inputEl.style.minWidth = "18em";
+        t.inputEl.style.flexGrow = "1";
       }).addText((t) => {
         t.setPlaceholder(valPlaceholder).setValue(row.value).onChange((v) => {
           row.value = v;
         });
-        t.inputEl.style.minWidth = "12em";
+        t.inputEl.style.minWidth = "10em";
       }).addExtraButton(
-        (b) => b.setIcon("trash").setTooltip("\u524A\u9664").onClick(() => {
+        (b) => b.setIcon("trash").setTooltip("\u3053\u306E\u884C\uFF08\u30AD\u30FC\u5168\u90E8\uFF09\u3092\u524A\u9664").onClick(() => {
           rows.splice(i, 1);
           this.render();
         })
@@ -493,9 +525,9 @@ var DictModal = class extends import_obsidian.Modal {
     new import_obsidian.Setting(parent).addButton(
       (b) => b.setButtonText("\uFF0B \u8FFD\u52A0").onClick(() => {
         var _a;
-        const row = { key: "", value: "" };
+        const row = { keys: "", value: "" };
         rows.push(row);
-        heading.setText(`${title} \u2014 ${rows.length}\u4EF6`);
+        heading.setText(headingText());
         const s = renderRow(row, rows.length - 1);
         s.settingEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
         (_a = s.settingEl.querySelector("input")) == null ? void 0 : _a.focus();

@@ -77,25 +77,57 @@ export async function saveDict(wsUrl: string, data: DictData): Promise<void> {
     }
 }
 
-type Row = { key: string; value: string };
+// 編集UIの1行 = 「正しい表記1つ + それに対応する誤認識キーの一覧（区切り文字列）」。
+// サーバーの保存形式（キー→値のフラットなマップ）は変えず、UI側だけ値で束ねる。
+// 同じ正解に複数の誤読を登録するのが実運用の主パターンなため。
+type Group = { keys: string; value: string };
 
-function toRows(map: Record<string, string>): Row[] {
-    return Object.entries(map || {}).map(([key, value]) => ({ key, value }));
+// キー欄の区切り: 読点・カンマ・スラッシュ・改行。
+const KEY_SPLIT_RE = /[、,，／/\n]+/;
+
+export function splitKeys(keys: string): string[] {
+    return keys
+        .split(KEY_SPLIT_RE)
+        .map((s) => s.trim())
+        .filter(Boolean);
 }
 
-function toMap(rows: Row[]): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const r of rows) {
-        const k = r.key.trim();
-        if (k) out[k] = r.value;
+// フラットなマップを「値ごとの行」へ束ねる（値の初出順を保つ）。
+export function toGroups(map: Record<string, string>): Group[] {
+    const order: string[] = [];
+    const byValue = new Map<string, string[]>();
+    for (const [k, v] of Object.entries(map || {})) {
+        if (!byValue.has(v)) {
+            byValue.set(v, []);
+            order.push(v);
+        }
+        byValue.get(v)!.push(k);
     }
-    return out;
+    return order.map((v) => ({ keys: byValue.get(v)!.join("、"), value: v }));
+}
+
+// 行の一覧をフラットなマップへ戻す。別の行に同じキーがあれば dup に集める
+// （どちらか一方しか効かないため、保存前にユーザーへ知らせる）。
+export function flattenGroups(groups: Group[]): { map: Record<string, string>; dup: string[] } {
+    const out: Record<string, string> = {};
+    const dup: string[] = [];
+    for (const g of groups) {
+        for (const k of splitKeys(g.keys)) {
+            if (k in out && out[k] !== g.value && !dup.includes(k)) dup.push(k);
+            out[k] = g.value;
+        }
+    }
+    return { map: out, dup };
+}
+
+function countKeys(groups: Group[]): number {
+    return groups.reduce((n, g) => n + splitKeys(g.keys).length, 0);
 }
 
 export class DictModal extends Modal {
     private wsUrl: string;
-    private reps: Row[] = [];
-    private syms: Row[] = [];
+    private reps: Group[] = [];
+    private syms: Group[] = [];
     private loaded = false;
     private loadError: string | null = null;
 
@@ -112,8 +144,8 @@ export class DictModal extends Modal {
         });
         try {
             const d = await fetchDict(this.wsUrl);
-            this.reps = toRows(d.replacements);
-            this.syms = toRows(d.symbols);
+            this.reps = toGroups(d.replacements);
+            this.syms = toGroups(d.symbols);
             this.loaded = true;
         } catch (e) {
             this.loadError = e instanceof Error ? e.message : String(e);
@@ -144,16 +176,18 @@ export class DictModal extends Modal {
         });
         contentEl.createEl("p", {
             text:
+                "同じ正解に対する誤認識は、1つの行に「、」区切りでまとめて書ける" +
+                "（例: 再変更、再変化、再変感 → 再変換）。" +
                 "注意: 短くて一般的な語をキーにすると本文を壊す。" +
                 "例「詳細」は誤認識でもあり正しい語でもあるため、前後を含めた長いキーにする。",
             cls: "setting-item-description",
         });
 
         this.renderRows(contentEl, "置換（replacements）", this.reps,
-            "Whisperの出力（例: 収集説明）", "正しい表記（例: 趣旨説明）");
+            "誤認識を「、」区切りで（例: 再変更、再変化）", "正しい表記（例: 再変換）");
 
         this.renderRows(contentEl, "記号語（symbols・単独で言ったときだけ変換）", this.syms,
-            "Whisperの出力（例: 当点）", "記号（例: 、 / 改行）");
+            "誤認識を「、」区切りで（例: 当点、とうてんてん）", "記号（例: 、 / 改行）");
 
         new Setting(contentEl)
             .addButton((b) =>
@@ -161,10 +195,22 @@ export class DictModal extends Modal {
                     .setButtonText("保存")
                     .setCta()
                     .onClick(async () => {
+                        const reps = flattenGroups(this.reps);
+                        const syms = flattenGroups(this.syms);
+                        const dup = [...reps.dup, ...syms.dup];
+                        if (dup.length > 0) {
+                            // 同じキーが複数の行にあると片方しか効かない。黙って上書きしない。
+                            new Notice(
+                                `VoxCraft: 同じキーが複数の行にあります — ${dup.join("、")}\n` +
+                                "どの行に残すか整理してから保存してください。",
+                                10000
+                            );
+                            return;
+                        }
                         try {
                             await saveDict(this.wsUrl, {
-                                replacements: toMap(this.reps),
-                                symbols: toMap(this.syms),
+                                replacements: reps.map,
+                                symbols: syms.map,
                             });
                             new Notice("VoxCraft: 辞書を保存しました（即時反映）");
                             this.close();
@@ -176,27 +222,31 @@ export class DictModal extends Modal {
             .addButton((b) => b.setButtonText("キャンセル").onClick(() => this.close()));
     }
 
-    private renderRows(parent: HTMLElement, title: string, rows: Row[],
+    private renderRows(parent: HTMLElement, title: string, rows: Group[],
                        keyPlaceholder: string, valPlaceholder: string): void {
-        const heading = parent.createEl("h3", { text: `${title} — ${rows.length}件` });
+        const headingText = () =>
+            `${title} — ${rows.length}行・${countKeys(rows)}キー`;
+        const heading = parent.createEl("h3", { text: headingText() });
         const list = parent.createDiv();
         list.style.maxHeight = "40vh";
         list.style.overflowY = "auto";
 
-        const renderRow = (row: Row, i: number): Setting => {
+        const renderRow = (row: Group, i: number): Setting => {
             const s = new Setting(list)
                 .addText((t) => {
-                    t.setPlaceholder(keyPlaceholder).setValue(row.key)
-                        .onChange((v) => { row.key = v; });
-                    t.inputEl.style.minWidth = "12em";
+                    t.setPlaceholder(keyPlaceholder).setValue(row.keys)
+                        .onChange((v) => { row.keys = v; });
+                    // 複数キーを並べる欄なので、正解欄より広めに取る。
+                    t.inputEl.style.minWidth = "18em";
+                    t.inputEl.style.flexGrow = "1";
                 })
                 .addText((t) => {
                     t.setPlaceholder(valPlaceholder).setValue(row.value)
                         .onChange((v) => { row.value = v; });
-                    t.inputEl.style.minWidth = "12em";
+                    t.inputEl.style.minWidth = "10em";
                 })
                 .addExtraButton((b) =>
-                    b.setIcon("trash").setTooltip("削除").onClick(() => {
+                    b.setIcon("trash").setTooltip("この行（キー全部）を削除").onClick(() => {
                         rows.splice(i, 1);
                         this.render();
                     })
@@ -210,9 +260,9 @@ export class DictModal extends Modal {
 
         new Setting(parent).addButton((b) =>
             b.setButtonText("＋ 追加").onClick(() => {
-                const row: Row = { key: "", value: "" };
+                const row: Group = { keys: "", value: "" };
                 rows.push(row);
-                heading.setText(`${title} — ${rows.length}件`);
+                heading.setText(headingText());
                 // 全体を作り直すと一覧の先頭までスクロールが戻ってしまうため、
                 // 新しい行だけをその場に足してそこへスクロール・フォーカスする。
                 const s = renderRow(row, rows.length - 1);
