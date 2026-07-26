@@ -178,12 +178,12 @@ export class DictModal extends Modal {
 
     private renderRows(parent: HTMLElement, title: string, rows: Row[],
                        keyPlaceholder: string, valPlaceholder: string): void {
-        parent.createEl("h3", { text: `${title} — ${rows.length}件` });
+        const heading = parent.createEl("h3", { text: `${title} — ${rows.length}件` });
         const list = parent.createDiv();
         list.style.maxHeight = "40vh";
         list.style.overflowY = "auto";
 
-        rows.forEach((row, i) => {
+        const renderRow = (row: Row, i: number): Setting => {
             const s = new Setting(list)
                 .addText((t) => {
                     t.setPlaceholder(keyPlaceholder).setValue(row.key)
@@ -203,12 +203,21 @@ export class DictModal extends Modal {
                 );
             s.controlEl.style.flexWrap = "wrap";
             s.infoEl.remove(); // 名前欄は使わない（横幅を入力に回す）
-        });
+            return s;
+        };
+
+        rows.forEach((row, i) => renderRow(row, i));
 
         new Setting(parent).addButton((b) =>
             b.setButtonText("＋ 追加").onClick(() => {
-                rows.push({ key: "", value: "" });
-                this.render();
+                const row: Row = { key: "", value: "" };
+                rows.push(row);
+                heading.setText(`${title} — ${rows.length}件`);
+                // 全体を作り直すと一覧の先頭までスクロールが戻ってしまうため、
+                // 新しい行だけをその場に足してそこへスクロール・フォーカスする。
+                const s = renderRow(row, rows.length - 1);
+                s.settingEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+                (s.settingEl.querySelector("input") as HTMLInputElement | null)?.focus();
             })
         );
     }

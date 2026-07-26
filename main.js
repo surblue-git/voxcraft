@@ -464,11 +464,11 @@ var DictModal = class extends import_obsidian.Modal {
     ).addButton((b) => b.setButtonText("\u30AD\u30E3\u30F3\u30BB\u30EB").onClick(() => this.close()));
   }
   renderRows(parent, title, rows, keyPlaceholder, valPlaceholder) {
-    parent.createEl("h3", { text: `${title} \u2014 ${rows.length}\u4EF6` });
+    const heading = parent.createEl("h3", { text: `${title} \u2014 ${rows.length}\u4EF6` });
     const list = parent.createDiv();
     list.style.maxHeight = "40vh";
     list.style.overflowY = "auto";
-    rows.forEach((row, i) => {
+    const renderRow = (row, i) => {
       const s = new import_obsidian.Setting(list).addText((t) => {
         t.setPlaceholder(keyPlaceholder).setValue(row.key).onChange((v) => {
           row.key = v;
@@ -487,11 +487,18 @@ var DictModal = class extends import_obsidian.Modal {
       );
       s.controlEl.style.flexWrap = "wrap";
       s.infoEl.remove();
-    });
+      return s;
+    };
+    rows.forEach((row, i) => renderRow(row, i));
     new import_obsidian.Setting(parent).addButton(
       (b) => b.setButtonText("\uFF0B \u8FFD\u52A0").onClick(() => {
-        rows.push({ key: "", value: "" });
-        this.render();
+        var _a;
+        const row = { key: "", value: "" };
+        rows.push(row);
+        heading.setText(`${title} \u2014 ${rows.length}\u4EF6`);
+        const s = renderRow(row, rows.length - 1);
+        s.settingEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        (_a = s.settingEl.querySelector("input")) == null ? void 0 : _a.focus();
       })
     );
   }
