@@ -74,6 +74,22 @@ class AsrOptions:
         )
 
     @staticmethod
+    def command() -> "AsrOptions":
+        """候補モーダル操作中の短い発話（「3番」「確定」）。速度優先。
+
+        本文には入らない状態なので精度より応答速度が要る。短い発話を
+        「吐息の幻覚」として捨てられると選べなくなるため、破棄側は緩める。
+        """
+        return AsrOptions(
+            vad_filter=config.vad_filter,
+            no_speech_threshold=max(config.no_speech_threshold, 0.8),
+            logprob_threshold=min(config.logprob_threshold, -1.5),
+            beam_size=1,
+            block_hallucinations=False,
+            condition_on_previous=False,
+        )
+
+    @staticmethod
     def recovery() -> "AsrOptions":
         """録音済み音声からの再認識（復旧）。速度を捨てて精度に全振りする。"""
         return AsrOptions(

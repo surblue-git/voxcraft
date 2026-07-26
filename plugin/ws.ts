@@ -179,6 +179,11 @@ export class AsrSocket {
         this.send({ type: "reconvert", text });
     }
 
+    // 候補選択中だけ応答速度優先へ切り替える（false で口述の既定値に戻す）。
+    sendTune(fast: boolean): void {
+        this.send({ type: "tune", fast });
+    }
+
     private send(obj: unknown): void {
         if (this.connected) this.ws!.send(JSON.stringify(obj));
     }

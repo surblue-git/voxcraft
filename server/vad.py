@@ -153,6 +153,17 @@ class VadChunker:
 
         return chunks
 
+    def set_silence_sec(self, sec: float) -> None:
+        """息継ぎ判定の長さを稼働中に変える（候補モーダル操作中の短縮用）。
+
+        バッファや繰り越しには触らないので、切り替えで音声を落とさない。
+        """
+        self._silence_frames = max(1, int(sec * self._sr / _FRAME))
+
+    def set_min_speech_sec(self, sec: float) -> None:
+        """発話とみなす最小長を稼働中に変える（「2番」のような短い発話用）。"""
+        self._min_samples = int(sec * self._sr)
+
     def flush(self) -> Chunk | None:
         """停止時に、残っている音声を最後のチャンクとして確定する。"""
         if self._residual.size:

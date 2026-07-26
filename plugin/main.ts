@@ -2,7 +2,7 @@ import { Editor, MarkdownView, Menu, Notice, Platform, Plugin } from "obsidian";
 import { EditorView } from "@codemirror/view";
 
 import { DICTATION_MIC, MicRecorder, RAW_MIC } from "./audio";
-import { parseCommand } from "./commands";
+import { looksLikeRespeak, parseCommand, parseModalCommand } from "./commands";
 import { DictModal, fetchDict, fetchReconvert, ReconvertPayload, saveDict } from "./dict";
 import { ReconvertModal } from "./suggest";
 import {
@@ -28,6 +28,15 @@ import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
 // 右クリック相当（Mac では Ctrl+クリックも）か。メニュー用の操作なので録音トグルからは除外する。
 function isSecondaryClick(evt: MouseEvent): boolean {
     return evt.button !== 0 || (Platform.isMacOS && evt.ctrlKey);
+}
+
+// その位置の直後が「コマンドの言い残し」か。
+//
+// 認識が途中で切れた命令（例「スミシンを再変」）はコマンドとして成立せず本文に残る。
+// これを検索対象にすると、直そうとした語ではなく言い残しの方を置換してしまうため
+// （実際に「スミシンを再変」が「住信を再変」になった）、後方検索から除外する。
+function isCommandEcho(text: string, at: number): boolean {
+    return /^を(?:再変|修正|変換|言い直|訂正)/.test(text.slice(at, at + 5));
 }
 
 // 「Aを再変換」で文書中を探すための表記一覧を作る。
@@ -168,6 +177,13 @@ export default class VoxCraftPlugin extends Plugin {
             id: "reconvert-selection",
             name: "選択範囲を再変換",
             callback: () => void this.reconvertSelection(),
+        });
+        // 音声の「ここを言い直し」は認識が化けると起動できない。手で確実に起動できる
+        // 経路を用意する（ホットキーを割り当てられる）。選択はどうせ手で行う操作。
+        this.addCommand({
+            id: "respeak-selection",
+            name: "選択範囲を言い直す（次の発話で置き換え）",
+            callback: () => this.startRespeak(),
         });
         this.addCommand({
             id: "select-endpoint",
@@ -334,11 +350,31 @@ export default class VoxCraftPlugin extends Plugin {
             this.handleTranscribeChunk(text, msg);
             return;
         }
+        // 候補モーダルが開いている間は、発話を本文へ入れずにモーダル操作として扱う。
+        // 「3番」が「サンバー」と認識されて本文に混ざった実例への対処。
+        // 解釈できなかった発話は捨てたことを必ず知らせる（無言で消さない）。
+        if (this.reconvertModal) {
+            const modalCmd = parseModalCommand(text);
+            if (modalCmd) {
+                this.runCommand(modalCmd);
+            } else if (text.trim()) {
+                new Notice(
+                    `VoxCraft: 候補選択中のため本文に入れませんでした —「${text}」\n` +
+                    "「3番」で選択、「確定」/「キャンセル」で閉じます。"
+                );
+            }
+            return;
+        }
         // 以下は従来どおりの口述処理（音声コマンドの判定を含む）。
         if (this.settings.enableCommands) {
             const cmd = parseCommand(text, this.settings.commandPrefix);
             // 「確定」「キャンセル」は対象（モーダル等）が無ければ本文として挿入する。
             if (cmd && this.runCommand(cmd)) return;
+            // 起動語リストから漏れた「言い直し」は、選択範囲があるときだけ拾う。
+            if (!cmd && this.hasSelection() && looksLikeRespeak(text)) {
+                this.startRespeak();
+                return;
+            }
         }
         // 「ここを言い直し」の直後の発話は、アンカーではなく覚えた範囲を置換する。
         if (this.pendingRespeak) {
@@ -400,8 +436,12 @@ export default class VoxCraftPlugin extends Plugin {
                 this.replaceInDoc(cmd.from, cmd.to);
                 return true;
             case "pick":
-                if (this.reconvertModal) this.reconvertModal.pickByVoice(cmd.index);
-                return true;
+                // モーダルが無ければコマンドではない（「3番」等を本文として残す）。
+                if (this.reconvertModal) {
+                    this.reconvertModal.pickByVoice(cmd.index);
+                    return true;
+                }
+                return false;
             case "reconvertTarget":
                 void this.reconvertByTarget(cmd.target);
                 return true;
@@ -409,6 +449,9 @@ export default class VoxCraftPlugin extends Plugin {
                 void this.reconvertSelection();
                 return true;
             case "respeak":
+                // 選択が無ければコマンドとして扱わない。「訂正」のような普通の語も
+                // 起動語にできるのは、この条件で本文が壊れないから。
+                if (!this.hasSelection()) return false;
                 this.startRespeak();
                 return true;
             case "confirm":
@@ -557,28 +600,43 @@ export default class VoxCraftPlugin extends Plugin {
     ): { from: number; to: number } | null {
         const doc = cm.state.doc.toString();
 
-        const searchIn = (winStart: number, winEnd: number) => {
+        const searchIn = (winStart: number, winEnd: number, skipEcho: boolean) => {
             const win = doc.slice(winStart, winEnd);
             let best: { from: number; to: number } | null = null;
             for (const s of surfaces) {
                 if (!s) continue;
-                const idx = win.lastIndexOf(s);
-                if (idx < 0) continue;
-                if (!best || winStart + idx > best.from) {
-                    best = { from: winStart + idx, to: winStart + idx + s.length };
+                // 後方から順に見て、コマンドの言い残し以外の最初の出現を採る。
+                let at = win.lastIndexOf(s);
+                while (skipEcho && at >= 0) {
+                    if (!isCommandEcho(win, at + s.length)) break;
+                    at = at === 0 ? -1 : win.lastIndexOf(s, at - 1);
+                }
+                if (at < 0) continue;
+                if (!best || winStart + at > best.from) {
+                    best = { from: winStart + at, to: winStart + at + s.length };
                 }
             }
             return best;
         };
 
+        // 直近の口述領域（アンカーから今回のチャンク分だけ遡った範囲）。
         const anchor = getAnchor(cm);
-        if (anchor !== null) {
-            const span = this.chunks.reduce((sum, c) => sum + c.length, 0);
-            const end = Math.min(anchor, doc.length);
-            const hit = searchIn(Math.max(0, end - span), end);
+        const winStart =
+            anchor === null
+                ? null
+                : Math.max(0, Math.min(anchor, doc.length) - this.chunks.reduce((n, c) => n + c.length, 0));
+        const winEnd = anchor === null ? null : Math.min(anchor, doc.length);
+
+        // 直近 → 全文の順に、まず言い残しを避けて探す。
+        if (winStart !== null && winEnd !== null) {
+            const hit = searchIn(winStart, winEnd, true);
             if (hit) return hit;
         }
-        return searchIn(0, doc.length);
+        const hit = searchIn(0, doc.length, true);
+        if (hit) return hit;
+        // どこにも無ければ言い残しも許して探す（本文が偶然「参加を修正」のような
+        // 並びになっている場合に、直せないより直せる方を選ぶ）。
+        return searchIn(0, doc.length, false);
     }
 
     // 選択範囲の再変換: タッチ/マウスで選んだ誤変換を候補から直す。
@@ -643,14 +701,29 @@ export default class VoxCraftPlugin extends Plugin {
                 onRegister: (f, t) => void this.registerReplacement(f, t),
             }
         );
-        // モーダルが閉じたら音声「N番」「確定」の受け皿参照を解除する。
+        this.adoptModal(modal);
+    }
+
+    // 候補モーダルを音声操作の受け皿として登録し、閉じるまで応答速度優先に切り替える。
+    private adoptModal(modal: ReconvertModal): void {
         const origClose = modal.onClose.bind(modal);
         modal.onClose = () => {
             origClose();
-            if (this.reconvertModal === modal) this.reconvertModal = null;
+            if (this.reconvertModal === modal) {
+                this.reconvertModal = null;
+                this.setFastMode(false);
+            }
         };
         this.reconvertModal = modal;
         modal.open();
+        this.setFastMode(true);
+    }
+
+    // 候補選択中だけ、サーバーを「短い発話に速く応える」設定へ寄せる。
+    // 「3番」の反応が遅い（無音待ち0.5秒＋beam=5）ことへの対処。閉じたら必ず戻す。
+    private setFastMode(on: boolean): void {
+        if (this.mode !== "dictation") return;
+        this.socket?.sendTune(on);
     }
 
     // 覚えていた範囲を検証してから置換する。モーダル操作中（録音継続中の追記等）に
@@ -707,10 +780,20 @@ export default class VoxCraftPlugin extends Plugin {
 
     // ---- 言い直し（読み自体が壊れた完全誤認識の修正） ----
 
+    // 口述対象のエディタに選択範囲があるか（言い直しコマンドの成立条件）。
+    private hasSelection(): boolean {
+        const cm = this.cm;
+        if (!cm || !cm.dom.isConnected) return false;
+        return !cm.state.selection.main.empty;
+    }
+
     // 「ここを言い直し」: 選択範囲を覚え、次の発話1回だけをその範囲への置換にする。
     private startRespeak(): void {
         const cm = this.cm;
-        if (!cm || !cm.dom.isConnected) return;
+        if (!cm || !cm.dom.isConnected) {
+            new Notice("VoxCraft: 録音中に、置き換えたい範囲を選択して使ってください。");
+            return;
+        }
         const sel = cm.state.selection.main;
         if (sel.empty) {
             new Notice("VoxCraft: 言い直したい範囲を選択してから「ここを言い直し」と言ってください。");
@@ -836,14 +919,7 @@ export default class VoxCraftPlugin extends Plugin {
         const modal = new ReconvertModal(this.app, segments, (chosen) => {
             this.applyReconvert(target, chosen.join(""));
         });
-        // モーダルが閉じたら音声「N番」の受け皿参照を解除する。
-        const origClose = modal.onClose.bind(modal);
-        modal.onClose = () => {
-            origClose();
-            if (this.reconvertModal === modal) this.reconvertModal = null;
-        };
-        this.reconvertModal = modal;
-        modal.open();
+        this.adoptModal(modal);
     }
 
     private applyReconvert(target: { from: number; to: number }, newText: string): void {

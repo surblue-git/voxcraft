@@ -64,7 +64,10 @@ export class ReconvertModal extends Modal {
         contentEl.createEl("h3", { text: "変換戻し — 候補を選択" });
         contentEl.createEl("p", {
             cls: "voxcraft-hint",
-            text: "クリック / 数字キー / 音声「3番」で選択。文節はTabで移動。",
+            text:
+                "クリック / 数字キー / 音声「3番」で選択。文節はTabで移動。" +
+                "Enter または音声「確定」で確定、Esc または「キャンセル」で閉じる" +
+                "（開いている間は発話が本文に入りません）。",
         });
 
         this.segments.forEach((seg, si) => {

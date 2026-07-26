@@ -7,6 +7,7 @@
         {"type": "start", "symbols": true, "stripSpace": true}
         {"type": "stop"}                     # 残り音声をflushして確定
         {"type": "reconvert", "text": "..."} # 再変換候補を要求
+        {"type": "tune", "fast": true}       # 候補選択中だけ応答速度優先に切替（false で復帰）
 
   サーバー → クライアント（すべて JSON テキストフレーム）
     - {"type": "ready"}                                # 接続確立
@@ -222,6 +223,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     opts = AsrOptions.dictation()
     strip_space = config.strip_ja_alnum_space
     symbols = config.enable_symbol_dictation
+    punctuate = config.enable_auto_punctuation
     session: SessionAudio | None = None
 
     await ws.send_text(json.dumps({"type": "ready"}))
@@ -236,7 +238,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             symbol_dictation=symbols,
             replacements=get_replacements(),
             symbols=get_symbols(),
-            auto_punctuate=config.enable_auto_punctuation,
+            auto_punctuate=punctuate,
         )
         if not text and not result.dropped:
             return
@@ -312,6 +314,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             }))
                     else:
                         opts = AsrOptions.dictation()
+                    punctuate = config.enable_auto_punctuation
                     # 辞書が壊れていたらクライアントに知らせる（無言で無効化しない）。
                     dict_err = get_error()
                     if dict_err:
@@ -331,6 +334,21 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 elif ctype == "reconvert":
                     payload = await asyncio.to_thread(reconvert, cmd.get("text", ""))
                     await ws.send_text(json.dumps({"type": "reconvert", **payload}))
+
+                elif ctype == "tune":
+                    # 候補モーダルを開いている間だけ「短い発話に速く応える」側へ寄せる。
+                    # 口述本体の既定値は触らず、モーダルを閉じたら必ず元に戻す。
+                    if mode == "dictation":
+                        if bool(cmd.get("fast", False)):
+                            chunker.set_silence_sec(min(config.silence_sec, 0.25))
+                            chunker.set_min_speech_sec(0.15)
+                            opts = AsrOptions.command()
+                            punctuate = False
+                        else:
+                            chunker.set_silence_sec(config.silence_sec)
+                            chunker.set_min_speech_sec(config.min_speech_sec)
+                            opts = AsrOptions.dictation()
+                            punctuate = config.enable_auto_punctuation
 
     except WebSocketDisconnect:
         pass
