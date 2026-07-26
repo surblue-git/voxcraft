@@ -18,6 +18,7 @@ export interface VoxCraftSettings {
     commandPrefix: string;      // 空なら常時判定、非空なら「この語で始まる発話」のみ
     autoReconvertLast: boolean; // 「変換戻し」時、直前チャンクを対象にする
     insertAt: "anchor" | "cursor"; // 口述の挿入位置。anchor=固定アンカー（既定）/ cursor=カーソル追従
+    pauseComma: boolean;        // 短い息継ぎでチャンクが切れたら「、」で接続する
     serverUrl?: string;         // 後方互換: 旧・単一URL（読み込み時に endpoints へ移行）
 }
 
@@ -30,6 +31,7 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     commandPrefix: "",
     autoReconvertLast: true,
     insertAt: "anchor",
+    pauseComma: true,
 };
 
 // 旧バージョン（単一 serverUrl）の設定を新モデルへ移行する。
@@ -42,6 +44,7 @@ export function migrateSettings(s: VoxCraftSettings): VoxCraftSettings {
     }
     if (!s.selection) s.selection = AUTO;
     if (s.insertAt !== "cursor") s.insertAt = "anchor";
+    if (typeof s.pauseComma !== "boolean") s.pauseComma = true;
     delete s.serverUrl;
     return s;
 }
@@ -232,6 +235,20 @@ export class VoxCraftSettingTab extends PluginSettingTab {
             .addToggle((t) =>
                 t.setValue(this.plugin.settings.stripJaAlnumSpace).onChange(async (v) => {
                     this.plugin.settings.stripJaAlnumSpace = v;
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        new Setting(containerEl)
+            .setName("息継ぎで読点を打つ")
+            .setDesc(
+                "短い息継ぎ（2秒以内）で文が切れたとき、続きを「、」でつないで挿入する。" +
+                "読点の位置は話すときの間がそのまま反映される。長い沈黙（考え中）には打たない。" +
+                "文字起こしモードでは無効。"
+            )
+            .addToggle((t) =>
+                t.setValue(this.plugin.settings.pauseComma).onChange(async (v) => {
+                    this.plugin.settings.pauseComma = v;
                     await this.plugin.saveSettings();
                 })
             );

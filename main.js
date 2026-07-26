@@ -639,7 +639,8 @@ var DEFAULT_SETTINGS = {
   enableCommands: true,
   commandPrefix: "",
   autoReconvertLast: true,
-  insertAt: "anchor"
+  insertAt: "anchor",
+  pauseComma: true
 };
 function migrateSettings(s) {
   if ((!s.endpoints || s.endpoints.length === 0) && s.serverUrl) {
@@ -652,6 +653,8 @@ function migrateSettings(s) {
     s.selection = AUTO;
   if (s.insertAt !== "cursor")
     s.insertAt = "anchor";
+  if (typeof s.pauseComma !== "boolean")
+    s.pauseComma = true;
   delete s.serverUrl;
   return s;
 }
@@ -783,6 +786,14 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
     new import_obsidian3.Setting(containerEl).setName("\u82F1\u6570\u5B57\u307E\u308F\u308A\u306E\u534A\u89D2\u30B9\u30DA\u30FC\u30B9\u3092\u9664\u53BB").setDesc("\u65E5\u672C\u8A9E\u3068\u82F1\u6570\u5B57\u306E\u9593\u306B\u52DD\u624B\u306B\u5165\u308B\u534A\u89D2\u30B9\u30DA\u30FC\u30B9\u3092\u53D6\u308A\u9664\u304F\u3002").addToggle(
       (t) => t.setValue(this.plugin.settings.stripJaAlnumSpace).onChange(async (v) => {
         this.plugin.settings.stripJaAlnumSpace = v;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("\u606F\u7D99\u304E\u3067\u8AAD\u70B9\u3092\u6253\u3064").setDesc(
+      "\u77ED\u3044\u606F\u7D99\u304E\uFF082\u79D2\u4EE5\u5185\uFF09\u3067\u6587\u304C\u5207\u308C\u305F\u3068\u304D\u3001\u7D9A\u304D\u3092\u300C\u3001\u300D\u3067\u3064\u306A\u3044\u3067\u633F\u5165\u3059\u308B\u3002\u8AAD\u70B9\u306E\u4F4D\u7F6E\u306F\u8A71\u3059\u3068\u304D\u306E\u9593\u304C\u305D\u306E\u307E\u307E\u53CD\u6620\u3055\u308C\u308B\u3002\u9577\u3044\u6C88\u9ED9\uFF08\u8003\u3048\u4E2D\uFF09\u306B\u306F\u6253\u305F\u306A\u3044\u3002\u6587\u5B57\u8D77\u3053\u3057\u30E2\u30FC\u30C9\u3067\u306F\u7121\u52B9\u3002"
+    ).addToggle(
+      (t) => t.setValue(this.plugin.settings.pauseComma).onChange(async (v) => {
+        this.plugin.settings.pauseComma = v;
         await this.plugin.saveSettings();
       })
     );
@@ -1341,6 +1352,8 @@ var VoxCraftPlugin = class extends import_obsidian6.Plugin {
     this.reconvertModal = null;
     // 「ここを言い直し」で覚えた選択範囲。次の発話1回だけがこの範囲を置換する。
     this.pendingRespeak = null;
+    // コマンド実行等で発話の流れが切れた直後は、次のチャンクに息継ぎ読点を打たない。
+    this.suppressJoiner = true;
     // 入力レベルメーター表示のスロットリング用。
     this.lastMeterAt = 0;
     this.transcribing = false;
@@ -1532,6 +1545,7 @@ var VoxCraftPlugin = class extends import_obsidian6.Plugin {
     this.chunks = [];
     this.pendingReconvert = null;
     this.pendingRespeak = null;
+    this.suppressJoiner = true;
     setAnchor(cm, cm.state.selection.main.head);
     if (mode === "transcribe") {
       this.spans = [];
@@ -1594,22 +1608,54 @@ var VoxCraftPlugin = class extends import_obsidian6.Plugin {
 \u300C3\u756A\u300D\u3067\u9078\u629E\u3001\u300C\u78BA\u5B9A\u300D/\u300C\u30AD\u30E3\u30F3\u30BB\u30EB\u300D\u3067\u9589\u3058\u307E\u3059\u3002`
         );
       }
+      this.suppressJoiner = true;
       return;
     }
     if (this.settings.enableCommands) {
       const cmd = parseCommand(text, this.settings.commandPrefix);
-      if (cmd && this.runCommand(cmd))
+      if (cmd && this.runCommand(cmd)) {
+        this.suppressJoiner = true;
         return;
+      }
       if (!cmd && this.hasSelection() && looksLikeRespeak(text)) {
         this.startRespeak();
+        this.suppressJoiner = true;
         return;
       }
     }
     if (this.pendingRespeak) {
       this.applyRespeak(text);
+      this.suppressJoiner = true;
       return;
     }
-    this.insertText(text);
+    this.insertText(this.withPauseComma(text, msg));
+  }
+  // 息継ぎ読点: 直前の発話から短い間（息継ぎ）で続いたチャンクを「、」でつなぐ。
+  // 読点の位置＝話すときの間、という日本語の自然な対応をそのまま使う。
+  // 長い沈黙（考え中）や、コマンドで流れが切れた直後には打たない。
+  withPauseComma(text, msg) {
+    const suppress = this.suppressJoiner;
+    this.suppressJoiner = false;
+    if (!this.settings.pauseComma || suppress || !text)
+      return text;
+    const pause = msg == null ? void 0 : msg.pause;
+    if (typeof pause !== "number" || pause <= 0 || pause > 2)
+      return text;
+    if (/^[、。！？!?…・：\n）」』]/.test(text))
+      return text;
+    const cm = this.cm;
+    if (!cm || !cm.dom.isConnected)
+      return text;
+    const anchor = getAnchor(cm);
+    if (anchor === null || anchor <= 0)
+      return text;
+    if (this.settings.insertAt === "cursor" && cm.state.selection.main.head !== anchor) {
+      return text;
+    }
+    const prev = cm.state.doc.sliceString(anchor - 1, anchor);
+    if (!prev || /[、。！？!?…・：\s\n「『（(]/.test(prev))
+      return text;
+    return "\u3001" + text;
   }
   // 文字起こしモードのチャンク処理。
   // 音声コマンドは判定しない（動画側の発話で勝手にコマンドが走るのを防ぐ）。

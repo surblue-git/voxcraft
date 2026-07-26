@@ -26,6 +26,9 @@ class Chunk:
     # 対応づけて後から同じ区間を再認識（復旧）するために使う。
     start: int = 0
     end: int = 0
+    # 前チャンクの発話終わりから、このチャンクの発話始まりまでの無音（秒）。
+    # 「息継ぎで読点を打つ」判断材料。最初のチャンクなど計測不能なら None。
+    pause: float | None = None
 
 
 class _SileroDetector:
@@ -115,6 +118,10 @@ class VadChunker:
         self._carried = 0  # 前チャンクから繰り越した無音の長さ（最小長判定から除外する）
         self._stream_pos = 0  # フレーム化して処理済みのサンプル数（ストリーム上の現在位置）
         self._buf_start = 0   # _buf の先頭がストリーム上の何サンプル目か
+        # 息継ぎ長の計測。チャンクの start/end は繰り越し無音を含むため使えない。
+        # 「発話の終わり」と「次の発話の始まり」のストリーム位置を直接記録する。
+        self._first_speech_pos: int | None = None  # 現バッファで最初に声が出た位置
+        self._prev_speech_end: int | None = None   # 前チャンクで最後に声が出た位置
 
     def push(self, pcm: np.ndarray) -> list[Chunk]:
         """float32 音声ブロックを流し込み、確定したチャンクのリストを返す。"""
@@ -134,6 +141,8 @@ class VadChunker:
             self._stream_pos += _FRAME
 
             if speech:
+                if not self._has_speech:
+                    self._first_speech_pos = self._stream_pos - _FRAME
                 self._has_speech = True
                 self._silence_run = 0
                 self._last_speech_idx = len(self._buf)
@@ -197,6 +206,15 @@ class VadChunker:
         audio = np.concatenate(audio_buf)
         start = self._buf_start
         end = start + audio.size
+
+        # 息継ぎ長 = 前チャンクの発話終わり → このチャンクの発話始まり（秒）。
+        pause: float | None = None
+        if self._first_speech_pos is not None and self._prev_speech_end is not None:
+            pause = max(0.0, (self._first_speech_pos - self._prev_speech_end) / self._sr)
+        # このチャンクの発話終わり位置を次回のために記録する。
+        speech_end = self._buf_start + self._last_speech_idx * _FRAME
+        self._prev_speech_end = speech_end
+
         self._reset_chunk()
         # 切り詰めた末尾は捨てずに次チャンクへ繰り越す。
         # VADが小声・語尾・フィラー（「ま、」等）を無音と誤判定した場合でも、
@@ -207,7 +225,7 @@ class VadChunker:
             self._carried = self._cur_len
             self._buf_start = end
         self._detector.reset()
-        return Chunk(audio=audio, reason=reason, start=start, end=end)
+        return Chunk(audio=audio, reason=reason, start=start, end=end, pause=pause)
 
     def _quietest_cut(self) -> int:
         """強制確定の切れ目を、直近でいちばん音量の低いフレーム境界に寄せる。
@@ -237,3 +255,4 @@ class VadChunker:
         self._last_speech_idx = 0
         self._cur_len = 0
         self._carried = 0
+        self._first_speech_pos = None

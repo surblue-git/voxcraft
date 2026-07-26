@@ -90,6 +90,8 @@ export default class VoxCraftPlugin extends Plugin {
     private reconvertModal: ReconvertModal | null = null;
     // 「ここを言い直し」で覚えた選択範囲。次の発話1回だけがこの範囲を置換する。
     private pendingRespeak: { from: number; to: number; text: string } | null = null;
+    // コマンド実行等で発話の流れが切れた直後は、次のチャンクに息継ぎ読点を打たない。
+    private suppressJoiner = true;
 
     // 入力レベルメーター表示のスロットリング用。
     private lastMeterAt = 0;
@@ -294,6 +296,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.chunks = [];
         this.pendingReconvert = null;
         this.pendingRespeak = null;
+        this.suppressJoiner = true; // 最初のチャンクには息継ぎ読点を打たない
         setAnchor(cm, cm.state.selection.main.head);
 
         if (mode === "transcribe") {
@@ -363,25 +366,59 @@ export default class VoxCraftPlugin extends Plugin {
                     "「3番」で選択、「確定」/「キャンセル」で閉じます。"
                 );
             }
+            this.suppressJoiner = true;
             return;
         }
         // 以下は従来どおりの口述処理（音声コマンドの判定を含む）。
         if (this.settings.enableCommands) {
             const cmd = parseCommand(text, this.settings.commandPrefix);
             // 「確定」「キャンセル」は対象（モーダル等）が無ければ本文として挿入する。
-            if (cmd && this.runCommand(cmd)) return;
+            if (cmd && this.runCommand(cmd)) {
+                this.suppressJoiner = true;
+                return;
+            }
             // 起動語リストから漏れた「言い直し」は、選択範囲があるときだけ拾う。
             if (!cmd && this.hasSelection() && looksLikeRespeak(text)) {
                 this.startRespeak();
+                this.suppressJoiner = true;
                 return;
             }
         }
         // 「ここを言い直し」の直後の発話は、アンカーではなく覚えた範囲を置換する。
         if (this.pendingRespeak) {
             this.applyRespeak(text);
+            this.suppressJoiner = true;
             return;
         }
-        this.insertText(text);
+        this.insertText(this.withPauseComma(text, msg));
+    }
+
+    // 息継ぎ読点: 直前の発話から短い間（息継ぎ）で続いたチャンクを「、」でつなぐ。
+    // 読点の位置＝話すときの間、という日本語の自然な対応をそのまま使う。
+    // 長い沈黙（考え中）や、コマンドで流れが切れた直後には打たない。
+    private withPauseComma(text: string, msg?: ServerMessage): string {
+        const suppress = this.suppressJoiner;
+        this.suppressJoiner = false;
+        if (!this.settings.pauseComma || suppress || !text) return text;
+
+        const pause = msg?.pause;
+        if (typeof pause !== "number" || pause <= 0 || pause > 2.0) return text;
+        // チャンク自体が記号・閉じ括弧などで始まるときは付けない（「、、」防止）。
+        if (/^[、。！？!?…・：\n）」』]/.test(text)) return text;
+
+        const cm = this.cm;
+        if (!cm || !cm.dom.isConnected) return text;
+        const anchor = getAnchor(cm);
+        if (anchor === null || anchor <= 0) return text;
+        // カーソル追従で挿入先が移る場合は文脈が切れているので付けない。
+        if (this.settings.insertAt === "cursor" && cm.state.selection.main.head !== anchor) {
+            return text;
+        }
+        // 直前の文字が句読点・改行・開き括弧・空白なら付けない。
+        const prev = cm.state.doc.sliceString(anchor - 1, anchor);
+        if (!prev || /[、。！？!?…・：\s\n「『（(]/.test(prev)) return text;
+
+        return "、" + text;
     }
 
     // 文字起こしモードのチャンク処理。

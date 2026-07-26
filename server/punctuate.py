@@ -34,6 +34,12 @@ _JOIN_PARTICLES = {"が", "けど", "けれど", "けれども", "ので", "の�
 # 新しい文の始まり（＝境界の後ろ）とみなす品詞大分類。
 _STARTER_POS = {"名詞", "代名詞", "副詞", "接続詞", "感動詞", "連体詞", "動詞", "形容詞", "形状詞"}
 
+# 文頭にあれば直後に「、」を打つ接続表現。sudachi が接続詞と品詞付けする語は
+# 品詞で拾えるが、つまり/例えば等は副詞扱いになるため表層で補う（文頭限定）。
+_LEAD_CONNECTIVES = {
+    "つまり", "たとえば", "例えば", "ちなみに", "要するに", "一方",
+}
+
 # 既に文末になっている記号（この後ろに「。」を足さない）。
 _TERMINALS = set("。！？!?…」）)")
 
@@ -113,6 +119,13 @@ def add_punctuation(text: str) -> str:
             if pos[0] == "助詞" and pos[1] == "接続助詞" and surface in _JOIN_PARTICLES and starter:
                 out.append("、")
                 continue
+            # 「、」: 文頭の接続詞（しかし/また/つまり…）の直後。定番の用法で誤爆が少ない。
+            # 文頭 ＝ チャンクの先頭、または「。」等で文が切れた直後に限る。
+            if pos[0] == "接続詞" or surface in _LEAD_CONNECTIVES:
+                prev_char = out[-2][-1] if len(out) >= 2 and out[-2] else None
+                if prev_char is None or prev_char in _TERMINALS:
+                    out.append("、")
+                    continue
 
     result = "".join(out)
 

@@ -17,6 +17,7 @@ export interface ServerMessage {
     start?: number;
     end?: number;
     dropped?: string[]; // サーバー側フィルタで捨てたテキスト（無言で消さないための通知）
+    pause?: number; // 前チャンクの発話終わりからの無音（秒）。「息継ぎで読点」の判断材料
 }
 
 export interface WsHandlers {

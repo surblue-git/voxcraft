@@ -228,7 +228,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
     await ws.send_text(json.dumps({"type": "ready"}))
 
-    async def emit_chunk(audio: np.ndarray, reason: str, start: int, end: int) -> None:
+    async def emit_chunk(
+        audio: np.ndarray, reason: str, start: int, end: int, pause: float | None = None
+    ) -> None:
         # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
         await ws.send_text(json.dumps({"type": "partial", "reason": reason}))
         result = await _transcribe_chunk(audio, opts)
@@ -243,6 +245,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
         if not text and not result.dropped:
             return
         msg: dict = {"type": "chunk", "text": text}
+        # 前チャンクとの息継ぎ長（秒）。クライアントの「息継ぎで読点」判断に使う。
+        if pause is not None:
+            msg["pause"] = round(pause, 2)
         # 録音を残している間は、テキストと音声の対応（秒）を添えて復旧できるようにする。
         if session is not None:
             msg["session"] = session.session_id
@@ -287,7 +292,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if session is not None:
                     session.append(pcm)
                 for chunk in chunker.push(pcm):
-                    queue.put_nowait((chunk.audio, chunk.reason, chunk.start, chunk.end))
+                    queue.put_nowait(
+                        (chunk.audio, chunk.reason, chunk.start, chunk.end, chunk.pause)
+                    )
                 continue
 
             # --- 制御コマンド（テキスト JSON） ---
@@ -326,7 +333,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 elif ctype == "stop":
                     tail = chunker.flush()
                     if tail is not None:
-                        queue.put_nowait((tail.audio, tail.reason, tail.start, tail.end))
+                        queue.put_nowait(
+                            (tail.audio, tail.reason, tail.start, tail.end, tail.pause)
+                        )
                     # 溜まっている分を全部出し切ってから停止を通知する。
                     await queue.join()
                     await ws.send_text(json.dumps({"type": "stopped"}))
