@@ -1,7 +1,7 @@
 import { Editor, MarkdownView, Menu, Notice, Platform, Plugin } from "obsidian";
 import { EditorView } from "@codemirror/view";
 
-import { MicRecorder } from "./audio";
+import { DICTATION_MIC, MicRecorder, RAW_MIC } from "./audio";
 import { parseCommand } from "./commands";
 import { DictModal } from "./dict";
 import { ReconvertModal } from "./suggest";
@@ -21,6 +21,7 @@ import {
     recognizeRange,
     spanRangeFor,
 } from "./recover";
+import { RecordingsModal } from "./recordings";
 import { AsrMode, AsrSocket, ServerMessage } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
 
@@ -119,6 +120,11 @@ export default class VoxCraftPlugin extends Plugin {
             callback: () => void this.recoverSelection(),
         });
         this.addCommand({
+            id: "manage-recordings",
+            name: "文字起こしの録音を整理",
+            callback: () => this.openRecordingsModal(),
+        });
+        this.addCommand({
             id: "reconvert-last",
             name: "直前の入力を変換戻し",
             callback: () => this.requestReconvert(),
@@ -213,7 +219,10 @@ export default class VoxCraftPlugin extends Plugin {
 
         this.recorder = new MicRecorder(
             (pcm) => this.socket?.sendAudio(pcm),
-            (level) => this.showLevel(level)
+            (level) => this.showLevel(level),
+            // 文字起こしは自分の声ではなく会場や再生音を拾う。ブラウザの前処理は
+            // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
+            mode === "transcribe" ? RAW_MIC : DICTATION_MIC
         );
         try {
             await this.recorder.start();
@@ -565,6 +574,15 @@ export default class VoxCraftPlugin extends Plugin {
     // 現在つながっている接続先（未接続なら設定上の第一候補）。辞書APIの宛先に使う。
     activeUrl(): string | null {
         return this.socket?.activeUrl ?? resolveUrls(this.settings)[0] ?? null;
+    }
+
+    private openRecordingsModal(): void {
+        const url = this.activeUrl();
+        if (!url) {
+            new Notice("VoxCraft: 接続先が設定されていません");
+            return;
+        }
+        new RecordingsModal(this.app, url).open();
     }
 
     private openDictModal(): void {

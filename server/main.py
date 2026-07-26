@@ -31,7 +31,13 @@ from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from asr import AsrOptions, transcriber
 from config import config
 from postproc import postprocess
-from recording import SessionAudio, load_slice
+from recording import (
+    RECORDINGS_DIR,
+    SessionAudio,
+    delete_session,
+    list_sessions,
+    load_slice,
+)
 from punctuate import available as punctuation_available
 from reconvert import reconvert
 from userdict import (
@@ -104,6 +110,29 @@ async def _transcribe_chunk(audio: np.ndarray, opts: AsrOptions):
     # hotwords は既定OFF（長いと kotoba-whisper が認識を空にするため。config 参照）。
     hotwords = get_hotwords() if config.use_hotwords else None
     return await asyncio.to_thread(transcriber.transcribe, audio, hotwords, opts)
+
+
+@app.get("/recordings")
+def recordings_list() -> dict:
+    """保存済み録音の一覧と保存先フォルダを返す（プラグインの管理UI用）。"""
+    return {"dir": str(RECORDINGS_DIR), "items": list_sessions()}
+
+
+@app.post("/recordings/delete")
+def recordings_delete(payload: dict = Body(...)) -> dict:
+    """指定した録音を削除する。IDの書式検証を通ったものだけ消す。"""
+    sessions = payload.get("sessions", [])
+    if not isinstance(sessions, list):
+        raise HTTPException(status_code=400, detail="sessions は配列で指定してください")
+    deleted, failed = [], []
+    for s in sessions:
+        try:
+            delete_session(str(s))
+            deleted.append(s)
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            # 録音中のファイルは掴まれていて消せない。理由を返して黙って失敗しない。
+            failed.append({"session": s, "reason": str(exc)})
+    return {"deleted": deleted, "failed": failed}
 
 
 @app.post("/recognize")

@@ -84,6 +84,37 @@ def load_slice(session_id: str, start_sec: float, end_sec: float) -> np.ndarray:
     return ints.astype(np.float32) / 32768.0
 
 
+def list_sessions() -> list[dict]:
+    """保存済みの録音を新しい順に一覧する（管理UI用）。"""
+    if not RECORDINGS_DIR.is_dir():
+        return []
+    items: list[dict] = []
+    for path in RECORDINGS_DIR.glob("*.wav"):
+        if not _SESSION_RE.match(path.stem):
+            continue
+        try:
+            stat = path.stat()
+            with wave.open(str(path), "rb") as wav:
+                seconds = wav.getnframes() / float(wav.getframerate())
+        except Exception:
+            # 録音中のファイルはヘッダが未確定なので、長さはサイズから概算する。
+            stat = path.stat()
+            seconds = max(0.0, (stat.st_size - 44) / 32000.0)
+        items.append({
+            "session": path.stem,
+            "seconds": round(seconds, 1),
+            "bytes": stat.st_size,
+            "modified": int(stat.st_mtime),
+        })
+    items.sort(key=lambda i: i["session"], reverse=True)
+    return items
+
+
+def delete_session(session_id: str) -> None:
+    """録音を1件削除する。IDは書式検証を通ったものだけ受け付ける。"""
+    resolve_session_path(session_id).unlink()
+
+
 def session_duration_sec(session_id: str) -> float:
     path = resolve_session_path(session_id)
     with wave.open(str(path), "rb") as wav:

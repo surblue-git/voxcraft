@@ -7,6 +7,27 @@
 export type PcmHandler = (pcm16: ArrayBuffer) => void;
 export type LevelHandler = (level: number) => void; // 0..1 の入力レベル
 
+// ブラウザ側の音声前処理。既定（口述）は全部ONのまま。
+// 会場PA越しの遠い声や残響には、近接した1人の声を想定したこれらの処理が
+// 悪く働く（NSが残響ごと削り、AGCが音量を揺らす）ため、文字起こしでは切る。
+export interface MicOptions {
+    echoCancellation: boolean;
+    noiseSuppression: boolean;
+    autoGainControl: boolean;
+}
+
+export const DICTATION_MIC: MicOptions = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+};
+
+export const RAW_MIC: MicOptions = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+};
+
 const WORKLET_CODE = `
 class VoxCraftAudioProcessor extends AudioWorkletProcessor {
     process(inputs, outputs, parameters) {
@@ -34,10 +55,17 @@ export class MicRecorder {
     private onPcm: PcmHandler;
     private onLevel: LevelHandler | null;
     private targetRate: number;
+    private mic: MicOptions;
 
-    constructor(onPcm: PcmHandler, onLevel: LevelHandler | null = null, targetRate = 16000) {
+    constructor(
+        onPcm: PcmHandler,
+        onLevel: LevelHandler | null = null,
+        mic: MicOptions = DICTATION_MIC,
+        targetRate = 16000
+    ) {
         this.onPcm = onPcm;
         this.onLevel = onLevel;
+        this.mic = mic;
         this.targetRate = targetRate;
     }
 
@@ -50,9 +78,9 @@ export class MicRecorder {
         this.stream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
+                echoCancellation: this.mic.echoCancellation,
+                noiseSuppression: this.mic.noiseSuppression,
+                autoGainControl: this.mic.autoGainControl,
             },
         });
         this.ctx = new AudioContext();

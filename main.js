@@ -26,9 +26,19 @@ __export(main_exports, {
   default: () => VoxCraftPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // audio.ts
+var DICTATION_MIC = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true
+};
+var RAW_MIC = {
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false
+};
 var WORKLET_CODE = `
 class VoxCraftAudioProcessor extends AudioWorkletProcessor {
     process(inputs, outputs, parameters) {
@@ -46,7 +56,7 @@ class VoxCraftAudioProcessor extends AudioWorkletProcessor {
 registerProcessor('voxcraft-audio-processor', VoxCraftAudioProcessor);
 `;
 var MicRecorder = class {
-  constructor(onPcm, onLevel = null, targetRate = 16e3) {
+  constructor(onPcm, onLevel = null, mic = DICTATION_MIC, targetRate = 16e3) {
     this.ctx = null;
     this.stream = null;
     this.source = null;
@@ -55,6 +65,7 @@ var MicRecorder = class {
     this.workletBlobUrl = null;
     this.onPcm = onPcm;
     this.onLevel = onLevel;
+    this.mic = mic;
     this.targetRate = targetRate;
   }
   get active() {
@@ -66,9 +77,9 @@ var MicRecorder = class {
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
+        echoCancellation: this.mic.echoCancellation,
+        noiseSuppression: this.mic.noiseSuppression,
+        autoGainControl: this.mic.autoGainControl
       }
     });
     this.ctx = new AudioContext();
@@ -740,6 +751,186 @@ var RecoverModal = class extends import_obsidian4.Modal {
   }
 };
 
+// recordings.ts
+var import_obsidian5 = require("obsidian");
+async function fetchRecordings(wsUrl) {
+  const res = await (0, import_obsidian5.requestUrl)({ url: `${httpBase(wsUrl)}/recordings`, method: "GET" });
+  return res.json;
+}
+async function deleteRecordings(wsUrl, sessions) {
+  const res = await (0, import_obsidian5.requestUrl)({
+    url: `${httpBase(wsUrl)}/recordings/delete`,
+    method: "POST",
+    contentType: "application/json",
+    body: JSON.stringify({ sessions }),
+    throw: false
+  });
+  if (res.status >= 400) {
+    const detail = res.json && res.json.detail || `HTTP ${res.status}`;
+    throw new Error(detail);
+  }
+  return res.json;
+}
+function formatSession(id) {
+  const m = id.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/);
+  if (!m)
+    return id;
+  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+}
+function formatDuration(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor(sec % 3600 / 60);
+  const s = Math.floor(sec % 60);
+  return h > 0 ? `${h}\u6642\u9593${m}\u5206` : m > 0 ? `${m}\u5206${s}\u79D2` : `${s}\u79D2`;
+}
+function formatSize(bytes) {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+function isLocalServer(wsUrl) {
+  return /^wss?:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/i.test(wsUrl.trim());
+}
+function openFolder(dir) {
+  var _a, _b;
+  try {
+    const shell = (_b = (_a = window.require) == null ? void 0 : _a.call(window, "electron")) == null ? void 0 : _b.shell;
+    if (!(shell == null ? void 0 : shell.openPath))
+      throw new Error("\u3053\u306E\u74B0\u5883\u3067\u306F\u958B\u3051\u307E\u305B\u3093");
+    void shell.openPath(dir);
+  } catch (e) {
+    new import_obsidian5.Notice(`VoxCraft: \u30D5\u30A9\u30EB\u30C0\u3092\u958B\u3051\u307E\u305B\u3093\u3067\u3057\u305F\uFF08${e instanceof Error ? e.message : String(e)}\uFF09`);
+  }
+}
+var RecordingsModal = class extends import_obsidian5.Modal {
+  constructor(app, wsUrl) {
+    super(app);
+    this.data = null;
+    this.loadError = null;
+    this.wsUrl = wsUrl;
+  }
+  async onOpen() {
+    this.contentEl.createEl("p", { text: "\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026" });
+    try {
+      this.data = await fetchRecordings(this.wsUrl);
+    } catch (e) {
+      this.loadError = e instanceof Error ? e.message : String(e);
+    }
+    this.render();
+  }
+  render() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "\u6587\u5B57\u8D77\u3053\u3057\u306E\u9332\u97F3" });
+    if (this.loadError) {
+      contentEl.createEl("p", { text: `\u4E00\u89A7\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093: ${this.loadError}` });
+      return;
+    }
+    const data = this.data;
+    if (!data)
+      return;
+    contentEl.createEl("div", {
+      text: `\u4FDD\u5B58\u5148: ${data.dir}`,
+      cls: "setting-item-description"
+    });
+    const total = data.items.reduce((a, i) => a + i.bytes, 0);
+    contentEl.createEl("div", {
+      text: `${data.items.length} \u4EF6 / \u5408\u8A08 ${formatSize(total)}`,
+      cls: "setting-item-description"
+    });
+    const header = new import_obsidian5.Setting(contentEl);
+    if (isLocalServer(this.wsUrl)) {
+      header.addButton(
+        (b) => b.setButtonText("\u30D5\u30A9\u30EB\u30C0\u3092\u958B\u304F").onClick(() => openFolder(data.dir))
+      );
+    } else {
+      header.setDesc("\u4FDD\u5B58\u5148\u306F\u5225\u30DE\u30B7\u30F3\u306E\u305F\u3081\u3001\u3053\u3053\u304B\u3089\u306F\u958B\u3051\u307E\u305B\u3093\u3002");
+    }
+    header.addButton(
+      (b) => b.setButtonText("\u66F4\u65B0").onClick(() => {
+        void this.reload();
+      })
+    );
+    if (data.items.length === 0) {
+      contentEl.createEl("p", { text: "\u9332\u97F3\u306F\u307E\u3060\u3042\u308A\u307E\u305B\u3093\u3002" });
+      return;
+    }
+    for (const item of data.items) {
+      new import_obsidian5.Setting(contentEl).setName(formatSession(item.session)).setDesc(`${formatDuration(item.seconds)} / ${formatSize(item.bytes)}`).addButton(
+        (b) => b.setButtonText("\u524A\u9664").setWarning().onClick(() => void this.confirmDelete(item))
+      );
+    }
+  }
+  async reload() {
+    try {
+      this.data = await fetchRecordings(this.wsUrl);
+      this.loadError = null;
+    } catch (e) {
+      this.loadError = e instanceof Error ? e.message : String(e);
+    }
+    this.render();
+  }
+  // 消したら戻せないので、日時と長さを見せて一度確認する。
+  async confirmDelete(item) {
+    var _a;
+    const label = `${formatSession(item.session)}\uFF08${formatDuration(item.seconds)} / ${formatSize(item.bytes)}\uFF09`;
+    const ok = await new Promise((resolve) => {
+      const modal = new ConfirmModal(this.app, label, resolve);
+      modal.open();
+    });
+    if (!ok)
+      return;
+    try {
+      const res = await deleteRecordings(this.wsUrl, [item.session]);
+      if ((_a = res.failed) == null ? void 0 : _a.length) {
+        new import_obsidian5.Notice(`VoxCraft: \u524A\u9664\u3067\u304D\u307E\u305B\u3093\uFF08${res.failed[0].reason}\uFF09`);
+      } else {
+        new import_obsidian5.Notice("VoxCraft: \u9332\u97F3\u3092\u524A\u9664\u3057\u307E\u3057\u305F\u3002");
+      }
+    } catch (e) {
+      new import_obsidian5.Notice(`VoxCraft: \u524A\u9664\u306B\u5931\u6557\u3057\u307E\u3057\u305F\uFF08${e instanceof Error ? e.message : String(e)}\uFF09`);
+    }
+    await this.reload();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var ConfirmModal = class extends import_obsidian5.Modal {
+  constructor(app, label, resolve) {
+    super(app);
+    this.answered = false;
+    this.label = label;
+    this.resolve = resolve;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: "\u9332\u97F3\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F" });
+    contentEl.createEl("p", { text: this.label });
+    contentEl.createEl("p", {
+      text: "\u524A\u9664\u3059\u308B\u3068\u3001\u3053\u306E\u9332\u97F3\u304B\u3089\u306E\u5FA9\u65E7\uFF08\u97F3\u58F0\u306E\u518D\u8A8D\u8B58\uFF09\u306F\u3067\u304D\u306A\u304F\u306A\u308A\u307E\u3059\u3002",
+      cls: "setting-item-description"
+    });
+    new import_obsidian5.Setting(contentEl).addButton(
+      (b) => b.setButtonText("\u524A\u9664\u3059\u308B").setWarning().onClick(() => {
+        this.answered = true;
+        this.resolve(true);
+        this.close();
+      })
+    ).addButton(
+      (b) => b.setButtonText("\u3084\u3081\u308B").onClick(() => {
+        this.answered = true;
+        this.resolve(false);
+        this.close();
+      })
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+    if (!this.answered)
+      this.resolve(false);
+  }
+};
+
 // ws.ts
 function safeClose(ws) {
   try {
@@ -951,9 +1142,9 @@ function getAnchor(cm) {
 
 // main.ts
 function isSecondaryClick(evt) {
-  return evt.button !== 0 || import_obsidian5.Platform.isMacOS && evt.ctrlKey;
+  return evt.button !== 0 || import_obsidian6.Platform.isMacOS && evt.ctrlKey;
 }
-var VoxCraftPlugin = class extends import_obsidian5.Plugin {
+var VoxCraftPlugin = class extends import_obsidian6.Plugin {
   constructor() {
     super(...arguments);
     this.socket = null;
@@ -1035,6 +1226,11 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
       callback: () => void this.recoverSelection()
     });
     this.addCommand({
+      id: "manage-recordings",
+      name: "\u6587\u5B57\u8D77\u3053\u3057\u306E\u9332\u97F3\u3092\u6574\u7406",
+      callback: () => this.openRecordingsModal()
+    });
+    this.addCommand({
       id: "reconvert-last",
       name: "\u76F4\u524D\u306E\u5165\u529B\u3092\u5909\u63DB\u623B\u3057",
       callback: () => this.requestReconvert()
@@ -1066,12 +1262,12 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
       return;
     const cm = this.getActiveCm();
     if (!cm) {
-      new import_obsidian5.Notice("VoxCraft: \u633F\u5165\u5148\u306E\u30CE\u30FC\u30C8\uFF08\u7DE8\u96C6\u30E2\u30FC\u30C9\uFF09\u3092\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u633F\u5165\u5148\u306E\u30CE\u30FC\u30C8\uFF08\u7DE8\u96C6\u30E2\u30FC\u30C9\uFF09\u3092\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
     const urls = resolveUrls(this.settings);
     if (urls.length === 0) {
-      new import_obsidian5.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A\u3067\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u3092\u8FFD\u52A0\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A\u3067\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u3092\u8FFD\u52A0\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
     this.setStatus(urls.length > 1 ? "\u63A5\u7D9A\u4E2D\u2026\uFF08\u3064\u306A\u304C\u308B\u65B9\u3092\u9078\u629E\uFF09" : "\u63A5\u7D9A\u4E2D\u2026");
@@ -1094,10 +1290,10 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
         this.handleChunk(text, msg);
       },
       onReconvert: (msg) => this.handleReconvert(msg),
-      onError: (m) => new import_obsidian5.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`),
+      onError: (m) => new import_obsidian6.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`),
       onClose: () => {
         if (this.recording) {
-          new import_obsidian5.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u63A5\u7D9A\u304C\u5207\u308C\u307E\u3057\u305F\u3002");
+          new import_obsidian6.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u63A5\u7D9A\u304C\u5207\u308C\u307E\u3057\u305F\u3002");
           void this.teardownSession();
           this.setStatus("\u505C\u6B62\u4E2D");
         }
@@ -1107,7 +1303,7 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
       await this.socket.connect();
     } catch (e) {
       const tried = urls.map((u) => labelForUrl(this.settings, u)).join(" / ");
-      new import_obsidian5.Notice(
+      new import_obsidian6.Notice(
         `VoxCraft: \u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093\uFF08${tried}\uFF09\u3002\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u308B\u304B\u3001\u63A5\u7D9A\u5148\u306E\u8A2D\u5B9A\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
       );
       this.socket = null;
@@ -1125,12 +1321,15 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
         var _a;
         return (_a = this.socket) == null ? void 0 : _a.sendAudio(pcm);
       },
-      (level) => this.showLevel(level)
+      (level) => this.showLevel(level),
+      // 文字起こしは自分の声ではなく会場や再生音を拾う。ブラウザの前処理は
+      // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
+      mode === "transcribe" ? RAW_MIC : DICTATION_MIC
     );
     try {
       await this.recorder.start();
     } catch (e) {
-      new import_obsidian5.Notice("VoxCraft: \u30DE\u30A4\u30AF\u306B\u30A2\u30AF\u30BB\u30B9\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u30DE\u30A4\u30AF\u306B\u30A2\u30AF\u30BB\u30B9\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
       await this.teardownSession();
       this.setStatus("\u505C\u6B62\u4E2D");
       return;
@@ -1205,7 +1404,7 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
     const start = msg == null ? void 0 : msg.start;
     const end = msg == null ? void 0 : msg.end;
     if ((_a = msg == null ? void 0 : msg.dropped) == null ? void 0 : _a.length) {
-      new import_obsidian5.Notice(
+      new import_obsidian6.Notice(
         `VoxCraft: ${msg.dropped.length}\u4EF6\u306E\u30BB\u30B0\u30E1\u30F3\u30C8\u3092\u4F4E\u78BA\u4FE1\u3068\u3057\u3066\u9664\u5916\u3057\u307E\u3057\u305F\uFF08\u30B5\u30FC\u30D0\u30FC\u30ED\u30B0\u306B\u5168\u6587\u3042\u308A\uFF09\u3002`
       );
     }
@@ -1281,7 +1480,7 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
     const from = Math.max(0, anchor - last.length);
     const current = cm.state.doc.sliceString(from, anchor);
     if (current !== last) {
-      new import_obsidian5.Notice("VoxCraft: \u76F4\u524D\u306E\u5165\u529B\u304C\u7DE8\u96C6\u3055\u308C\u3066\u3044\u308B\u305F\u3081\u53D6\u308A\u6D88\u305B\u307E\u305B\u3093\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u76F4\u524D\u306E\u5165\u529B\u304C\u7DE8\u96C6\u3055\u308C\u3066\u3044\u308B\u305F\u3081\u53D6\u308A\u6D88\u305B\u307E\u305B\u3093\u3002");
       return;
     }
     this.chunks.pop();
@@ -1296,7 +1495,7 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
     const doc = cm.state.doc.toString();
     const idx = doc.lastIndexOf(from);
     if (idx < 0) {
-      new import_obsidian5.Notice(`VoxCraft: \u300C${from}\u300D\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F\u3002`);
+      new import_obsidian6.Notice(`VoxCraft: \u300C${from}\u300D\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F\u3002`);
       return;
     }
     cm.dispatch({ changes: { from: idx, to: idx + from.length, insert: to } });
@@ -1307,27 +1506,27 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
   async recoverSelection() {
     const cm = this.getActiveCm();
     if (!cm) {
-      new import_obsidian5.Notice("VoxCraft: \u30CE\u30FC\u30C8\u3092\u7DE8\u96C6\u30E2\u30FC\u30C9\u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u30CE\u30FC\u30C8\u3092\u7DE8\u96C6\u30E2\u30FC\u30C9\u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
     const sel = cm.state.selection.main;
     if (sel.empty) {
-      new import_obsidian5.Notice("VoxCraft: \u5FA9\u65E7\u3057\u305F\u3044\u7BC4\u56F2\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u5FA9\u65E7\u3057\u305F\u3044\u7BC4\u56F2\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
     if (!this.session) {
-      new import_obsidian5.Notice("VoxCraft: \u5FA9\u65E7\u3067\u304D\u308B\u9332\u97F3\u304C\u3042\u308A\u307E\u305B\u3093\uFF08\u6587\u5B57\u8D77\u3053\u3057\u30E2\u30FC\u30C9\u3067\u9332\u97F3\u3057\u305F\u5206\u306E\u307F\u5BFE\u8C61\uFF09\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u5FA9\u65E7\u3067\u304D\u308B\u9332\u97F3\u304C\u3042\u308A\u307E\u305B\u3093\uFF08\u6587\u5B57\u8D77\u3053\u3057\u30E2\u30FC\u30C9\u3067\u9332\u97F3\u3057\u305F\u5206\u306E\u307F\u5BFE\u8C61\uFF09\u3002");
       return;
     }
     const url = this.activeUrl();
     if (!url) {
-      new import_obsidian5.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002");
       return;
     }
     const selected = cm.state.doc.sliceString(sel.from, sel.to);
     const range = spanRangeFor(this.spans, selected);
     if (!range) {
-      new import_obsidian5.Notice("VoxCraft: \u9078\u629E\u7BC4\u56F2\u306B\u5BFE\u5FDC\u3059\u308B\u97F3\u58F0\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\uFF08\u3053\u306E\u9332\u97F3\u306E\u51FA\u529B\u3092\u9078\u3093\u3067\u304F\u3060\u3055\u3044\uFF09\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u9078\u629E\u7BC4\u56F2\u306B\u5BFE\u5FDC\u3059\u308B\u97F3\u58F0\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\uFF08\u3053\u306E\u9332\u97F3\u306E\u51FA\u529B\u3092\u9078\u3093\u3067\u304F\u3060\u3055\u3044\uFF09\u3002");
       return;
     }
     this.setStatus("\u97F3\u58F0\u304B\u3089\u518D\u8A8D\u8B58\u4E2D\u2026");
@@ -1340,7 +1539,7 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
       }).open();
     } catch (e) {
       this.setStatus(this.recording ? "\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D" : "\u505C\u6B62\u4E2D");
-      new import_obsidian5.Notice(`VoxCraft: \u518D\u8A8D\u8B58\u306B\u5931\u6557\u3057\u307E\u3057\u305F\uFF08${e instanceof Error ? e.message : String(e)}\uFF09`);
+      new import_obsidian6.Notice(`VoxCraft: \u518D\u8A8D\u8B58\u306B\u5931\u6557\u3057\u307E\u3057\u305F\uFF08${e instanceof Error ? e.message : String(e)}\uFF09`);
     }
   }
   // ---- 変換戻し ----
@@ -1349,16 +1548,16 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
     const cm = this.cm;
     const last = this.chunks[this.chunks.length - 1];
     if (!cm || !cm.dom.isConnected) {
-      new import_obsidian5.Notice("VoxCraft: \u9332\u97F3\u4E2D\u306B\u300C\u5909\u63DB\u623B\u3057\u300D\u3092\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u9332\u97F3\u4E2D\u306B\u300C\u5909\u63DB\u623B\u3057\u300D\u3092\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
     const anchor = getAnchor(cm);
     if (anchor === null || last === void 0 || !last.trim()) {
-      new import_obsidian5.Notice("VoxCraft: \u5909\u63DB\u623B\u3057\u306E\u5BFE\u8C61\u304C\u3042\u308A\u307E\u305B\u3093\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u5909\u63DB\u623B\u3057\u306E\u5BFE\u8C61\u304C\u3042\u308A\u307E\u305B\u3093\u3002");
       return;
     }
     if (!((_a = this.socket) == null ? void 0 : _a.connected)) {
-      new import_obsidian5.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u672A\u63A5\u7D9A\u306E\u305F\u3081\u5909\u63DB\u623B\u3057\u3067\u304D\u307E\u305B\u3093\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u672A\u63A5\u7D9A\u306E\u305F\u3081\u5909\u63DB\u623B\u3057\u3067\u304D\u307E\u305B\u3093\u3002");
       return;
     }
     const from = Math.max(0, anchor - last.length);
@@ -1373,7 +1572,7 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
     const target = this.pendingReconvert;
     this.pendingReconvert = null;
     if (segments.length === 0 || !target) {
-      new import_obsidian5.Notice("VoxCraft: \u5909\u63DB\u5019\u88DC\u304C\u5F97\u3089\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+      new import_obsidian6.Notice("VoxCraft: \u5909\u63DB\u5019\u88DC\u304C\u5F97\u3089\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
       return;
     }
     const modal = new ReconvertModal(this.app, segments, (chosen) => {
@@ -1402,7 +1601,7 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
   // ---- 接続先の切り替え ----
   // 接続先メニューを表示する。evt があればその位置、無ければリボン脇に出す。
   openEndpointMenu(evt) {
-    const menu = new import_obsidian5.Menu();
+    const menu = new import_obsidian6.Menu();
     const sel = this.settings.selection;
     menu.addItem(
       (i) => i.setTitle("\u81EA\u52D5\uFF08\u3064\u306A\u304C\u308B\u65B9\uFF09").setChecked(sel === AUTO).onClick(() => void this.setSelection(AUTO))
@@ -1438,17 +1637,25 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
     this.settings.selection = sel;
     await this.saveSettings();
     const label = sel === AUTO ? "\u81EA\u52D5\uFF08\u3064\u306A\u304C\u308B\u65B9\uFF09" : labelForUrl(this.settings, sel);
-    new import_obsidian5.Notice(`VoxCraft: \u63A5\u7D9A\u5148\u3092\u300C${label}\u300D\u306B\u3057\u307E\u3057\u305F\u3002`);
+    new import_obsidian6.Notice(`VoxCraft: \u63A5\u7D9A\u5148\u3092\u300C${label}\u300D\u306B\u3057\u307E\u3057\u305F\u3002`);
   }
   // 現在つながっている接続先（未接続なら設定上の第一候補）。辞書APIの宛先に使う。
   activeUrl() {
     var _a, _b, _c;
     return (_c = (_b = (_a = this.socket) == null ? void 0 : _a.activeUrl) != null ? _b : resolveUrls(this.settings)[0]) != null ? _c : null;
   }
+  openRecordingsModal() {
+    const url = this.activeUrl();
+    if (!url) {
+      new import_obsidian6.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093");
+      return;
+    }
+    new RecordingsModal(this.app, url).open();
+  }
   openDictModal() {
     const url = this.activeUrl();
     if (!url) {
-      new import_obsidian5.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093");
+      new import_obsidian6.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093");
       return;
     }
     new DictModal(this.app, url).open();
@@ -1457,7 +1664,7 @@ var VoxCraftPlugin = class extends import_obsidian5.Plugin {
   // アクティブな Markdown エディタの CodeMirror6 ビューを得る。
   getActiveCm() {
     var _a;
-    const view = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian6.MarkdownView);
     const editor = view == null ? void 0 : view.editor;
     return (_a = editor == null ? void 0 : editor.cm) != null ? _a : null;
   }
