@@ -81,9 +81,13 @@
     max-width: calc(100vw - 16px);
     overflow-x: auto;
 }
-/* モバイルでは本体のモバイルツールバー（キーボード上）と重ならない高さに出す */
+/* モバイルでは本体のモバイルツールバー（キーボード上）と重ならない高さに出す。
+   ボタンが増えて幅が足りないときは横スクロールではなく折り返す（隠れると使えない）。 */
 body.is-mobile .voxcraft-toolbar {
     bottom: calc(env(safe-area-inset-bottom, 0px) + var(--mobile-toolbar-height, 48px) + 8px);
+    flex-wrap: wrap;
+    justify-content: center;
+    overflow-x: visible;
 }
 .voxcraft-toolbar .voxcraft-tb-btn {
     width: 40px;
@@ -99,6 +103,13 @@ body.is-mobile .voxcraft-toolbar {
     font-size: 1.15em;
     line-height: 1;
     color: var(--text-normal);
+}
+/* 単語ラベルのボタン（「言い直し」「再変換」） */
+.voxcraft-toolbar .voxcraft-tb-word {
+    width: auto;
+    padding: 0 8px;
+    font-size: 0.85em;
+    white-space: nowrap;
 }
 .voxcraft-toolbar .voxcraft-tb-mic.is-recording {
     color: var(--text-error);

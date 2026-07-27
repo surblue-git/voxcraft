@@ -1365,6 +1365,18 @@ var DictationToolbar = class {
     this.textBtn(bar, "\u3001", "\u8AAD\u70B9\u3092\u633F\u5165", () => this.cb.onInsert("\u3001"));
     this.textBtn(bar, "\u3002", "\u53E5\u70B9\u3092\u633F\u5165", () => this.cb.onInsert("\u3002"));
     this.iconBtn(bar, "corner-down-left", "\u6539\u884C\u3092\u633F\u5165", () => this.cb.onInsert("\n"));
+    this.wordBtn(
+      bar,
+      "\u8A00\u3044\u76F4\u3057",
+      "\u9078\u629E\u7BC4\u56F2\u3092\u8A00\u3044\u76F4\u3059\uFF08\u6B21\u306E\u767A\u8A71\u3067\u7F6E\u304D\u63DB\u3048\uFF09",
+      () => this.cb.onRespeak()
+    );
+    this.wordBtn(
+      bar,
+      "\u518D\u5909\u63DB",
+      "\u9078\u629E\u7BC4\u56F2\u3092\u518D\u5909\u63DB\uFF08\u5019\u88DC\u304B\u3089\u9078\u3076\uFF09",
+      () => this.cb.onReconvert()
+    );
     this.iconBtn(bar, "book-plus", "\u30E6\u30FC\u30B6\u30FC\u8F9E\u66F8\u306B\u8FFD\u52A0", () => this.cb.onOpenDict());
     this.iconBtn(bar, "x", "\u30C4\u30FC\u30EB\u30D0\u30FC\u3092\u9589\u3058\u308B", () => this.cb.onClose());
     this.el = bar;
@@ -1413,6 +1425,12 @@ var DictationToolbar = class {
       e.preventDefault();
       onClick();
     });
+    return b;
+  }
+  // 単語ラベルのボタン（「言い直し」等）。アイコンでは意味が伝わらない操作に使う。
+  wordBtn(parent, text, label, onClick) {
+    const b = this.textBtn(parent, text, label, onClick);
+    b.addClass("voxcraft-tb-word");
     return b;
   }
 };
@@ -1984,6 +2002,11 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         onCancel: () => this.cancelLast(),
         onRestore: () => this.restoreCanceled(),
         onInsert: (text) => this.insertFromToolbar(text),
+        // 「言い直し」は録音中のみ（次の発話が置換になる）。startRespeak が
+        // 未録音・未選択を Notice で案内する。「再変換」は REST 経由なので
+        // 録音していなくても使える。
+        onRespeak: () => this.startRespeak(),
+        onReconvert: () => void this.reconvertSelection(),
         onOpenDict: () => this.openDictModal(),
         onClose: () => this.hideToolbar()
       });
