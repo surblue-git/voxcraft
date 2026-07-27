@@ -24,6 +24,7 @@ import {
 import { RecordingsModal } from "./recordings";
 import { AsrMode, AsrSocket, ServerMessage } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
+import { DictationToolbar } from "./toolbar";
 
 // 右クリック相当（Mac では Ctrl+クリックも）か。メニュー用の操作なので録音トグルからは除外する。
 function isSecondaryClick(evt: MouseEvent): boolean {
@@ -92,6 +93,12 @@ export default class VoxCraftPlugin extends Plugin {
     private pendingRespeak: { from: number; to: number; text: string } | null = null;
     // コマンド実行等で発話の流れが切れた直後は、次のチャンクに息継ぎ読点を打たない。
     private suppressJoiner = true;
+    // 入力キャンセルで削除した確定チャンク。「元に戻す」で再挿入する（口述のみ）。
+    private canceled: string[] = [];
+    // 画面下部の操作ツールバー（口述モードの録音中に表示）。
+    private toolbar: DictationToolbar | null = null;
+    // ツールバーのマイクボタンで停止したときはバーを残す（そこから再開できるように）。
+    private keepToolbarOnStop = false;
 
     // 入力レベルメーター表示のスロットリング用。
     private lastMeterAt = 0;
@@ -159,6 +166,16 @@ export default class VoxCraftPlugin extends Plugin {
                 if (this.recording) this.stopRecording();
                 else void this.startRecording("transcribe");
             },
+        });
+        this.addCommand({
+            id: "cancel-last-input",
+            name: "直前の入力をキャンセル（一文削除）",
+            callback: () => this.cancelLast(),
+        });
+        this.addCommand({
+            id: "restore-canceled-input",
+            name: "キャンセルした入力を元に戻す",
+            callback: () => this.restoreCanceled(),
         });
         this.addCommand({
             id: "recover-selection",
@@ -294,6 +311,7 @@ export default class VoxCraftPlugin extends Plugin {
         // 口述対象を固定し、現在のカーソル位置にアンカーを立てる。
         this.cm = cm;
         this.chunks = [];
+        this.canceled = [];
         this.pendingReconvert = null;
         this.pendingRespeak = null;
         this.suppressJoiner = true; // 最初のチャンクには息継ぎ読点を打たない
@@ -308,12 +326,19 @@ export default class VoxCraftPlugin extends Plugin {
         this.recording = true;
         this.ribbonEl.addClass("voxcraft-recording");
         this.setStatus(mode === "transcribe" ? "● 文字起こし中" : "● 録音中");
+        // ツールバーは口述専用。文字起こしでは本文操作系が誤動作しないよう出さない。
+        if (mode === "dictation") this.showToolbar();
+        else this.hideToolbar();
     }
 
     stopRecording(): void {
         if (!this.recording) return;
         this.recording = false;
         this.ribbonEl.removeClass("voxcraft-recording");
+        // ツールバーのマイクで止めたときはバーを残し、そこから再開できるようにする。
+        this.toolbar?.setRecording(false);
+        if (this.keepToolbarOnStop) this.keepToolbarOnStop = false;
+        else this.hideToolbar();
         this.setStatus("停止処理中…");
         // 残り音声を確定させてから閉じる。
         this.socket?.sendStop();
@@ -333,6 +358,7 @@ export default class VoxCraftPlugin extends Plugin {
     private async teardownSession(): Promise<void> {
         this.recording = false;
         this.ribbonEl?.removeClass("voxcraft-recording");
+        this.hideToolbar();
         await this.recorder?.stop();
         this.recorder = null;
         this.socket?.close();
@@ -553,10 +579,20 @@ export default class VoxCraftPlugin extends Plugin {
     }
 
     // 直前チャンク（アンカー直前の text.length 文字）を削除する。
-    private undoLast(): void {
+    // 音声「取り消し」（silent）とツールバー/コマンドの「入力キャンセル」の共通実装。
+    // 削除した文は canceled に積み、「元に戻す」で再挿入できる。文字起こしでは動かない
+    // （動画側の本文を勝手に消さない）。
+    private cancelLast(opts: { silent?: boolean } = {}): void {
+        if (this.mode === "transcribe" && this.recording) {
+            if (!opts.silent) new Notice("VoxCraft: 入力キャンセルは文字起こしでは使えません。");
+            return;
+        }
         const cm = this.cm;
         const last = this.chunks[this.chunks.length - 1];
-        if (!cm || last === undefined) return;
+        if (!cm || !cm.dom.isConnected || last === undefined) {
+            if (!opts.silent) new Notice("VoxCraft: キャンセルできる入力がありません（音声入力中に使ってください）。");
+            return;
+        }
         const anchor = getAnchor(cm);
         if (anchor === null) return;
 
@@ -568,6 +604,75 @@ export default class VoxCraftPlugin extends Plugin {
         }
         this.chunks.pop();
         cm.dispatch({ changes: { from, to: anchor, insert: "" } });
+        this.canceled.push(last);
+        if (this.canceled.length > 50) this.canceled.shift();
+        // ボタン操作で発話の流れは切れているので、次のチャンクに息継ぎ読点を打たない。
+        this.suppressJoiner = true;
+        if (!opts.silent) {
+            const t = last.trim();
+            const preview = t.length > 20 ? t.slice(0, 20) + "…" : t;
+            new Notice(`VoxCraft: キャンセルしました —「${preview}」（「元に戻す」で復活）`);
+        }
+    }
+
+    private undoLast(): void {
+        this.cancelLast({ silent: true });
+    }
+
+    // 「元に戻す」: 入力キャンセルで消した文を、アンカー位置に再挿入する。
+    private restoreCanceled(): void {
+        const text = this.canceled[this.canceled.length - 1];
+        if (text === undefined) {
+            new Notice("VoxCraft: 元に戻せる入力がありません。");
+            return;
+        }
+        const cm = this.cm;
+        if (!cm || !cm.dom.isConnected || getAnchor(cm) === null) {
+            new Notice("VoxCraft: 音声入力中のみ元に戻せます。");
+            return;
+        }
+        this.canceled.pop();
+        this.insertText(text);
+        this.suppressJoiner = true;
+    }
+
+    // ---- 画面下部の操作ツールバー（口述専用） ----
+
+    private showToolbar(): void {
+        if (!this.settings.showToolbar) return;
+        if (!this.toolbar) {
+            this.toolbar = new DictationToolbar({
+                onMicToggle: () => {
+                    if (this.recording) {
+                        this.keepToolbarOnStop = true;
+                        this.stopRecording();
+                    } else {
+                        void this.startRecording();
+                    }
+                },
+                onCancel: () => this.cancelLast(),
+                onRestore: () => this.restoreCanceled(),
+                onInsert: (text) => this.insertFromToolbar(text),
+                onOpenDict: () => this.openDictModal(),
+                onClose: () => this.hideToolbar(),
+            });
+        }
+        this.toolbar.show();
+        this.toolbar.setRecording(true);
+    }
+
+    private hideToolbar(): void {
+        this.toolbar?.hide();
+    }
+
+    // ツールバーからの句読点・改行挿入。通常チャンクと同じ扱い（取り消し対象になる）。
+    private insertFromToolbar(text: string): void {
+        if (!this.recording || this.mode !== "dictation") {
+            new Notice("VoxCraft: 音声入力中に使ってください。");
+            return;
+        }
+        this.insertText(text);
+        this.suppressJoiner = true;
     }
 
     // 「AをBに修正」: ノート全体からAをBに置換（過去テキストも対象）。

@@ -62,3 +62,47 @@
     background: var(--interactive-accent);
     color: var(--text-on-accent);
 }
+
+/* 口述ツールバー（画面下部・録音中のみ） */
+.voxcraft-toolbar {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+    z-index: var(--layer-popover, 30);
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 6px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.15));
+    max-width: calc(100vw - 16px);
+    overflow-x: auto;
+}
+/* モバイルでは本体のモバイルツールバー（キーボード上）と重ならない高さに出す */
+body.is-mobile .voxcraft-toolbar {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + var(--mobile-toolbar-height, 48px) + 8px);
+}
+.voxcraft-toolbar .voxcraft-tb-btn {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    color: var(--text-muted);
+}
+.voxcraft-toolbar .voxcraft-tb-text {
+    font-size: 1.15em;
+    line-height: 1;
+    color: var(--text-normal);
+}
+.voxcraft-toolbar .voxcraft-tb-mic.is-recording {
+    color: var(--text-error);
+}
+.voxcraft-toolbar .voxcraft-tb-mic.is-recording svg {
+    animation: voxcraft-pulse 1.2s ease-in-out infinite;
+}

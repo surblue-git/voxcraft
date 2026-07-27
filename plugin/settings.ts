@@ -19,6 +19,7 @@ export interface VoxCraftSettings {
     autoReconvertLast: boolean; // 「変換戻し」時、直前チャンクを対象にする
     insertAt: "anchor" | "cursor"; // 口述の挿入位置。anchor=固定アンカー（既定）/ cursor=カーソル追従
     pauseComma: boolean;        // 短い息継ぎでチャンクが切れたら「、」で接続する
+    showToolbar: boolean;       // 口述中に画面下部の操作ツールバーを表示する
     serverUrl?: string;         // 後方互換: 旧・単一URL（読み込み時に endpoints へ移行）
 }
 
@@ -32,6 +33,7 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     autoReconvertLast: true,
     insertAt: "anchor",
     pauseComma: true,
+    showToolbar: true,
 };
 
 // 旧バージョン（単一 serverUrl）の設定を新モデルへ移行する。
@@ -45,6 +47,7 @@ export function migrateSettings(s: VoxCraftSettings): VoxCraftSettings {
     if (!s.selection) s.selection = AUTO;
     if (s.insertAt !== "cursor") s.insertAt = "anchor";
     if (typeof s.pauseComma !== "boolean") s.pauseComma = true;
+    if (typeof s.showToolbar !== "boolean") s.showToolbar = true;
     delete s.serverUrl;
     return s;
 }
@@ -273,6 +276,19 @@ export class VoxCraftSettingTab extends PluginSettingTab {
             .addToggle((t) =>
                 t.setValue(this.plugin.settings.insertAt === "cursor").onChange(async (v) => {
                     this.plugin.settings.insertAt = v ? "cursor" : "anchor";
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        new Setting(containerEl)
+            .setName("録音中に操作ツールバーを表示")
+            .setDesc(
+                "音声入力（口述）中、画面下部にマイク・入力キャンセル・元に戻す・句読点・辞書などの" +
+                "ボタンを表示する。モバイルで特に便利。文字起こしモードでは表示しない。"
+            )
+            .addToggle((t) =>
+                t.setValue(this.plugin.settings.showToolbar).onChange(async (v) => {
+                    this.plugin.settings.showToolbar = v;
                     await this.plugin.saveSettings();
                 })
             );
