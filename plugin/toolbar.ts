@@ -15,6 +15,8 @@ export interface ToolbarCallbacks {
     onCancel: () => void;
     onRestore: () => void;
     onInsert: (text: string) => void;
+    onRespeak: () => void;
+    onReconvert: () => void;
     onOpenDict: () => void;
     onClose: () => void;
 }
@@ -38,6 +40,14 @@ export class DictationToolbar {
         this.textBtn(bar, "、", "読点を挿入", () => this.cb.onInsert("、"));
         this.textBtn(bar, "。", "句点を挿入", () => this.cb.onInsert("。"));
         this.iconBtn(bar, "corner-down-left", "改行を挿入", () => this.cb.onInsert("\n"));
+        // 選択範囲に対する修正操作。音声起動（「ここを言い直し」等）は認識に化ける
+        // ことがあるため、モバイルでは選択→タップの方が確実。
+        this.wordBtn(bar, "言い直し", "選択範囲を言い直す（次の発話で置き換え）", () =>
+            this.cb.onRespeak()
+        );
+        this.wordBtn(bar, "再変換", "選択範囲を再変換（候補から選ぶ）", () =>
+            this.cb.onReconvert()
+        );
         this.iconBtn(bar, "book-plus", "ユーザー辞書に追加", () => this.cb.onOpenDict());
         this.iconBtn(bar, "x", "ツールバーを閉じる", () => this.cb.onClose());
 
@@ -101,6 +111,18 @@ export class DictationToolbar {
             e.preventDefault();
             onClick();
         });
+        return b;
+    }
+
+    // 単語ラベルのボタン（「言い直し」等）。アイコンでは意味が伝わらない操作に使う。
+    private wordBtn(
+        parent: HTMLElement,
+        text: string,
+        label: string,
+        onClick: () => void
+    ): HTMLButtonElement {
+        const b = this.textBtn(parent, text, label, onClick);
+        b.addClass("voxcraft-tb-word");
         return b;
     }
 }

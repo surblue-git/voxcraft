@@ -653,6 +653,11 @@ export default class VoxCraftPlugin extends Plugin {
                 onCancel: () => this.cancelLast(),
                 onRestore: () => this.restoreCanceled(),
                 onInsert: (text) => this.insertFromToolbar(text),
+                // 「言い直し」は録音中のみ（次の発話が置換になる）。startRespeak が
+                // 未録音・未選択を Notice で案内する。「再変換」は REST 経由なので
+                // 録音していなくても使える。
+                onRespeak: () => this.startRespeak(),
+                onReconvert: () => void this.reconvertSelection(),
                 onOpenDict: () => this.openDictModal(),
                 onClose: () => this.hideToolbar(),
             });
