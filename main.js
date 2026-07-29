@@ -673,7 +673,8 @@ var DEFAULT_SETTINGS = {
   autoReconvertLast: true,
   insertAt: "anchor",
   pauseComma: true,
-  showToolbar: true
+  showToolbar: true,
+  suppressKeyboard: true
 };
 function migrateSettings(s) {
   if ((!s.endpoints || s.endpoints.length === 0) && s.serverUrl) {
@@ -690,6 +691,8 @@ function migrateSettings(s) {
     s.pauseComma = true;
   if (typeof s.showToolbar !== "boolean")
     s.showToolbar = true;
+  if (typeof s.suppressKeyboard !== "boolean")
+    s.suppressKeyboard = true;
   delete s.serverUrl;
   return s;
 }
@@ -854,6 +857,17 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    if (import_obsidian3.Platform.isMobile) {
+      new import_obsidian3.Setting(containerEl).setName("\u9332\u97F3\u4E2D\u306F\u30AD\u30FC\u30DC\u30FC\u30C9\u3092\u51FA\u3055\u306A\u3044").setDesc(
+        "\u53E3\u8FF0\u4E2D\u306F\u753B\u9762\u3092\u89E6\u3063\u3066\u3082\u30BD\u30D5\u30C8\u30AD\u30FC\u30DC\u30FC\u30C9\u304C\u51FA\u306A\u3044\u3088\u3046\u306B\u3059\u308B\uFF08\u30C4\u30FC\u30EB\u30D0\u30FC\u304C\u96A0\u308C\u306A\u3044\u305F\u3081\uFF09\u3002\u30AB\u30FC\u30BD\u30EB\u79FB\u52D5\u3084\u7BC4\u56F2\u9078\u629E\u306F\u305D\u306E\u307E\u307E\u3067\u304D\u308B\u3002\u5165\u529B\u3057\u305F\u3044\u3068\u304D\u306F\u30C4\u30FC\u30EB\u30D0\u30FC\u306E\u2328\u30DC\u30BF\u30F3\u3067\u51FA\u3059\u3002"
+      ).addToggle(
+        (t) => t.setValue(this.plugin.settings.suppressKeyboard).onChange(async (v) => {
+          this.plugin.settings.suppressKeyboard = v;
+          await this.plugin.saveSettings();
+          this.plugin.refreshKeyboardSuppression();
+        })
+      );
+    }
     new import_obsidian3.Setting(containerEl).setName("\u97F3\u58F0\u30B3\u30DE\u30F3\u30C9\u3092\u6709\u52B9\u5316").setDesc(
       "\u300C\u53D6\u308A\u6D88\u3057\u300D\u300C\u5909\u63DB\u623B\u3057\u300D\u300CA\u3092B\u306B\u4FEE\u6B63\u300D\u300CA\u3092\u518D\u5909\u63DB\u300D\u300C\u3053\u3053\u3092\u8A00\u3044\u76F4\u3057\u300D\u300C\u5165\u529B\u7D42\u4E86\u300D\u7B49\u3092\u8A8D\u8B58\u3059\u308B\u3002"
     ).addToggle(
@@ -1344,14 +1358,56 @@ function getAnchor(cm) {
   return v === void 0 ? null : v;
 }
 
+// keyboard.ts
+var import_state2 = require("@codemirror/state");
+var import_view2 = require("@codemirror/view");
+var setSuppressEffect = import_state2.StateEffect.define();
+var suppressField = import_state2.StateField.define({
+  create() {
+    return false;
+  },
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setSuppressEffect))
+        return e.value;
+    }
+    return value;
+  }
+});
+var suppressAttrs = import_view2.EditorView.contentAttributes.compute(
+  [suppressField],
+  (state) => state.field(suppressField, false) ? { inputmode: "none" } : {}
+);
+var keyboardExtension = [suppressField, suppressAttrs];
+function isKeyboardSuppressed(cm) {
+  return cm.state.field(suppressField, false) === true;
+}
+function setKeyboardSuppressed(cm, on, refocus = true) {
+  if (!cm.dom.isConnected)
+    return;
+  if (isKeyboardSuppressed(cm) === on)
+    return;
+  cm.dispatch({ effects: setSuppressEffect.of(on) });
+  if (!refocus)
+    return;
+  cm.contentDOM.blur();
+  cm.focus();
+}
+
 // toolbar.ts
 var import_obsidian6 = require("obsidian");
+var KEYBOARD_MIN_INSET = 120;
 var DictationToolbar = class {
-  constructor(cb) {
+  // keyboardButton: ソフトキーボードの表示/抑制ボタンを出すか（モバイルのみ意味がある）。
+  constructor(cb, opts = { keyboardButton: false }) {
     this.cb = cb;
+    this.opts = opts;
     this.el = null;
     this.micBtn = null;
+    this.kbBtn = null;
     this.recording = false;
+    this.keyboardSuppressed = false;
+    this.onViewport = null;
   }
   show() {
     if (this.el)
@@ -1377,16 +1433,29 @@ var DictationToolbar = class {
       "\u9078\u629E\u7BC4\u56F2\u3092\u518D\u5909\u63DB\uFF08\u5019\u88DC\u304B\u3089\u9078\u3076\uFF09",
       () => this.cb.onReconvert()
     );
+    if (this.opts.keyboardButton) {
+      this.kbBtn = this.iconBtn(
+        bar,
+        "keyboard",
+        "\u30AD\u30FC\u30DC\u30FC\u30C9\u3092\u8868\u793A",
+        () => this.cb.onKeyboardToggle()
+      );
+      this.kbBtn.addClass("voxcraft-tb-kb");
+    }
     this.iconBtn(bar, "book-plus", "\u30E6\u30FC\u30B6\u30FC\u8F9E\u66F8\u306B\u8FFD\u52A0", () => this.cb.onOpenDict());
     this.iconBtn(bar, "x", "\u30C4\u30FC\u30EB\u30D0\u30FC\u3092\u9589\u3058\u308B", () => this.cb.onClose());
     this.el = bar;
     this.applyRecording();
+    this.applyKeyboard();
+    this.trackViewport();
   }
   hide() {
     var _a;
+    this.untrackViewport();
     (_a = this.el) == null ? void 0 : _a.remove();
     this.el = null;
     this.micBtn = null;
+    this.kbBtn = null;
   }
   get visible() {
     return this.el !== null;
@@ -1394,6 +1463,47 @@ var DictationToolbar = class {
   setRecording(on) {
     this.recording = on;
     this.applyRecording();
+  }
+  setKeyboardSuppressed(on) {
+    this.keyboardSuppressed = on;
+    this.applyKeyboard();
+  }
+  applyKeyboard() {
+    if (!this.kbBtn)
+      return;
+    this.kbBtn.toggleClass("is-active", this.keyboardSuppressed);
+    this.kbBtn.setAttribute(
+      "aria-label",
+      this.keyboardSuppressed ? "\u30AD\u30FC\u30DC\u30FC\u30C9\u3092\u8868\u793A" : "\u30AD\u30FC\u30DC\u30FC\u30C9\u3092\u96A0\u3059\uFF08\u53E3\u8FF0\u4E2D\u306F\u51FA\u3055\u306A\u3044\uFF09"
+    );
+  }
+  // キーボードが出ている間はバーがその下に隠れる（Android では画面自体は
+  // 縮まないので fixed の bottom では逃げられない）。visualViewport から
+  // キーボードの高さを取り、その上に載せる。
+  trackViewport() {
+    const vv = window.visualViewport;
+    if (!vv)
+      return;
+    this.onViewport = () => this.applyViewport();
+    vv.addEventListener("resize", this.onViewport);
+    vv.addEventListener("scroll", this.onViewport);
+    this.applyViewport();
+  }
+  untrackViewport() {
+    const vv = window.visualViewport;
+    if (!vv || !this.onViewport)
+      return;
+    vv.removeEventListener("resize", this.onViewport);
+    vv.removeEventListener("scroll", this.onViewport);
+    this.onViewport = null;
+  }
+  applyViewport() {
+    const vv = window.visualViewport;
+    if (!vv || !this.el)
+      return;
+    const inset = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+    this.el.style.setProperty("--voxcraft-kb-inset", `${inset}px`);
+    this.el.toggleClass("is-keyboard-up", inset >= KEYBOARD_MIN_INSET);
   }
   applyRecording() {
     if (!this.micBtn)
@@ -1512,6 +1622,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     var _a;
     await this.loadSettings();
     this.registerEditorExtension(anchorExtension);
+    this.registerEditorExtension(keyboardExtension);
     this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft \u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB/\u505C\u6B62", (evt) => {
       if (isSecondaryClick(evt))
         return;
@@ -1710,6 +1821,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       this.showToolbar();
     else
       this.hideToolbar();
+    this.refreshKeyboardSuppression(true);
   }
   stopRecording() {
     var _a, _b, _c;
@@ -1722,6 +1834,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       this.keepToolbarOnStop = false;
     else
       this.hideToolbar();
+    this.refreshKeyboardSuppression();
     this.setStatus("\u505C\u6B62\u51E6\u7406\u4E2D\u2026");
     (_b = this.socket) == null ? void 0 : _b.sendStop();
     void ((_c = this.recorder) == null ? void 0 : _c.stop().then(() => {
@@ -1741,6 +1854,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.recording = false;
     (_a = this.ribbonEl) == null ? void 0 : _a.removeClass("voxcraft-recording");
     this.hideToolbar();
+    this.refreshKeyboardSuppression();
     await ((_b = this.recorder) == null ? void 0 : _b.stop());
     this.recorder = null;
     (_c = this.socket) == null ? void 0 : _c.close();
@@ -1990,33 +2104,69 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     if (!this.settings.showToolbar)
       return;
     if (!this.toolbar) {
-      this.toolbar = new DictationToolbar({
-        onMicToggle: () => {
-          if (this.recording) {
-            this.keepToolbarOnStop = true;
-            this.stopRecording();
-          } else {
-            void this.startRecording();
+      this.toolbar = new DictationToolbar(
+        {
+          onMicToggle: () => {
+            if (this.recording) {
+              this.keepToolbarOnStop = true;
+              this.stopRecording();
+            } else {
+              void this.startRecording();
+            }
+          },
+          onCancel: () => this.cancelLast(),
+          onRestore: () => this.restoreCanceled(),
+          onInsert: (text) => this.insertFromToolbar(text),
+          // 「言い直し」は録音中のみ（次の発話が置換になる）。startRespeak が
+          // 未録音・未選択を Notice で案内する。「再変換」は REST 経由なので
+          // 録音していなくても使える。
+          onRespeak: () => this.startRespeak(),
+          onReconvert: () => void this.reconvertSelection(),
+          onKeyboardToggle: () => this.toggleKeyboard(),
+          onOpenDict: () => this.openDictModal(),
+          onClose: () => {
+            this.hideToolbar();
+            this.refreshKeyboardSuppression();
           }
         },
-        onCancel: () => this.cancelLast(),
-        onRestore: () => this.restoreCanceled(),
-        onInsert: (text) => this.insertFromToolbar(text),
-        // 「言い直し」は録音中のみ（次の発話が置換になる）。startRespeak が
-        // 未録音・未選択を Notice で案内する。「再変換」は REST 経由なので
-        // 録音していなくても使える。
-        onRespeak: () => this.startRespeak(),
-        onReconvert: () => void this.reconvertSelection(),
-        onOpenDict: () => this.openDictModal(),
-        onClose: () => this.hideToolbar()
-      });
+        // キーボードの出し入れはモバイル専用の悩み。デスクトップでは出さない。
+        { keyboardButton: import_obsidian7.Platform.isMobile }
+      );
     }
     this.toolbar.show();
     this.toolbar.setRecording(true);
+    this.toolbar.setKeyboardSuppressed(this.cm ? isKeyboardSuppressed(this.cm) : false);
   }
   hideToolbar() {
     var _a;
     (_a = this.toolbar) == null ? void 0 : _a.hide();
+  }
+  // ---- ソフトキーボードの抑制（モバイルの口述中のみ） ----
+  // 設定・録音状態から「今キーボードを抑制すべきか」を決め、掛け直す。
+  // refocus=true のときだけフォーカスを付け直す（＝今出ているキーボードを閉じる）。
+  // 自動の解除でこれをやると、頼んでいないのにキーボードが開いてしまう。
+  refreshKeyboardSuppression(refocus = false) {
+    var _a, _b;
+    const cm = this.cm;
+    if (!cm || !cm.dom.isConnected)
+      return;
+    const want = import_obsidian7.Platform.isMobile && this.settings.suppressKeyboard && this.recording && this.mode === "dictation" && ((_a = this.toolbar) == null ? void 0 : _a.visible) === true;
+    setKeyboardSuppressed(cm, want, refocus);
+    (_b = this.toolbar) == null ? void 0 : _b.setKeyboardSuppressed(want);
+  }
+  // ツールバーの⌨ボタン。抑制中なら解除してキーボードを出し、出ているなら抑え直す。
+  // Android はユーザー操作の文脈でない focus() ではキーボードを出さないので、
+  // クリックハンドラの中で同期的に処理する（await を挟まない）。
+  toggleKeyboard() {
+    var _a;
+    const cm = this.cm && this.cm.dom.isConnected ? this.cm : this.getActiveCm();
+    if (!cm) {
+      new import_obsidian7.Notice("VoxCraft: \u30CE\u30FC\u30C8\u3092\u7DE8\u96C6\u30E2\u30FC\u30C9\u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
+      return;
+    }
+    const next = !isKeyboardSuppressed(cm);
+    setKeyboardSuppressed(cm, next);
+    (_a = this.toolbar) == null ? void 0 : _a.setKeyboardSuppressed(next);
   }
   // ツールバーからの句読点・改行挿入。通常チャンクと同じ扱い（取り消し対象になる）。
   insertFromToolbar(text) {
