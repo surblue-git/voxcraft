@@ -1396,7 +1396,6 @@ function setKeyboardSuppressed(cm, on, refocus = true) {
 
 // toolbar.ts
 var import_obsidian6 = require("obsidian");
-var KEYBOARD_MIN_INSET = 120;
 var DictationToolbar = class {
   // keyboardButton: ソフトキーボードの表示/抑制ボタンを出すか（モバイルのみ意味がある）。
   constructor(cb, opts = { keyboardButton: false }) {
@@ -1407,7 +1406,6 @@ var DictationToolbar = class {
     this.kbBtn = null;
     this.recording = false;
     this.keyboardSuppressed = false;
-    this.onViewport = null;
   }
   show() {
     if (this.el)
@@ -1447,11 +1445,9 @@ var DictationToolbar = class {
     this.el = bar;
     this.applyRecording();
     this.applyKeyboard();
-    this.trackViewport();
   }
   hide() {
     var _a;
-    this.untrackViewport();
     (_a = this.el) == null ? void 0 : _a.remove();
     this.el = null;
     this.micBtn = null;
@@ -1476,34 +1472,6 @@ var DictationToolbar = class {
       "aria-label",
       this.keyboardSuppressed ? "\u30AD\u30FC\u30DC\u30FC\u30C9\u3092\u8868\u793A" : "\u30AD\u30FC\u30DC\u30FC\u30C9\u3092\u96A0\u3059\uFF08\u53E3\u8FF0\u4E2D\u306F\u51FA\u3055\u306A\u3044\uFF09"
     );
-  }
-  // キーボードが出ている間はバーがその下に隠れる（Android では画面自体は
-  // 縮まないので fixed の bottom では逃げられない）。visualViewport から
-  // キーボードの高さを取り、その上に載せる。
-  trackViewport() {
-    const vv = window.visualViewport;
-    if (!vv)
-      return;
-    this.onViewport = () => this.applyViewport();
-    vv.addEventListener("resize", this.onViewport);
-    vv.addEventListener("scroll", this.onViewport);
-    this.applyViewport();
-  }
-  untrackViewport() {
-    const vv = window.visualViewport;
-    if (!vv || !this.onViewport)
-      return;
-    vv.removeEventListener("resize", this.onViewport);
-    vv.removeEventListener("scroll", this.onViewport);
-    this.onViewport = null;
-  }
-  applyViewport() {
-    const vv = window.visualViewport;
-    if (!vv || !this.el)
-      return;
-    const inset = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
-    this.el.style.setProperty("--voxcraft-kb-inset", `${inset}px`);
-    this.el.toggleClass("is-keyboard-up", inset >= KEYBOARD_MIN_INSET);
   }
   applyRecording() {
     if (!this.micBtn)
