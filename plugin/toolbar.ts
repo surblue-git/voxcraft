@@ -7,6 +7,10 @@
 //
 // ボタンは pointerdown を preventDefault してエディタのフォーカスを奪わない
 // （奪うとモバイルでキーボードが閉じ、カーソル位置も失われる）。
+//
+// キーボードが出るとバーはその下に隠れてしまう。対策は2つ:
+//   - 口述中はキーボード自体を抑制する（keyboard.ts。⌨ボタンで出せる）
+//   - それでも出ているときは visualViewport でキーボードの高さを測って上に載る
 
 import { setIcon } from "obsidian";
 
@@ -17,16 +21,28 @@ export interface ToolbarCallbacks {
     onInsert: (text: string) => void;
     onRespeak: () => void;
     onReconvert: () => void;
+    onKeyboardToggle: () => void;
     onOpenDict: () => void;
     onClose: () => void;
 }
 
+// キーボードが出ていると見なす下端の余白（px）。ナビゲーションバー等の細い
+// インセットを誤検出しない程度に大きく取る。
+const KEYBOARD_MIN_INSET = 120;
+
 export class DictationToolbar {
     private el: HTMLElement | null = null;
     private micBtn: HTMLButtonElement | null = null;
+    private kbBtn: HTMLButtonElement | null = null;
     private recording = false;
+    private keyboardSuppressed = false;
+    private onViewport: (() => void) | null = null;
 
-    constructor(private cb: ToolbarCallbacks) {}
+    // keyboardButton: ソフトキーボードの表示/抑制ボタンを出すか（モバイルのみ意味がある）。
+    constructor(
+        private cb: ToolbarCallbacks,
+        private opts: { keyboardButton: boolean } = { keyboardButton: false }
+    ) {}
 
     show(): void {
         if (this.el) return;
@@ -48,17 +64,28 @@ export class DictationToolbar {
         this.wordBtn(bar, "再変換", "選択範囲を再変換（候補から選ぶ）", () =>
             this.cb.onReconvert()
         );
+        // キーボードは口述中は抑制されている。出したいときだけここから出す。
+        if (this.opts.keyboardButton) {
+            this.kbBtn = this.iconBtn(bar, "keyboard", "キーボードを表示", () =>
+                this.cb.onKeyboardToggle()
+            );
+            this.kbBtn.addClass("voxcraft-tb-kb");
+        }
         this.iconBtn(bar, "book-plus", "ユーザー辞書に追加", () => this.cb.onOpenDict());
         this.iconBtn(bar, "x", "ツールバーを閉じる", () => this.cb.onClose());
 
         this.el = bar;
         this.applyRecording();
+        this.applyKeyboard();
+        this.trackViewport();
     }
 
     hide(): void {
+        this.untrackViewport();
         this.el?.remove();
         this.el = null;
         this.micBtn = null;
+        this.kbBtn = null;
     }
 
     get visible(): boolean {
@@ -68,6 +95,51 @@ export class DictationToolbar {
     setRecording(on: boolean): void {
         this.recording = on;
         this.applyRecording();
+    }
+
+    setKeyboardSuppressed(on: boolean): void {
+        this.keyboardSuppressed = on;
+        this.applyKeyboard();
+    }
+
+    private applyKeyboard(): void {
+        if (!this.kbBtn) return;
+        // 抑制中＝「ボタンを押せばキーボードが出る」状態を強調する。
+        this.kbBtn.toggleClass("is-active", this.keyboardSuppressed);
+        this.kbBtn.setAttribute(
+            "aria-label",
+            this.keyboardSuppressed ? "キーボードを表示" : "キーボードを隠す（口述中は出さない）"
+        );
+    }
+
+    // キーボードが出ている間はバーがその下に隠れる（Android では画面自体は
+    // 縮まないので fixed の bottom では逃げられない）。visualViewport から
+    // キーボードの高さを取り、その上に載せる。
+    private trackViewport(): void {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        this.onViewport = () => this.applyViewport();
+        vv.addEventListener("resize", this.onViewport);
+        vv.addEventListener("scroll", this.onViewport);
+        this.applyViewport();
+    }
+
+    private untrackViewport(): void {
+        const vv = window.visualViewport;
+        if (!vv || !this.onViewport) return;
+        vv.removeEventListener("resize", this.onViewport);
+        vv.removeEventListener("scroll", this.onViewport);
+        this.onViewport = null;
+    }
+
+    private applyViewport(): void {
+        const vv = window.visualViewport;
+        if (!vv || !this.el) return;
+        // 表示領域の下端から画面下端までの距離＝キーボード等に覆われている高さ。
+        // キーボードで画面が縮むタイプの端末ではここが 0 になり、従来どおりになる。
+        const inset = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+        this.el.style.setProperty("--voxcraft-kb-inset", `${inset}px`);
+        this.el.toggleClass("is-keyboard-up", inset >= KEYBOARD_MIN_INSET);
     }
 
     private applyRecording(): void {
