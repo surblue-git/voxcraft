@@ -24,6 +24,7 @@ import {
 import { RecordingsModal } from "./recordings";
 import { AsrMode, AsrSocket, ServerMessage } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
+import { keyboardExtension, isKeyboardSuppressed, setKeyboardSuppressed } from "./keyboard";
 import { DictationToolbar } from "./toolbar";
 
 // 右クリック相当（Mac では Ctrl+クリックも）か。メニュー用の操作なので録音トグルからは除外する。
@@ -121,6 +122,8 @@ export default class VoxCraftPlugin extends Plugin {
 
         // 口述アンカー（CM6 拡張）を全エディタに登録。
         this.registerEditorExtension(anchorExtension);
+        // ソフトキーボード抑制（同じく CM6 拡張。既定は無効で、口述中だけ有効化する）。
+        this.registerEditorExtension(keyboardExtension);
 
         this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft 音声入力の開始/停止", (evt) => {
             // 右クリック（Macは Ctrl+クリック）はメニュー専用。長押し直後の合成クリックも弾く。
@@ -329,6 +332,8 @@ export default class VoxCraftPlugin extends Plugin {
         // ツールバーは口述専用。文字起こしでは本文操作系が誤動作しないよう出さない。
         if (mode === "dictation") this.showToolbar();
         else this.hideToolbar();
+        // ここではフォーカスを付け直して、既に開いているキーボードを閉じさせる。
+        this.refreshKeyboardSuppression(true);
     }
 
     stopRecording(): void {
@@ -339,6 +344,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.toolbar?.setRecording(false);
         if (this.keepToolbarOnStop) this.keepToolbarOnStop = false;
         else this.hideToolbar();
+        this.refreshKeyboardSuppression();
         this.setStatus("停止処理中…");
         // 残り音声を確定させてから閉じる。
         this.socket?.sendStop();
@@ -359,6 +365,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.recording = false;
         this.ribbonEl?.removeClass("voxcraft-recording");
         this.hideToolbar();
+        this.refreshKeyboardSuppression();
         await this.recorder?.stop();
         this.recorder = null;
         this.socket?.close();
@@ -641,33 +648,78 @@ export default class VoxCraftPlugin extends Plugin {
     private showToolbar(): void {
         if (!this.settings.showToolbar) return;
         if (!this.toolbar) {
-            this.toolbar = new DictationToolbar({
-                onMicToggle: () => {
-                    if (this.recording) {
-                        this.keepToolbarOnStop = true;
-                        this.stopRecording();
-                    } else {
-                        void this.startRecording();
-                    }
+            this.toolbar = new DictationToolbar(
+                {
+                    onMicToggle: () => {
+                        if (this.recording) {
+                            this.keepToolbarOnStop = true;
+                            this.stopRecording();
+                        } else {
+                            void this.startRecording();
+                        }
+                    },
+                    onCancel: () => this.cancelLast(),
+                    onRestore: () => this.restoreCanceled(),
+                    onInsert: (text) => this.insertFromToolbar(text),
+                    // 「言い直し」は録音中のみ（次の発話が置換になる）。startRespeak が
+                    // 未録音・未選択を Notice で案内する。「再変換」は REST 経由なので
+                    // 録音していなくても使える。
+                    onRespeak: () => this.startRespeak(),
+                    onReconvert: () => void this.reconvertSelection(),
+                    onKeyboardToggle: () => this.toggleKeyboard(),
+                    onOpenDict: () => this.openDictModal(),
+                    onClose: () => {
+                        // バーを閉じるとキーボードを出す手段（⌨）も無くなるので、
+                        // 抑制も一緒に解除する。
+                        this.hideToolbar();
+                        this.refreshKeyboardSuppression();
+                    },
                 },
-                onCancel: () => this.cancelLast(),
-                onRestore: () => this.restoreCanceled(),
-                onInsert: (text) => this.insertFromToolbar(text),
-                // 「言い直し」は録音中のみ（次の発話が置換になる）。startRespeak が
-                // 未録音・未選択を Notice で案内する。「再変換」は REST 経由なので
-                // 録音していなくても使える。
-                onRespeak: () => this.startRespeak(),
-                onReconvert: () => void this.reconvertSelection(),
-                onOpenDict: () => this.openDictModal(),
-                onClose: () => this.hideToolbar(),
-            });
+                // キーボードの出し入れはモバイル専用の悩み。デスクトップでは出さない。
+                { keyboardButton: Platform.isMobile }
+            );
         }
         this.toolbar.show();
         this.toolbar.setRecording(true);
+        this.toolbar.setKeyboardSuppressed(this.cm ? isKeyboardSuppressed(this.cm) : false);
     }
 
     private hideToolbar(): void {
         this.toolbar?.hide();
+    }
+
+    // ---- ソフトキーボードの抑制（モバイルの口述中のみ） ----
+
+    // 設定・録音状態から「今キーボードを抑制すべきか」を決め、掛け直す。
+    // refocus=true のときだけフォーカスを付け直す（＝今出ているキーボードを閉じる）。
+    // 自動の解除でこれをやると、頼んでいないのにキーボードが開いてしまう。
+    refreshKeyboardSuppression(refocus = false): void {
+        const cm = this.cm;
+        if (!cm || !cm.dom.isConnected) return;
+        // ツールバーが出ていることを条件に含める。⌨ボタンが無い状態で抑制すると
+        // キーボードを出す手段が無くなる。
+        const want =
+            Platform.isMobile &&
+            this.settings.suppressKeyboard &&
+            this.recording &&
+            this.mode === "dictation" &&
+            this.toolbar?.visible === true;
+        setKeyboardSuppressed(cm, want, refocus);
+        this.toolbar?.setKeyboardSuppressed(want);
+    }
+
+    // ツールバーの⌨ボタン。抑制中なら解除してキーボードを出し、出ているなら抑え直す。
+    // Android はユーザー操作の文脈でない focus() ではキーボードを出さないので、
+    // クリックハンドラの中で同期的に処理する（await を挟まない）。
+    private toggleKeyboard(): void {
+        const cm = this.cm && this.cm.dom.isConnected ? this.cm : this.getActiveCm();
+        if (!cm) {
+            new Notice("VoxCraft: ノートを編集モードで開いてください。");
+            return;
+        }
+        const next = !isKeyboardSuppressed(cm);
+        setKeyboardSuppressed(cm, next);
+        this.toolbar?.setKeyboardSuppressed(next);
     }
 
     // ツールバーからの句読点・改行挿入。通常チャンクと同じ扱い（取り消し対象になる）。

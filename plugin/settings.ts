@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import type VoxCraftPlugin from "./main";
 import { DictModal, fetchHealth, httpBase } from "./dict";
 
@@ -20,6 +20,7 @@ export interface VoxCraftSettings {
     insertAt: "anchor" | "cursor"; // 口述の挿入位置。anchor=固定アンカー（既定）/ cursor=カーソル追従
     pauseComma: boolean;        // 短い息継ぎでチャンクが切れたら「、」で接続する
     showToolbar: boolean;       // 口述中に画面下部の操作ツールバーを表示する
+    suppressKeyboard: boolean;  // 口述中はソフトキーボードを出さない（モバイルのみ）
     serverUrl?: string;         // 後方互換: 旧・単一URL（読み込み時に endpoints へ移行）
 }
 
@@ -34,6 +35,7 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     insertAt: "anchor",
     pauseComma: true,
     showToolbar: true,
+    suppressKeyboard: true,
 };
 
 // 旧バージョン（単一 serverUrl）の設定を新モデルへ移行する。
@@ -48,6 +50,7 @@ export function migrateSettings(s: VoxCraftSettings): VoxCraftSettings {
     if (s.insertAt !== "cursor") s.insertAt = "anchor";
     if (typeof s.pauseComma !== "boolean") s.pauseComma = true;
     if (typeof s.showToolbar !== "boolean") s.showToolbar = true;
+    if (typeof s.suppressKeyboard !== "boolean") s.suppressKeyboard = true;
     delete s.serverUrl;
     return s;
 }
@@ -292,6 +295,22 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 })
             );
+
+        if (Platform.isMobile) {
+            new Setting(containerEl)
+                .setName("録音中はキーボードを出さない")
+                .setDesc(
+                    "口述中は画面を触ってもソフトキーボードが出ないようにする（ツールバーが隠れないため）。" +
+                    "カーソル移動や範囲選択はそのままできる。入力したいときはツールバーの⌨ボタンで出す。"
+                )
+                .addToggle((t) =>
+                    t.setValue(this.plugin.settings.suppressKeyboard).onChange(async (v) => {
+                        this.plugin.settings.suppressKeyboard = v;
+                        await this.plugin.saveSettings();
+                        this.plugin.refreshKeyboardSuppression();
+                    })
+                );
+        }
 
         new Setting(containerEl)
             .setName("音声コマンドを有効化")
