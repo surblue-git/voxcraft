@@ -8,9 +8,10 @@
 // ボタンは pointerdown を preventDefault してエディタのフォーカスを奪わない
 // （奪うとモバイルでキーボードが閉じ、カーソル位置も失われる）。
 //
-// キーボードが出るとバーはその下に隠れてしまう。対策は2つ:
-//   - 口述中はキーボード自体を抑制する（keyboard.ts。⌨ボタンで出せる）
-//   - それでも出ているときは visualViewport でキーボードの高さを測って上に載る
+// キーボードが出るとバーはその下に隠れる。これは keyboard.ts の抑制で解決する
+// （口述中はキーボードを出さず、⌨ボタンで出したいときだけ出す）。キーボードの上に
+// バーを載せる案は入れない: 自分で出したときだけの状態な上、縦が狭くなって
+// かえって入力しづらい。
 
 import { setIcon } from "obsidian";
 
@@ -26,17 +27,12 @@ export interface ToolbarCallbacks {
     onClose: () => void;
 }
 
-// キーボードが出ていると見なす下端の余白（px）。ナビゲーションバー等の細い
-// インセットを誤検出しない程度に大きく取る。
-const KEYBOARD_MIN_INSET = 120;
-
 export class DictationToolbar {
     private el: HTMLElement | null = null;
     private micBtn: HTMLButtonElement | null = null;
     private kbBtn: HTMLButtonElement | null = null;
     private recording = false;
     private keyboardSuppressed = false;
-    private onViewport: (() => void) | null = null;
 
     // keyboardButton: ソフトキーボードの表示/抑制ボタンを出すか（モバイルのみ意味がある）。
     constructor(
@@ -77,11 +73,9 @@ export class DictationToolbar {
         this.el = bar;
         this.applyRecording();
         this.applyKeyboard();
-        this.trackViewport();
     }
 
     hide(): void {
-        this.untrackViewport();
         this.el?.remove();
         this.el = null;
         this.micBtn = null;
@@ -110,36 +104,6 @@ export class DictationToolbar {
             "aria-label",
             this.keyboardSuppressed ? "キーボードを表示" : "キーボードを隠す（口述中は出さない）"
         );
-    }
-
-    // キーボードが出ている間はバーがその下に隠れる（Android では画面自体は
-    // 縮まないので fixed の bottom では逃げられない）。visualViewport から
-    // キーボードの高さを取り、その上に載せる。
-    private trackViewport(): void {
-        const vv = window.visualViewport;
-        if (!vv) return;
-        this.onViewport = () => this.applyViewport();
-        vv.addEventListener("resize", this.onViewport);
-        vv.addEventListener("scroll", this.onViewport);
-        this.applyViewport();
-    }
-
-    private untrackViewport(): void {
-        const vv = window.visualViewport;
-        if (!vv || !this.onViewport) return;
-        vv.removeEventListener("resize", this.onViewport);
-        vv.removeEventListener("scroll", this.onViewport);
-        this.onViewport = null;
-    }
-
-    private applyViewport(): void {
-        const vv = window.visualViewport;
-        if (!vv || !this.el) return;
-        // 表示領域の下端から画面下端までの距離＝キーボード等に覆われている高さ。
-        // キーボードで画面が縮むタイプの端末ではここが 0 になり、従来どおりになる。
-        const inset = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
-        this.el.style.setProperty("--voxcraft-kb-inset", `${inset}px`);
-        this.el.toggleClass("is-keyboard-up", inset >= KEYBOARD_MIN_INSET);
     }
 
     private applyRecording(): void {

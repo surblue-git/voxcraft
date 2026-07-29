@@ -89,14 +89,6 @@ body.is-mobile .voxcraft-toolbar {
     justify-content: center;
     overflow-x: visible;
 }
-/* キーボードが出ている間は、覆われた高さ（--voxcraft-kb-inset、visualViewport から
-   算出）のぶん持ち上げる。この状態は縦が苦しいので折り返しをやめて1行に詰める。
-   safe-area はキーボードの内側なので加算しない。 */
-body.is-mobile .voxcraft-toolbar.is-keyboard-up {
-    bottom: calc(var(--voxcraft-kb-inset, 0px) + var(--mobile-toolbar-height, 48px) + 4px);
-    flex-wrap: nowrap;
-    overflow-x: auto;
-}
 .voxcraft-toolbar .voxcraft-tb-btn {
     width: 40px;
     height: 40px;
