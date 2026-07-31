@@ -7,7 +7,8 @@
 
 export type VoiceCommand =
     | { kind: "stop" }                                   // 入力終了
-    | { kind: "undo" }                                   // 直前チャンク取り消し
+    | { kind: "cancelInput" }                            // 直前チャンクを入力キャンセル
+    | { kind: "restoreInput" }                           // キャンセルしたチャンクを復元
     | { kind: "newline" }                                // 改行
     | { kind: "reconvert" }                              // 変換戻し
     | { kind: "replace"; from: string; to: string }      // 「AをBに修正」
@@ -20,7 +21,10 @@ export type VoiceCommand =
     | null;
 
 const STOP = ["入力終了", "音声入力終了", "終了", "ストップ"];
-const UNDO = ["取り消し", "取消", "一文削除", "今のを削除", "元に戻して"];
+// 「取り消し」は一般語として単独で口述したい場合にも発火するため使わない。
+// ツールバーと同じ名称にそろえ、発話全体が専用語のときだけ処理する。
+const INPUT_CANCEL = ["入力キャンセル", "直前入力をキャンセル", "今の入力をキャンセル"];
+const INPUT_RESTORE = ["入力復元", "入力を復元", "キャンセルを戻す"];
 const NEWLINE = ["改行", "次の行"];
 const RECONVERT = ["変換戻し", "変換し直し", "変換やり直し", "再変換"];
 // 言い直しの起動語。「言い直し」は誤認識されやすい（実測で「入れてほしい」
@@ -138,7 +142,8 @@ export function parseCommand(rawText: string, prefix = ""): VoiceCommand {
     }
 
     if (STOP.includes(text)) return { kind: "stop" };
-    if (UNDO.includes(text)) return { kind: "undo" };
+    if (INPUT_CANCEL.includes(text)) return { kind: "cancelInput" };
+    if (INPUT_RESTORE.includes(text)) return { kind: "restoreInput" };
     if (NEWLINE.includes(text)) return { kind: "newline" };
     if (RECONVERT.includes(text)) return { kind: "reconvert" };
     if (RESPEAK.includes(text)) return { kind: "respeak" };

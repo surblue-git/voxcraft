@@ -80,6 +80,25 @@ class Config:
     # チャンクの内側に埋もれ、段落分けの材料が消えるため。
     transcribe_join_break_sec: float = float(_env("VOXCRAFT_JOIN_BREAK_SEC", "2.0"))
 
+    # --- 欠落区間の選択的自動再認識（文字起こし専用） ---
+    # VADが捨てた区間がこれ以上続き、かつ下の音声根拠を満たす場合だけ再認識する。
+    # ほぼ無音の相談・マイク離席は無理に文字化せず、従来どおり欠落として残す。
+    retry_gap_min_sec: float = float(_env("VOXCRAFT_RETRY_GAP_MIN", "2.0"))
+    retry_gap_max_sec: float = float(_env("VOXCRAFT_RETRY_GAP_MAX", "45.0"))
+    retry_min_rms: float = float(_env("VOXCRAFT_RETRY_MIN_RMS", "0.0015"))
+    retry_active_rms: float = float(_env("VOXCRAFT_RETRY_ACTIVE_RMS", "0.003"))
+    retry_active_ratio: float = float(_env("VOXCRAFT_RETRY_ACTIVE_RATIO", "0.03"))
+    # 再認識結果も最低限の確信度を満たした場合だけ本文へ採用する。
+    retry_min_logprob: float = float(_env("VOXCRAFT_RETRY_MIN_LOGPROB", "-1.0"))
+    # 直近の欠落音声を取り出すリングバッファ。最大再認識区間より長く保つ。
+    retry_buffer_sec: float = float(_env("VOXCRAFT_RETRY_BUFFER_SEC", "60.0"))
+
+    # --- PC音声の無音自動停止（文字起こし専用） ---
+    # 既定5分。0で無効。PCループバックは無音時のノイズ床がほぼ0なので、
+    # -80dBFS相当を超える実音が来たときだけタイマーをリセットする。
+    transcribe_auto_stop_sec: float = float(_env("VOXCRAFT_AUTO_STOP_SEC", "300"))
+    transcribe_audible_rms: float = float(_env("VOXCRAFT_AUDIBLE_RMS", "0.0001"))
+
     # --- 段落分け（文字起こしモード専用。ベタ打ち防止） ---
     # 「一定の字数を超えていて、かつ息継ぎがある所」で空行を入れる。
     # 秒数だけで決めないのは、マイクが遠いとVADが発話の途中で落ちて見かけの無音が

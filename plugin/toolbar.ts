@@ -2,7 +2,7 @@
 //
 // モバイル（Android）では、音声コマンドの発話やコマンドパレットを開くより
 // 画面のボタンを押す方が速くて確実。口述の録音開始時に表示し、
-// マイク・入力キャンセル・元に戻す・句読点・改行・辞書を1タップで操作する。
+// マイク・入力キャンセル・入力復元・句読点・改行・辞書を1タップで操作する。
 // 文字起こしモードでは表示しない（本文操作系が誤動作しないように）。
 //
 // ボタンは pointerdown を preventDefault してエディタのフォーカスを奪わない
@@ -47,8 +47,8 @@ export class DictationToolbar {
 
         this.micBtn = this.iconBtn(bar, "mic", "音声入力のオン/オフ", () => this.cb.onMicToggle());
         this.micBtn.addClass("voxcraft-tb-mic");
-        this.iconBtn(bar, "delete", "入力キャンセル（直前の一文を削除）", () => this.cb.onCancel());
-        this.iconBtn(bar, "undo-2", "元に戻す（キャンセルした文を再挿入）", () => this.cb.onRestore());
+        this.iconBtn(bar, "delete", "入力キャンセル（直前の一文を削除／音声「入力キャンセル」）", () => this.cb.onCancel());
+        this.iconBtn(bar, "undo-2", "入力復元（キャンセルした文を再挿入／音声「入力復元」）", () => this.cb.onRestore());
         this.textBtn(bar, "、", "読点を挿入", () => this.cb.onInsert("、"));
         this.textBtn(bar, "。", "句点を挿入", () => this.cb.onInsert("。"));
         this.iconBtn(bar, "corner-down-left", "改行を挿入", () => this.cb.onInsert("\n"));

@@ -289,7 +289,7 @@ export class VoxCraftSettingTab extends PluginSettingTab {
         new Setting(containerEl)
             .setName("録音中に操作ツールバーを表示")
             .setDesc(
-                "音声入力（口述）中、画面下部にマイク・入力キャンセル・元に戻す・句読点・辞書などの" +
+                "音声入力（口述）中、画面下部にマイク・入力キャンセル・入力復元・句読点・辞書などの" +
                 "ボタンを表示する。モバイルで特に便利。文字起こしモードでは表示しない。"
             )
             .addToggle((t) =>
@@ -332,7 +332,7 @@ export class VoxCraftSettingTab extends PluginSettingTab {
         new Setting(containerEl)
             .setName("音声コマンドを有効化")
             .setDesc(
-                "「取り消し」「変換戻し」「AをBに修正」「Aを再変換」「ここを言い直し」「入力終了」等を認識する。"
+                "「入力キャンセル」「入力復元」「変換戻し」「AをBに修正」「Aを再変換」「ここを言い直し」「入力終了」等を認識する。"
             )
             .addToggle((t) =>
                 t.setValue(this.plugin.settings.enableCommands).onChange(async (v) => {

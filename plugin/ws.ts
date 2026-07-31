@@ -2,9 +2,19 @@
 // Desktop では ws://localhost:8760/ws、Android では ws://<Tailscale IP>:8760/ws を想定。
 
 export type AsrMode = "dictation" | "transcribe";
+export type AsrSource = "microphone" | "system";
+
+export interface StartResult {
+    source: AsrSource;
+    device?: string;
+    inputSampleRate?: number;
+    channels?: number;
+    autoStopSec?: number;
+}
 
 export interface ServerMessage {
-    type: "ready" | "chunk" | "stopped" | "reconvert" | "error" | "partial" | "session";
+    type: "ready" | "started" | "chunk" | "stopped" | "reconvert" | "error" |
+        "partial" | "session" | "level";
     text?: string;
     reason?: string;
     reading?: string;
@@ -18,6 +28,14 @@ export interface ServerMessage {
     end?: number;
     dropped?: string[]; // サーバー側フィルタで捨てたテキスト（無言で消さないための通知）
     pause?: number; // 前チャンクの発話終わりからの無音（秒）。「息継ぎで読点」の判断材料
+    source?: AsrSource;
+    device?: string;
+    inputSampleRate?: number;
+    channels?: number;
+    autoStopSec?: number;
+    recovered?: boolean;
+    level?: number;
+    fatal?: boolean;
 }
 
 export interface WsHandlers {
@@ -26,7 +44,9 @@ export interface WsHandlers {
     onChunk?: (text: string, msg: ServerMessage) => void;
     onSession?: (id: string) => void;
     onReconvert?: (msg: ServerMessage) => void;
-    onError?: (message: string) => void;
+    onStopped?: (reason?: string) => void;
+    onLevel?: (level: number) => void;
+    onError?: (message: string, fatal: boolean) => void;
     onClose?: () => void;
 }
 
@@ -48,6 +68,11 @@ export class AsrSocket {
     private handlers: WsHandlers;
     // レースで採用した URL（どの接続先が使われたかの表示に使う）。
     activeUrl: string | null = null;
+    private pendingStart: {
+        resolve: (result: StartResult) => void;
+        reject: (error: Error) => void;
+        timer: number;
+    } | null = null;
 
     constructor(urls: string | string[], handlers: WsHandlers) {
         this.urls = (Array.isArray(urls) ? urls : [urls]).map((u) => u.trim()).filter(Boolean);
@@ -127,6 +152,7 @@ export class AsrSocket {
         ws.onopen = null;
         ws.onerror = null;
         ws.onclose = () => {
+            this.rejectStart("接続が切れました");
             this.handlers.onClose?.();
         };
         ws.onmessage = (ev: MessageEvent) => {
@@ -146,6 +172,21 @@ export class AsrSocket {
             case "ready":
                 this.handlers.onReady?.();
                 break;
+            case "started": {
+                const pending = this.pendingStart;
+                if (pending) {
+                    window.clearTimeout(pending.timer);
+                    this.pendingStart = null;
+                    pending.resolve({
+                        source: msg.source ?? "microphone",
+                        device: msg.device,
+                        inputSampleRate: msg.inputSampleRate,
+                        channels: msg.channels,
+                        autoStopSec: msg.autoStopSec,
+                    });
+                }
+                break;
+            }
             case "partial":
                 this.handlers.onPartial?.();
                 break;
@@ -158,8 +199,15 @@ export class AsrSocket {
             case "reconvert":
                 this.handlers.onReconvert?.(msg);
                 break;
+            case "stopped":
+                this.handlers.onStopped?.(msg.reason);
+                break;
+            case "level":
+                if (typeof msg.level === "number") this.handlers.onLevel?.(msg.level);
+                break;
             case "error":
-                this.handlers.onError?.(msg.message || "unknown error");
+                if (msg.fatal) this.rejectStart(msg.message || "PC音声入力を開始できません");
+                this.handlers.onError?.(msg.message || "unknown error", Boolean(msg.fatal));
                 break;
         }
     }
@@ -168,8 +216,23 @@ export class AsrSocket {
         if (this.connected) this.ws!.send(pcm16);
     }
 
-    sendStart(stripSpace: boolean, symbols: boolean, mode: AsrMode = "dictation"): void {
-        this.send({ type: "start", stripSpace, symbols, mode });
+    sendStart(
+        stripSpace: boolean,
+        symbols: boolean,
+        mode: AsrMode = "dictation",
+        source: AsrSource = "microphone"
+    ): Promise<StartResult> {
+        if (!this.connected) return Promise.reject(new Error("サーバーに接続されていません"));
+        this.rejectStart("別の開始要求に置き換えられました");
+        return new Promise((resolve, reject) => {
+            const timer = window.setTimeout(() => {
+                if (!this.pendingStart) return;
+                this.pendingStart = null;
+                reject(new Error("音声入力の開始がタイムアウトしました"));
+            }, 15000);
+            this.pendingStart = { resolve, reject, timer };
+            this.send({ type: "start", stripSpace, symbols, mode, source });
+        });
     }
 
     sendStop(): void {
@@ -190,6 +253,7 @@ export class AsrSocket {
     }
 
     close(): void {
+        this.rejectStart("接続を閉じました");
         if (this.ws) {
             this.ws.onclose = null;
             try {
@@ -199,5 +263,13 @@ export class AsrSocket {
             }
             this.ws = null;
         }
+    }
+
+    private rejectStart(message: string): void {
+        const pending = this.pendingStart;
+        if (!pending) return;
+        window.clearTimeout(pending.timer);
+        this.pendingStart = null;
+        pending.reject(new Error(message));
     }
 }

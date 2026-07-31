@@ -11,6 +11,11 @@ uvicorn[standard]>=0.29
 numpy>=1.24
 faster-whisper>=1.0.3
 
+# Windows PC の再生音を直接取り込む（PC音声モード）。Windows 以外では不要。
+PyAudioWPatch>=0.2.12.7; sys_platform == "win32"
+# 48/44.1kHz の出力音声を、状態を保ったまま高品質に 16kHz へ変換する。
+soxr>=1.0.0; sys_platform == "win32"
+
 # 句読点の自動付与（既定ON）と、変換戻しの漢字→読み復元に使う。
 # 無くても動くが句読点が入らなくなるため、既定機能として最小構成に含める。
 sudachipy>=0.6.8

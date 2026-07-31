@@ -168,6 +168,10 @@ class TranscribeResult:
     text: str
     dropped: list[str]
     blocked: list[str] = field(default_factory=list)
+    # 自動再認識の採否に使う。通常表示では使わず、音声根拠を通過した欠落区間だけ
+    # 「Whisper自身の確信度も十分か」を二段目として確認する。
+    avg_logprob: float | None = None
+    max_no_speech_prob: float | None = None
 
 
 def _ensure_cuda_dll_dirs() -> None:
@@ -302,6 +306,8 @@ class Transcriber:
 
         o = opts or AsrOptions.dictation()
         dropped: list[str] = []
+        kept_logprobs: list[float] = []
+        kept_no_speech: list[float] = []
 
         with self._lock:
             segments, _info = self._model.transcribe(
@@ -325,6 +331,8 @@ class Transcriber:
                     dropped.append(f"{seg.text.strip()}（logprob={lp:.2f}）")
                     continue  # 低確信
                 kept.append(seg.text)
+                kept_logprobs.append(float(lp))
+                kept_no_speech.append(float(nsp))
             text = "".join(kept).strip()
 
         # 動画のアウトロ定型句なら捨てる（文字起こし・復旧のみ。丸ごと一致に限る）。
@@ -342,7 +350,13 @@ class Transcriber:
 
         for d in dropped:
             print(f"[VoxCraft] 破棄: {d}")
-        return TranscribeResult(text=text, dropped=dropped, blocked=blocked)
+        return TranscribeResult(
+            text=text,
+            dropped=dropped,
+            blocked=blocked,
+            avg_logprob=(sum(kept_logprobs) / len(kept_logprobs) if kept_logprobs else None),
+            max_no_speech_prob=(max(kept_no_speech) if kept_no_speech else None),
+        )
 
 
 transcriber = Transcriber()

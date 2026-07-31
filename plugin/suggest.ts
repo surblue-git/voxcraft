@@ -19,6 +19,10 @@ export interface ReconvertModalOpts {
     originalText?: string;
     // 「確定して辞書に登録」ボタンを押したときに呼ばれる（元表記, 確定表記）。
     onRegister?: (from: string, to: string) => void;
+    // 同じ読みを連続して遡るときの現在位置。
+    locationLabel?: string;
+    // この一致を変更せず、次回の検索対象から外す。
+    onSkip?: () => void;
 }
 
 export class ReconvertModal extends Modal {
@@ -62,6 +66,12 @@ export class ReconvertModal extends Modal {
         const { contentEl } = this;
         contentEl.addClass("voxcraft-reconvert");
         contentEl.createEl("h3", { text: "変換戻し — 候補を選択" });
+        if (this.opts.locationLabel) {
+            contentEl.createEl("p", {
+                cls: "voxcraft-hint",
+                text: this.opts.locationLabel,
+            });
+        }
         contentEl.createEl("p", {
             cls: "voxcraft-hint",
             text:
@@ -98,6 +108,17 @@ export class ReconvertModal extends Modal {
                     .setButtonText("確定して辞書に登録")
                     .setTooltip("以後、同じ誤変換を自動で修正する")
                     .onClick(() => this.submit(true))
+            );
+        }
+        if (this.opts.onSkip) {
+            buttons.addButton((b) =>
+                b
+                    .setButtonText("この箇所をスキップ")
+                    .setTooltip("変更せず、次の同じ再変換では一つ前の一致を探す")
+                    .onClick(() => {
+                        this.close();
+                        this.opts.onSkip?.();
+                    })
             );
         }
         buttons.addButton((b) => b.setButtonText("キャンセル").onClick(() => this.close()));

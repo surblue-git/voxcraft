@@ -1,4 +1,5 @@
 import { Editor, MarkdownView, Menu, Notice, Platform, Plugin } from "obsidian";
+import { Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
 import { DICTATION_MIC, MicRecorder, RAW_MIC } from "./audio";
@@ -22,7 +23,7 @@ import {
     spanRangeFor,
 } from "./recover";
 import { RecordingsModal } from "./recordings";
-import { AsrMode, AsrSocket, ServerMessage } from "./ws";
+import { AsrMode, AsrSocket, AsrSource, ServerMessage } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
 import { keyboardExtension, isKeyboardSuppressed, setKeyboardSuppressed } from "./keyboard";
 import { DictationToolbar } from "./toolbar";
@@ -75,12 +76,28 @@ function buildSurfaces(
     return out;
 }
 
+interface ReconvertTraversal {
+    targetKey: string;
+    cm: EditorView;
+    before: number;
+    processed: number;
+    doc: Text;
+}
+
+interface ReconvertModalContext {
+    locationLabel?: string;
+    onApplied?: (range: { from: number; to: number }) => void;
+    onSkip?: () => void;
+}
+
 export default class VoxCraftPlugin extends Plugin {
     settings: VoxCraftSettings;
 
     private socket: AsrSocket | null = null;
     private recorder: MicRecorder | null = null;
     private recording = false;
+    private starting = false;
+    private stopping = false;
     private statusEl: HTMLElement;
     private ribbonEl: HTMLElement;
 
@@ -91,11 +108,13 @@ export default class VoxCraftPlugin extends Plugin {
     // 変換戻しの応答が返るまで対象範囲を覚えておく。
     private pendingReconvert: { from: number; to: number } | null = null;
     private reconvertModal: ReconvertModal | null = null;
+    // 同じ「Aを再変換」を繰り返したとき、直前に処理した箇所より前を探す。
+    private reconvertTraversal: ReconvertTraversal | null = null;
     // 「ここを言い直し」で覚えた選択範囲。次の発話1回だけがこの範囲を置換する。
     private pendingRespeak: { from: number; to: number; text: string } | null = null;
     // コマンド実行等で発話の流れが切れた直後は、次のチャンクに息継ぎ読点を打たない。
     private suppressJoiner = true;
-    // 入力キャンセルで削除した確定チャンク。「元に戻す」で再挿入する（口述のみ）。
+    // 入力キャンセルで削除した確定チャンク。「入力復元」で再挿入する（口述のみ）。
     private canceled: string[] = [];
     // 画面下部の操作ツールバー（口述モードの録音中に表示）。
     private toolbar: DictationToolbar | null = null;
@@ -113,6 +132,9 @@ export default class VoxCraftPlugin extends Plugin {
 
     // ---- 文字起こしモード（自分の声での口述には一切関与しない） ----
     private mode: AsrMode = "dictation";
+    private source: AsrSource = "microphone";
+    private sourceDevice = "";
+    private autoStopSec = 0;
     // サーバーが音声を保存しているセッションID。復旧の材料。
     private session: string | null = null;
     // 挿入したテキストと、その元になった音声の位置（秒）。再認識の宛先を引くのに使う。
@@ -178,6 +200,19 @@ export default class VoxCraftPlugin extends Plugin {
             },
         });
         this.addCommand({
+            id: "toggle-system-transcribe",
+            name: "PC音声の文字起こしを開始/停止",
+            icon: "monitor-speaker",
+            checkCallback: (checking) => {
+                if (Platform.isMobile) return false;
+                if (!checking) {
+                    if (this.recording) this.stopRecording();
+                    else void this.startRecording("transcribe", "system");
+                }
+                return true;
+            },
+        });
+        this.addCommand({
             id: "cancel-last-input",
             name: "直前の入力をキャンセル（一文削除）",
             icon: "eraser",
@@ -185,7 +220,7 @@ export default class VoxCraftPlugin extends Plugin {
         });
         this.addCommand({
             id: "restore-canceled-input",
-            name: "キャンセルした入力を元に戻す",
+            name: "キャンセルした入力を復元",
             icon: "rotate-ccw",
             callback: () => this.restoreCanceled(),
         });
@@ -248,8 +283,11 @@ export default class VoxCraftPlugin extends Plugin {
         else void this.startRecording();
     }
 
-    private async startRecording(mode: AsrMode = "dictation"): Promise<void> {
-        if (this.recording) return;
+    private async startRecording(
+        mode: AsrMode = "dictation",
+        source: AsrSource = "microphone"
+    ): Promise<void> {
+        if (this.recording || this.starting || this.stopping) return;
         const cm = this.getActiveCm();
         if (!cm) {
             new Notice("VoxCraft: 挿入先のノート（編集モード）を開いてください。");
@@ -262,12 +300,19 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
 
+        this.starting = true;
+        this.mode = mode;
+        this.source = source;
+        this.sourceDevice = "";
+        this.autoStopSec = 0;
+        this.stopping = false;
         this.setStatus(urls.length > 1 ? "接続中…（つながる方を選択）" : "接続中…");
         this.socket = new AsrSocket(urls, {
             onReady: () => {
                 const url = this.socket?.activeUrl;
                 const label = url ? labelForUrl(this.settings, url) : "";
-                this.setStatus(label ? `待機中… 話してください（${label}）` : "待機中… 話してください");
+                const preparing = source === "system" ? "PC音声を準備中…" : "待機中… 話してください";
+                this.setStatus(label ? `${preparing}（${label}）` : preparing);
             },
             onPartial: () => {
                 this.transcribing = true;
@@ -280,10 +325,17 @@ export default class VoxCraftPlugin extends Plugin {
                 this.transcribing = false;
                 this.handleChunk(text, msg);
             },
+            onLevel: (level) => this.showLevel(level),
+            onStopped: (reason) => this.handleServerStopped(reason),
             onReconvert: (msg) => this.handleReconvert(msg),
-            onError: (m) => new Notice(`VoxCraft サーバーエラー: ${m}`),
+            onError: (m, fatal) => {
+                // 開始前の fatal は sendStart() の catch で一度だけ表示する。
+                if (!this.recording) return;
+                new Notice(`VoxCraft サーバーエラー: ${m}`);
+                if (fatal && this.source === "system") this.stopRecording();
+            },
             onClose: () => {
-                if (this.recording) {
+                if (this.recording || this.stopping) {
                     new Notice("VoxCraft: サーバー接続が切れました。");
                     void this.teardownSession();
                     this.setStatus("停止中");
@@ -300,39 +352,56 @@ export default class VoxCraftPlugin extends Plugin {
                 "認識サーバーが起動しているか、接続先の設定を確認してください。"
             );
             this.socket = null;
+            this.starting = false;
             this.setStatus("停止中");
             return;
         }
 
-        this.mode = mode;
-        this.socket.sendStart(
-            this.settings.stripJaAlnumSpace,
-            this.settings.symbolDictation,
-            mode
-        );
-
-        this.recorder = new MicRecorder(
-            (pcm) => this.socket?.sendAudio(pcm),
-            (level) => this.showLevel(level),
-            // 文字起こしは自分の声ではなく会場や再生音を拾う。ブラウザの前処理は
-            // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
-            mode === "transcribe" ? RAW_MIC : DICTATION_MIC
-        );
-        // 「録音中」の表示のまま実は音が来ていない、という壊れ方を必ず外へ出す。
-        this.recorder.onStalled = () => this.reportStall();
-        this.recorder.onGap = (sec) => this.reportGap(sec);
         try {
-            await this.recorder.start();
+            const started = await this.socket.sendStart(
+                this.settings.stripJaAlnumSpace,
+                this.settings.symbolDictation,
+                mode,
+                source
+            );
+            this.sourceDevice = started.device ?? "";
+            this.autoStopSec = started.autoStopSec ?? 0;
         } catch (e) {
-            new Notice("VoxCraft: マイクにアクセスできませんでした。");
+            new Notice(
+                `VoxCraft: ${source === "system" ? "PC音声" : "マイク"}を開始できませんでした。` +
+                `（${e instanceof Error ? e.message : e}）`
+            );
             await this.teardownSession();
             this.setStatus("停止中");
             return;
         }
 
+        if (source === "microphone") {
+            this.recorder = new MicRecorder(
+                (pcm) => this.socket?.sendAudio(pcm),
+                (level) => this.showLevel(level),
+                // 文字起こしは自分の声ではなく会場や再生音を拾う。ブラウザの前処理は
+                // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
+                mode === "transcribe" ? RAW_MIC : DICTATION_MIC
+            );
+            // 「録音中」の表示のまま実は音が来ていない、という壊れ方を必ず外へ出す。
+            this.recorder.onStalled = () => this.reportStall();
+            this.recorder.onGap = (sec) => this.reportGap(sec);
+            try {
+                await this.recorder.start();
+            } catch (e) {
+                new Notice("VoxCraft: マイクにアクセスできませんでした。");
+                this.socket.sendStop();
+                await this.teardownSession();
+                this.setStatus("停止中");
+                return;
+            }
+        }
+
         // 口述対象を固定し、現在のカーソル位置にアンカーを立てる。
         this.cm = cm;
         this.chunks = [];
+        this.reconvertTraversal = null;
         this.canceled = [];
         this.pendingReconvert = null;
         this.pendingRespeak = null;
@@ -349,8 +418,9 @@ export default class VoxCraftPlugin extends Plugin {
         }
 
         this.recording = true;
+        this.starting = false;
         this.ribbonEl.addClass("voxcraft-recording");
-        this.setStatus(mode === "transcribe" ? "● 文字起こし中" : "● 録音中");
+        this.setStatus(this.idleStatus());
         // ツールバーは口述専用。文字起こしでは本文操作系が誤動作しないよう出さない。
         if (mode === "dictation") this.showToolbar();
         else this.hideToolbar();
@@ -361,6 +431,7 @@ export default class VoxCraftPlugin extends Plugin {
     stopRecording(): void {
         if (!this.recording) return;
         this.recording = false;
+        this.stopping = true;
         void this.wakeLock.release();
         this.ribbonEl.removeClass("voxcraft-recording");
         // ツールバーのマイクで止めたときはバーを残し、そこから再開できるようにする。
@@ -369,23 +440,53 @@ export default class VoxCraftPlugin extends Plugin {
         else this.hideToolbar();
         this.refreshKeyboardSuppression();
         this.setStatus("停止処理中…");
-        // 残り音声を確定させてから閉じる。
-        this.socket?.sendStop();
-        void this.recorder?.stop().then(() => {
-            this.recorder = null;
-        });
-        // サーバーが末尾チャンクを返す猶予を置いてから閉じ、アンカーを片付ける。
-        window.setTimeout(() => {
-            this.socket?.close();
-            this.socket = null;
-            this.clearDictationAnchor();
-            this.pendingRespeak = null;
-            this.setStatus("停止中");
-        }, 1500);
+        // マイクは最後のフレームを送り終えてから stop を送る。PC音声は stop を受けた
+        // サーバー自身が入力を閉じる。どちらも stopped 応答までは接続を維持する。
+        void this.requestStop();
+    }
+
+    private async requestStop(): Promise<void> {
+        await this.recorder?.stop();
+        this.recorder = null;
+        if (this.socket?.connected) this.socket.sendStop();
+        else this.finishStop();
+    }
+
+    private finishStop(): void {
+        if (!this.stopping) return;
+        this.stopping = false;
+        this.transcribing = false;
+        this.socket?.close();
+        this.socket = null;
+        this.clearDictationAnchor();
+        this.pendingRespeak = null;
+        this.setStatus("停止中");
+    }
+
+    private handleServerStopped(reason?: string): void {
+        // PC音声の無音監視はサーバー側で止まるため、クライアントが停止操作中でなくても
+        // UIと接続を終了状態へそろえる。手動停止は従来どおり finishStop() へ流す。
+        if (reason === "silence" && this.recording) {
+            this.recording = false;
+            this.stopping = true;
+            this.transcribing = false;
+            void this.wakeLock.release();
+            this.ribbonEl.removeClass("voxcraft-recording");
+            this.toolbar?.setRecording(false);
+            this.hideToolbar();
+            this.refreshKeyboardSuppression();
+            const minutes = Math.max(1, Math.round(this.autoStopSec / 60));
+            new Notice(
+                `VoxCraft: PC音声が${minutes}分間無音だったため、文字起こしを自動停止しました。`
+            );
+        }
+        this.finishStop();
     }
 
     private async teardownSession(): Promise<void> {
         this.recording = false;
+        this.starting = false;
+        this.stopping = false;
         await this.wakeLock.release();
         this.ribbonEl?.removeClass("voxcraft-recording");
         this.hideToolbar();
@@ -548,8 +649,11 @@ export default class VoxCraftPlugin extends Plugin {
             case "stop":
                 this.stopRecording();
                 return true;
-            case "undo":
-                this.undoLast();
+            case "cancelInput":
+                this.cancelLast();
+                return true;
+            case "restoreInput":
+                this.restoreCanceled();
                 return true;
             case "newline":
                 this.insertText("\n");
@@ -629,6 +733,9 @@ export default class VoxCraftPlugin extends Plugin {
         const at = Math.min(anchor, cm.state.doc.length);
         const follow = cm.state.selection.main.head === anchor;
 
+        // 通常の口述やツールバー挿入が再開したら、連続再変換の遡りを終了する。
+        this.reconvertTraversal = null;
+
         cm.dispatch({
             changes: { from: at, to: at, insert: text },
             selection: follow ? { anchor: at + text.length } : undefined,
@@ -641,18 +748,18 @@ export default class VoxCraftPlugin extends Plugin {
     }
 
     // 直前チャンク（アンカー直前の text.length 文字）を削除する。
-    // 音声「取り消し」（silent）とツールバー/コマンドの「入力キャンセル」の共通実装。
+    // 音声・ツールバー・コマンドパレットの「入力キャンセル」の共通実装。
     // 削除した文は canceled に積み、「元に戻す」で再挿入できる。文字起こしでは動かない
     // （動画側の本文を勝手に消さない）。
-    private cancelLast(opts: { silent?: boolean } = {}): void {
+    private cancelLast(): void {
         if (this.mode === "transcribe" && this.recording) {
-            if (!opts.silent) new Notice("VoxCraft: 入力キャンセルは文字起こしでは使えません。");
+            new Notice("VoxCraft: 入力キャンセルは文字起こしでは使えません。");
             return;
         }
         const cm = this.cm;
         const last = this.chunks[this.chunks.length - 1];
         if (!cm || !cm.dom.isConnected || last === undefined) {
-            if (!opts.silent) new Notice("VoxCraft: キャンセルできる入力がありません（音声入力中に使ってください）。");
+            new Notice("VoxCraft: キャンセルできる入力がありません（音声入力中に使ってください）。");
             return;
         }
         const anchor = getAnchor(cm);
@@ -670,22 +777,16 @@ export default class VoxCraftPlugin extends Plugin {
         if (this.canceled.length > 50) this.canceled.shift();
         // ボタン操作で発話の流れは切れているので、次のチャンクに息継ぎ読点を打たない。
         this.suppressJoiner = true;
-        if (!opts.silent) {
-            const t = last.trim();
-            const preview = t.length > 20 ? t.slice(0, 20) + "…" : t;
-            new Notice(`VoxCraft: キャンセルしました —「${preview}」（「元に戻す」で復活）`);
-        }
+        const t = last.trim();
+        const preview = t.length > 20 ? t.slice(0, 20) + "…" : t;
+        new Notice(`VoxCraft: キャンセルしました —「${preview}」（「入力復元」で復活）`);
     }
 
-    private undoLast(): void {
-        this.cancelLast({ silent: true });
-    }
-
-    // 「元に戻す」: 入力キャンセルで消した文を、アンカー位置に再挿入する。
+    // 「入力復元」/「元に戻す」: 入力キャンセルで消した文をアンカー位置に再挿入する。
     private restoreCanceled(): void {
         const text = this.canceled[this.canceled.length - 1];
         if (text === undefined) {
-            new Notice("VoxCraft: 元に戻せる入力がありません。");
+            new Notice("VoxCraft: 復元できる入力がありません。");
             return;
         }
         const cm = this.cm;
@@ -696,6 +797,9 @@ export default class VoxCraftPlugin extends Plugin {
         this.canceled.pop();
         this.insertText(text);
         this.suppressJoiner = true;
+        const t = text.trim();
+        const preview = t.length > 20 ? t.slice(0, 20) + "…" : t;
+        new Notice(`VoxCraft: 復元しました —「${preview}」`);
     }
 
     // ---- 画面下部の操作ツールバー（口述専用） ----
@@ -805,6 +909,11 @@ export default class VoxCraftPlugin extends Plugin {
     // 現在の基本ステータス表記（非同期処理から戻すときに使う）。
     private idleStatus(): string {
         if (!this.recording) return "停止中";
+        if (this.source === "system") {
+            return this.sourceDevice
+                ? `● PC音声を文字起こし中（${this.sourceDevice}）`
+                : "● PC音声を文字起こし中";
+        }
         return this.mode === "transcribe" ? "● 文字起こし中" : "● 録音中";
     }
 
@@ -836,23 +945,64 @@ export default class VoxCraftPlugin extends Plugin {
         }
 
         const surfaces = buildSurfaces(target, payload.segments);
-        const hit = this.findLastSurface(cm, surfaces);
+        const targetKey = target.normalize("NFKC").replace(/\s+/gu, "");
+        const previous = this.reconvertTraversal;
+        const traversal =
+            previous &&
+            previous.targetKey === targetKey &&
+            previous.cm === cm &&
+            previous.doc === cm.state.doc
+                ? previous
+                : null;
+        const before = traversal?.before ?? cm.state.doc.length;
+        const hit = this.findLastSurface(cm, surfaces, before);
         if (!hit) {
-            new Notice(
-                `VoxCraft: 「${target}」に相当する箇所が見つかりません。` +
-                "該当箇所を選択して「選択範囲を再変換」を使ってください。"
-            );
+            if (traversal?.processed) {
+                new Notice(
+                    `VoxCraft: 「${target}」は以前の一致を${traversal.processed}箇所確認しました。` +
+                    "これより前の一致はありません。"
+                );
+                // 次回は直近からやり直せるよう、末尾到達時にだけ解除する。
+                this.reconvertTraversal = null;
+            } else {
+                new Notice(
+                    `VoxCraft: 「${target}」に相当する箇所が見つかりません。` +
+                    "該当箇所を選択して「選択範囲を再変換」を使ってください。"
+                );
+            }
             return;
         }
-        this.openReconvertModalFor(hit, cm.state.doc.sliceString(hit.from, hit.to), payload, cm);
+        const occurrence = (traversal?.processed ?? 0) + 1;
+        const advance = (range: { from: number; to: number }) => {
+            this.reconvertTraversal = {
+                targetKey,
+                cm,
+                before: range.from,
+                processed: occurrence,
+                doc: cm.state.doc,
+            };
+        };
+        this.openReconvertModalFor(
+            hit,
+            cm.state.doc.sliceString(hit.from, hit.to),
+            payload,
+            cm,
+            {
+                locationLabel: `一致箇所: 直近から${occurrence}件目`,
+                onApplied: advance,
+                onSkip: () => advance(hit),
+            }
+        );
     }
 
     // 表記候補を「直近の口述領域 → ノート全文」の順で後方検索する。
     private findLastSurface(
         cm: EditorView,
-        surfaces: string[]
+        surfaces: string[],
+        before = cm.state.doc.length
     ): { from: number; to: number } | null {
         const doc = cm.state.doc.toString();
+        const searchEnd = Math.max(0, Math.min(before, doc.length));
 
         const searchIn = (winStart: number, winEnd: number, skipEcho: boolean) => {
             const win = doc.slice(winStart, winEnd);
@@ -879,18 +1029,19 @@ export default class VoxCraftPlugin extends Plugin {
             anchor === null
                 ? null
                 : Math.max(0, Math.min(anchor, doc.length) - this.chunks.reduce((n, c) => n + c.length, 0));
-        const winEnd = anchor === null ? null : Math.min(anchor, doc.length);
+        const winEnd =
+            anchor === null ? null : Math.min(anchor, doc.length, searchEnd);
 
         // 直近 → 全文の順に、まず言い残しを避けて探す。
         if (winStart !== null && winEnd !== null) {
             const hit = searchIn(winStart, winEnd, true);
             if (hit) return hit;
         }
-        const hit = searchIn(0, doc.length, true);
+        const hit = searchIn(0, searchEnd, true);
         if (hit) return hit;
         // どこにも無ければ言い残しも許して探す（本文が偶然「参加を修正」のような
         // 並びになっている場合に、直せないより直せる方を選ぶ）。
-        return searchIn(0, doc.length, false);
+        return searchIn(0, searchEnd, false);
     }
 
     // 選択範囲の再変換: タッチ/マウスで選んだ誤変換を候補から直す。
@@ -910,6 +1061,7 @@ export default class VoxCraftPlugin extends Plugin {
             new Notice("VoxCraft: 選択が長すぎます（200文字まで）。");
             return;
         }
+        this.reconvertTraversal = null;
         const url = this.activeUrl();
         if (!url) {
             new Notice("VoxCraft: 接続先が設定されていません。");
@@ -939,7 +1091,8 @@ export default class VoxCraftPlugin extends Plugin {
         range: { from: number; to: number },
         originalText: string,
         payload: ReconvertPayload,
-        cm: EditorView
+        cm: EditorView,
+        context: ReconvertModalContext = {}
     ): void {
         const segments = payload.segments || [];
         if (segments.length === 0) {
@@ -949,10 +1102,20 @@ export default class VoxCraftPlugin extends Plugin {
         const modal = new ReconvertModal(
             this.app,
             segments,
-            (chosen) => this.applyRangedReplace(range, originalText, chosen.join(""), cm),
+            (chosen) => {
+                const applied = this.applyRangedReplace(
+                    range,
+                    originalText,
+                    chosen.join(""),
+                    cm
+                );
+                if (applied) context.onApplied?.(applied);
+            },
             {
                 originalText,
                 onRegister: (f, t) => void this.registerReplacement(f, t),
+                locationLabel: context.locationLabel,
+                onSkip: context.onSkip,
             }
         );
         this.adoptModal(modal);
@@ -987,9 +1150,9 @@ export default class VoxCraftPlugin extends Plugin {
         originalText: string,
         newText: string,
         cmIn: EditorView
-    ): void {
+    ): { from: number; to: number } | null {
         const cm = cmIn.dom.isConnected ? cmIn : this.getActiveCm();
-        if (!cm || newText === originalText) return;
+        if (!cm) return null;
         const doc = cm.state.doc;
         let to = Math.min(range.to, doc.length);
         let from = Math.min(range.from, to);
@@ -997,12 +1160,15 @@ export default class VoxCraftPlugin extends Plugin {
             const idx = doc.toString().lastIndexOf(originalText);
             if (idx < 0) {
                 new Notice("VoxCraft: 対象が編集されたため置換できませんでした。");
-                return;
+                return null;
             }
             from = idx;
             to = idx + originalText.length;
         }
-        cm.dispatch({ changes: { from, to, insert: newText } });
+        if (newText !== originalText) {
+            cm.dispatch({ changes: { from, to, insert: newText } });
+        }
+        return { from, to: from + newText.length };
     }
 
     // 「確定して辞書に登録」: 元表記→確定表記をサーバーの置換辞書へ追加する。
@@ -1283,7 +1449,7 @@ export default class VoxCraftPlugin extends Plugin {
         const filled = Math.max(0, Math.min(segs, Math.round(level * 40)));
         const bar = "█".repeat(filled) + "░".repeat(segs - filled);
         // 言い直し待ちの間は、メーター表示でその状態が消えないようにする。
-        this.setStatus(this.pendingRespeak ? `言い直し待ち ${bar}` : `● 録音中 ${bar}`);
+        this.setStatus(this.pendingRespeak ? `言い直し待ち ${bar}` : `${this.idleStatus()} ${bar}`);
     }
 
     private setStatus(text: string): void {

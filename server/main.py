@@ -4,13 +4,15 @@
   クライアント → サーバー
     - バイナリフレーム: PCM16LE モノラル 16kHz の音声ブロック
     - テキストフレーム(JSON): 制御コマンド
-        {"type": "start", "symbols": true, "stripSpace": true}
+        {"type": "start", "symbols": true, "stripSpace": true,
+         "mode": "transcribe", "source": "system"}
         {"type": "stop"}                     # 残り音声をflushして確定
         {"type": "reconvert", "text": "..."} # 再変換候補を要求
         {"type": "tune", "fast": true}       # 候補選択中だけ応答速度優先に切替（false で復帰）
 
   サーバー → クライアント（すべて JSON テキストフレーム）
     - {"type": "ready"}                                # 接続確立
+    - {"type": "started", "source": "system", "device": "..."}
     - {"type": "partial", "reason": "silence|max_len"} # チャンク認識開始の合図（任意）
     - {"type": "chunk", "text": "確定テキスト"}          # 確定チャンク
     - {"type": "reconvert", "reading": "...", "segments": [...], "online": bool}
@@ -42,6 +44,14 @@ from recording import (
 )
 from punctuate import available as punctuation_available
 from reconvert import reconvert
+from system_audio import SystemAudioError, WasapiLoopbackCapture
+from transcribe_guard import (
+    AudioRingBuffer,
+    SilenceTracker,
+    SpeechEvidence,
+    filter_contextual_artifacts,
+    speech_evidence,
+)
 from userdict import (
     DictValidationError,
     get_error,
@@ -78,6 +88,7 @@ def health() -> dict:
         "beamSize": config.beam_size,
         "autoPunctuation": config.enable_auto_punctuation and punctuation_available(),
         "silenceSec": config.silence_sec,
+        "systemAudioAutoStopSec": config.transcribe_auto_stop_sec,
         "dictError": get_error(),
     }
 
@@ -193,8 +204,20 @@ async def recognize(payload: dict = Body(...)) -> dict:
         raise HTTPException(status_code=400, detail="その範囲に音声がありません")
 
     result = await _transcribe_chunk(audio, AsrOptions.recovery(), hq=True)
-    text = postprocess(
+    evidence = speech_evidence(
+        audio,
+        config.sample_rate,
+        active_rms=config.retry_active_rms,
+    )
+    guarded_text, contextual_blocked = filter_contextual_artifacts(
         result.text,
+        evidence,
+        weak_rms=config.retry_min_rms,
+        weak_active_ratio=config.retry_active_ratio,
+    )
+    result.blocked.extend(contextual_blocked)
+    text = postprocess(
+        guarded_text,
         strip_space=config.strip_ja_alnum_space,
         symbol_dictation=False,  # 復旧では「まる」等を記号に変換しない（原音に忠実に）
         replacements=get_replacements(),
@@ -253,24 +276,84 @@ async def ws_endpoint(ws: WebSocket) -> None:
     symbols = config.enable_symbol_dictation
     punctuate = config.enable_auto_punctuation
     session: SessionAudio | None = None
+    source = "microphone"
+    system_capture: WasapiLoopbackCapture | None = None
+    system_audio_queue: asyncio.Queue | None = None
+    system_consumer_task: asyncio.Task | None = None
+    last_source_level_at = 0.0
+    audio_ring = AudioRingBuffer(max(1, int(config.retry_buffer_sec * config.sample_rate)))
+    last_source_chunk_end = 0
+    silence_tracker: SilenceTracker | None = None
+    auto_stop_task: asyncio.Task | None = None
+    input_finished = False
+    finish_lock = asyncio.Lock()
 
     await ws.send_text(json.dumps({"type": "ready"}))
 
     async def emit_chunk(
-        audio: np.ndarray, reason: str, start: int, end: int, pause: float | None = None
+        audio: np.ndarray,
+        reason: str,
+        start: int,
+        end: int,
+        pause: float | None = None,
+        recovery: bool = False,
+        evidence: SpeechEvidence | None = None,
     ) -> None:
         # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
         await ws.send_text(json.dumps({"type": "partial", "reason": reason}))
         # mode は下のコマンド処理で書き換わる。ここは常に現在のモードを見る。
-        result = await _transcribe_chunk(audio, opts, hq=(mode == "transcribe"))
+        chunk_opts = AsrOptions.recovery() if recovery else opts
+        result = await _transcribe_chunk(audio, chunk_opts, hq=(mode == "transcribe"))
+        raw_text = result.text
+        if mode == "transcribe" and raw_text:
+            chunk_evidence = evidence or speech_evidence(
+                audio,
+                config.sample_rate,
+                active_rms=config.retry_active_rms,
+            )
+            raw_text, contextual_blocked = filter_contextual_artifacts(
+                raw_text,
+                chunk_evidence,
+                weak_rms=config.retry_min_rms,
+                weak_active_ratio=config.retry_active_ratio,
+            )
+            if contextual_blocked:
+                result.blocked.extend(contextual_blocked)
+                print(
+                    f"[VoxCraft] 文脈付き定型句を除去: {contextual_blocked} "
+                    f"({start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒)"
+                )
         text = postprocess(
-            result.text,
+            raw_text,
             strip_space=strip_space,
             symbol_dictation=symbols,
             replacements=get_replacements(),
             symbols=get_symbols(),
             auto_punctuate=punctuate,
         )
+        if recovery:
+            # 音声根拠を通過しても、Whisper側の確信度が低い結果や定型句は採用しない。
+            # 何も送らなければ、直後の通常チャンクを受けたクライアントが従来どおり
+            # この区間を ⟨未認識 ...⟩ として残す。
+            accepted = (
+                bool(text)
+                and result.avg_logprob is not None
+                and result.avg_logprob >= config.retry_min_logprob
+            )
+            if not accepted:
+                ev = evidence or SpeechEvidence(0.0, 0.0, 0.0, 0.0)
+                print(
+                    f"[VoxCraft] 自動再認識を不採用: "
+                    f"{start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒 "
+                    f"rms={ev.rms:.5f} active={ev.active_ratio:.1%} "
+                    f"logprob={result.avg_logprob} blocked={result.blocked[:1]}"
+                )
+                return
+            print(
+                f"[VoxCraft] 欠落を自動復旧: "
+                f"{start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒 "
+                f"logprob={result.avg_logprob:.2f} text={text[:80]}"
+            )
         if not text and result.blocked:
             # 動画のアウトロ定型句（「ご視聴ありがとうございました」等）。本文には出さない。
             # ただし位置は通しておく: 何も送らないとクライアントが音声の切れ目とみなして
@@ -302,9 +385,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
         # 段落分け（文字起こしのみ）。ベタ打ちを避けるため、話の切れ目で空行を挟む。
         # クライアントは受け取ったテキストをそのまま挿入するので、区切りはここで付ける
         # ＝ プラグインを更新しなくても全端末で効く。
-        if breaker is not None:
+        if breaker is not None and not recovery:
             text = breaker.feed(text, pause) + text
         msg: dict = {"type": "chunk", "text": text}
+        if recovery:
+            msg["recovered"] = True
         # 前チャンクとの息継ぎ長（秒）。クライアントの「息継ぎで読点」判断に使う。
         if pause is not None:
             msg["pause"] = round(pause, 2)
@@ -347,12 +432,177 @@ async def ws_endpoint(ws: WebSocket) -> None:
     def put(chunks: list) -> None:
         """認識キューへそのまま流す。"""
         for c in chunks:
-            queue.put_nowait((c.audio, c.reason, c.start, c.end, c.pause))
+            queue.put_nowait((c.audio, c.reason, c.start, c.end, c.pause, False, None))
+
+    def put_recovery(audio: np.ndarray, start: int, end: int, evidence: SpeechEvidence) -> None:
+        queue.put_nowait((audio, "auto_recovery", start, end, None, True, evidence))
 
     def enqueue(chunks: list) -> None:
         """確定チャンクを認識キューへ流す（文字起こしでは短いものを連結してから）。"""
+        nonlocal last_source_chunk_end
         for chunk in chunks:
+            gap_start = last_source_chunk_end
+            gap_end = chunk.start
+            gap_samples = gap_end - gap_start
+            retry_gap = (
+                mode == "transcribe"
+                and gap_start > 0
+                and gap_samples >= int(config.retry_gap_min_sec * config.sample_rate)
+                and gap_samples <= int(config.retry_gap_max_sec * config.sample_rate)
+            )
+            if gap_end > gap_start and joiner is not None:
+                # joiner が保持中の直前チャンクを、欠落再認識より先に必ず出す。
+                put(joiner.flush())
+            if retry_gap:
+                gap_audio = audio_ring.slice(gap_start, gap_end)
+                if gap_audio is not None:
+                    evidence = speech_evidence(
+                        gap_audio,
+                        config.sample_rate,
+                        active_rms=config.retry_active_rms,
+                    )
+                    if evidence.supports_retry(
+                        min_rms=config.retry_min_rms,
+                        min_active_ratio=config.retry_active_ratio,
+                    ):
+                        print(
+                            f"[VoxCraft] 欠落を再認識候補へ: "
+                            f"{gap_start / config.sample_rate:.1f}-{gap_end / config.sample_rate:.1f}秒 "
+                            f"rms={evidence.rms:.5f} active={evidence.active_ratio:.1%}"
+                        )
+                        put_recovery(gap_audio, gap_start, gap_end, evidence)
+                    else:
+                        print(
+                            f"[VoxCraft] 低音量の欠落は再認識しない: "
+                            f"{gap_start / config.sample_rate:.1f}-{gap_end / config.sample_rate:.1f}秒 "
+                            f"rms={evidence.rms:.5f} active={evidence.active_ratio:.1%}"
+                        )
             put(joiner.push(chunk) if joiner is not None else [chunk])
+            last_source_chunk_end = max(last_source_chunk_end, chunk.end)
+
+    async def accept_audio(pcm: np.ndarray, *, report_level: bool = False) -> None:
+        """全音源を共通の保存・VAD・認識経路へ入れる。"""
+        nonlocal last_source_level_at
+        if pcm.size == 0:
+            return
+        audio_ring.append(pcm)
+        if silence_tracker is not None:
+            silence_tracker.feed(pcm, asyncio.get_running_loop().time())
+        if session is not None:
+            session.append(pcm)
+        enqueue(chunker.push(pcm))
+        if joiner is not None:
+            put(joiner.tick())
+
+        if report_level:
+            now = asyncio.get_running_loop().time()
+            if now - last_source_level_at >= 0.1:
+                last_source_level_at = now
+                level = float(np.sqrt(np.mean(np.square(pcm, dtype=np.float64))))
+                await ws.send_text(json.dumps({"type": "level", "level": round(level, 5)}))
+
+    async def start_system_audio() -> dict:
+        nonlocal system_capture, system_audio_queue, system_consumer_task
+        if system_capture is not None:
+            raise SystemAudioError("PC音声入力は既に開始しています。")
+        loop = asyncio.get_running_loop()
+        audio_queue: asyncio.Queue = asyncio.Queue()
+
+        def on_audio(audio: np.ndarray) -> None:
+            loop.call_soon_threadsafe(audio_queue.put_nowait, audio)
+
+        def on_error(exc: Exception) -> None:
+            loop.call_soon_threadsafe(audio_queue.put_nowait, exc)
+
+        async def consume() -> None:
+            while True:
+                item = await audio_queue.get()
+                try:
+                    if item is None:
+                        return
+                    if isinstance(item, Exception):
+                        await ws.send_text(json.dumps({
+                            "type": "error", "message": str(item), "fatal": True,
+                        }))
+                        continue
+                    await accept_audio(item, report_level=True)
+                finally:
+                    audio_queue.task_done()
+
+        capture = WasapiLoopbackCapture(config.sample_rate, on_audio, on_error)
+        consumer = asyncio.create_task(consume())
+        try:
+            info = await asyncio.to_thread(capture.start)
+        except Exception:
+            consumer.cancel()
+            try:
+                await consumer
+            except asyncio.CancelledError:
+                pass
+            raise
+        system_capture = capture
+        system_audio_queue = audio_queue
+        system_consumer_task = consumer
+        print(
+            f"[VoxCraft] PC音声入力: {info.device} "
+            f"({info.sample_rate}Hz/{info.channels}ch → {config.sample_rate}Hz/mono)"
+        )
+        return {
+            "device": info.device,
+            "inputSampleRate": info.sample_rate,
+            "channels": info.channels,
+        }
+
+    async def stop_system_audio() -> None:
+        nonlocal system_capture, system_audio_queue, system_consumer_task
+        capture, audio_queue, consumer = (
+            system_capture, system_audio_queue, system_consumer_task
+        )
+        system_capture = None
+        system_audio_queue = None
+        system_consumer_task = None
+        if capture is not None:
+            await asyncio.to_thread(capture.stop)
+        if audio_queue is not None and consumer is not None and not consumer.done():
+            # stop() がリサンプラーの末尾を on_audio へ渡した後に sentinel を置く。
+            # これにより末尾まで accept_audio を通してから consumer が終了する。
+            audio_queue.put_nowait(None)
+            await consumer
+
+    async def finish_input(reason: str = "manual") -> None:
+        """音源停止→末尾確定→認識完了通知を、手動・自動停止で共用する。"""
+        nonlocal input_finished, silence_tracker, auto_stop_task
+        async with finish_lock:
+            if input_finished:
+                return
+            input_finished = True
+            silence_tracker = None
+            current = asyncio.current_task()
+            if auto_stop_task is not None and auto_stop_task is not current:
+                auto_stop_task.cancel()
+            auto_stop_task = None
+            if source == "system":
+                await stop_system_audio()
+            tail = chunker.flush()
+            if tail is not None:
+                enqueue([tail])
+            if joiner is not None:
+                put(joiner.flush())
+            # 自動停止でも、停止直前までの認識をすべて本文へ返してから閉じる。
+            await queue.join()
+            await ws.send_text(json.dumps({"type": "stopped", "reason": reason}))
+
+    async def watch_system_silence() -> None:
+        """PC出力の実音が既定時間来なければ文字起こしを完了する。"""
+        while silence_tracker is not None and not input_finished:
+            remaining = silence_tracker.remaining(asyncio.get_running_loop().time())
+            if remaining <= 0:
+                print(
+                    f"[VoxCraft] PC音声が{config.transcribe_auto_stop_sec:.0f}秒無音のため自動停止"
+                )
+                await finish_input("silence")
+                return
+            await asyncio.sleep(min(5.0, max(0.1, remaining)))
 
     try:
         while True:
@@ -364,14 +614,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             # --- 音声ブロック（バイナリ） ---
             if msg.get("bytes") is not None:
                 pcm = _pcm16_to_float32(msg["bytes"])
-                # 分割・認識より前に、受け取った音声はまず丸ごと残す。
-                # ここで残しておけば、後段が何を捨てても後から取り戻せる。
-                if session is not None:
-                    session.append(pcm)
-                enqueue(chunker.push(pcm))
-                # 連結待ちのまま止まらないよう、音声を受け取るたびに時間切れを見る。
-                if joiner is not None:
-                    put(joiner.tick())
+                await accept_audio(pcm)
                 continue
 
             # --- 制御コマンド（テキスト JSON） ---
@@ -383,9 +626,25 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 ctype = cmd.get("type")
 
                 if ctype == "start":
+                    created_session = False
+                    input_finished = False
+                    silence_tracker = None
+                    audio_ring = AudioRingBuffer(
+                        max(1, int(config.retry_buffer_sec * config.sample_rate))
+                    )
+                    last_source_chunk_end = 0
                     strip_space = bool(cmd.get("stripSpace", config.strip_ja_alnum_space))
                     symbols = bool(cmd.get("symbols", config.enable_symbol_dictation))
                     mode = "transcribe" if cmd.get("mode") == "transcribe" else "dictation"
+                    requested_source = cmd.get("source", "microphone")
+                    source = "system" if requested_source == "system" else "microphone"
+                    if source == "system" and mode != "transcribe":
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "message": "PC音声入力は文字起こしモードでのみ使用できます。",
+                            "fatal": True,
+                        }))
+                        continue
                     chunker = _build_chunker(mode)
                     if mode == "transcribe":
                         opts = AsrOptions.transcription()
@@ -411,6 +670,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         # 復旧の素材として、このセッションの音声を丸ごと保存する。
                         if session is None:
                             session = SessionAudio(config.sample_rate)
+                            created_session = True
                             print(f"[VoxCraft] 文字起こしモード: 録音を保存 {session.path}")
                             await ws.send_text(json.dumps({
                                 "type": "session", "session": session.session_id,
@@ -420,6 +680,50 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         joiner = None
                         breaker = None
                     punctuate = config.enable_auto_punctuation
+
+                    source_info: dict = {}
+                    if source == "system":
+                        try:
+                            source_info = await start_system_audio()
+                        except (SystemAudioError, OSError) as exc:
+                            if created_session and session is not None:
+                                failed_session = session.session_id
+                                session.close()
+                                session = None
+                                try:
+                                    delete_session(failed_session)
+                                except (ValueError, FileNotFoundError, OSError):
+                                    pass
+                            await ws.send_text(json.dumps({
+                                "type": "error", "message": str(exc), "fatal": True,
+                            }))
+                            continue
+                        except Exception as exc:  # デバイス固有の PortAudio エラーも表示する
+                            if created_session and session is not None:
+                                failed_session = session.session_id
+                                session.close()
+                                session = None
+                                try:
+                                    delete_session(failed_session)
+                                except (ValueError, FileNotFoundError, OSError):
+                                    pass
+                            await ws.send_text(json.dumps({
+                                "type": "error",
+                                "message": f"PC音声入力を開始できません: {exc}",
+                                "fatal": True,
+                            }))
+                            continue
+                        if config.transcribe_auto_stop_sec > 0:
+                            silence_tracker = SilenceTracker(
+                                config.transcribe_auto_stop_sec,
+                                config.transcribe_audible_rms,
+                                asyncio.get_running_loop().time(),
+                            )
+                            auto_stop_task = asyncio.create_task(watch_system_silence())
+                            source_info["autoStopSec"] = config.transcribe_auto_stop_sec
+                    await ws.send_text(json.dumps({
+                        "type": "started", "source": source, **source_info,
+                    }))
                     # 辞書が壊れていたらクライアントに知らせる（無言で無効化しない）。
                     dict_err = get_error()
                     if dict_err:
@@ -429,15 +733,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         }))
 
                 elif ctype == "stop":
-                    tail = chunker.flush()
-                    if tail is not None:
-                        enqueue([tail])
-                    # 連結待ちが残っていれば、短くてもここで出し切る。
-                    if joiner is not None:
-                        put(joiner.flush())
-                    # 溜まっている分を全部出し切ってから停止を通知する。
-                    await queue.join()
-                    await ws.send_text(json.dumps({"type": "stopped"}))
+                    await finish_input("manual")
 
                 elif ctype == "reconvert":
                     payload = await asyncio.to_thread(reconvert, cmd.get("text", ""))
@@ -466,6 +762,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
+        if auto_stop_task is not None:
+            auto_stop_task.cancel()
+        try:
+            await stop_system_audio()
+        except Exception as exc:  # 終了処理は録音保存を妨げない
+            print(f"[VoxCraft] PC音声入力の終了に失敗: {type(exc).__name__}: {exc}")
         worker_task.cancel()
         # 録音は必ず閉じる（異常終了しても、そこまでの音声は再認識に使える）。
         if session is not None:
