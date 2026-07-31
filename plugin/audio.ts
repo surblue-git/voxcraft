@@ -7,6 +7,11 @@
 export type PcmHandler = (pcm16: ArrayBuffer) => void;
 export type LevelHandler = (level: number) => void; // 0..1 の入力レベル
 
+// この秒数ぶん PCM が途切れたら「止まっている」とみなす。
+// AudioWorklet は 128 サンプル（約2.7ms）ごとに来るので、3秒は明らかな異常。
+const STALL_MS = 3000;
+const WATCHDOG_MS = 1000;
+
 // ブラウザ側の音声前処理。既定（口述）は全部ONのまま。
 // 会場PA越しの遠い声や残響には、近接した1人の声を想定したこれらの処理が
 // 悪く働く（NSが残響ごと削り、AGCが音量を揺らす）ため、文字起こしでは切る。
@@ -57,6 +62,15 @@ export class MicRecorder {
     private targetRate: number;
     private mic: MicOptions;
 
+    // 録音が止まったことを知らせるための監視。無音のまま録れていた事故の再発防止で、
+    // 「録音中の表示のまま実は死んでいる」状態を必ず外に出す。
+    // onStalled: 今まさに止まっている（1回だけ）。onGap: 途切れが終わった（欠落秒数）。
+    onStalled: (() => void) | null = null;
+    onGap: ((seconds: number) => void) | null = null;
+    private lastPcmAt = 0;
+    private stalled = false;
+    private watchdog: number | null = null;
+
     constructor(
         onPcm: PcmHandler,
         onLevel: LevelHandler | null = null,
@@ -98,10 +112,7 @@ export class MicRecorder {
                 this.workletNode = new AudioWorkletNode(this.ctx, "voxcraft-audio-processor");
 
                 this.workletNode.port.onmessage = (e: MessageEvent<Float32Array>) => {
-                    const input = e.data;
-                    if (this.onLevel) this.onLevel(rms(input));
-                    const down = downsample(input, inputRate, this.targetRate);
-                    this.onPcm(floatToPcm16(down));
+                    this.handleInput(e.data, inputRate);
                 };
 
                 this.source.connect(this.workletNode);
@@ -120,10 +131,7 @@ export class MicRecorder {
         if (!workletLoaded) {
             this.scriptProcessor = this.ctx.createScriptProcessor(4096, 1, 1);
             this.scriptProcessor.onaudioprocess = (ev: AudioProcessingEvent) => {
-                const input = ev.inputBuffer.getChannelData(0);
-                if (this.onLevel) this.onLevel(rms(input));
-                const down = downsample(input, inputRate, this.targetRate);
-                this.onPcm(floatToPcm16(down));
+                this.handleInput(ev.inputBuffer.getChannelData(0), inputRate);
             };
 
             this.source.connect(this.scriptProcessor);
@@ -132,9 +140,45 @@ export class MicRecorder {
             this.scriptProcessor.connect(mute);
             mute.connect(this.ctx.destination);
         }
+
+        this.lastPcmAt = Date.now();
+        this.stalled = false;
+        this.watchdog = window.setInterval(() => this.tick(), WATCHDOG_MS);
+    }
+
+    // PCM 1ブロックの処理。途切れの検出もここで行う。
+    // 監視タイマーはバックグラウンドで間引かれるが、この経路は「実際に音が戻った
+    // 瞬間」に必ず通るので、画面オフ中に空いた穴もその長さごと確実に拾える。
+    private handleInput(input: Float32Array, inputRate: number): void {
+        const now = Date.now();
+        const gap = this.lastPcmAt ? now - this.lastPcmAt : 0;
+        this.lastPcmAt = now;
+        if (gap > STALL_MS) {
+            this.stalled = false;
+            this.onGap?.(gap / 1000);
+        }
+        if (this.onLevel) this.onLevel(rms(input));
+        const down = downsample(input, inputRate, this.targetRate);
+        this.onPcm(floatToPcm16(down));
+    }
+
+    // 止まったままになっていないかの定期確認（復帰も試みる）。
+    private tick(): void {
+        const ctx = this.ctx;
+        if (!ctx) return;
+        // 画面オフ等で suspend されたままなら起こし直す。
+        if (ctx.state === "suspended") void ctx.resume().catch(() => undefined);
+        if (this.stalled || Date.now() - this.lastPcmAt < STALL_MS) return;
+        this.stalled = true;
+        this.onStalled?.();
     }
 
     async stop(): Promise<void> {
+        if (this.watchdog !== null) {
+            window.clearInterval(this.watchdog);
+            this.watchdog = null;
+        }
+        this.stalled = false;
         if (this.workletNode) {
             this.workletNode.port.onmessage = null;
             this.workletNode.disconnect();

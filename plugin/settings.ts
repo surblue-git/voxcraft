@@ -21,6 +21,7 @@ export interface VoxCraftSettings {
     pauseComma: boolean;        // 短い息継ぎでチャンクが切れたら「、」で接続する
     showToolbar: boolean;       // 口述中に画面下部の操作ツールバーを表示する
     suppressKeyboard: boolean;  // 口述中はソフトキーボードを出さない（モバイルのみ）
+    keepScreenOn: boolean;      // 文字起こし中は画面を消さない（モバイルのみ）
     serverUrl?: string;         // 後方互換: 旧・単一URL（読み込み時に endpoints へ移行）
 }
 
@@ -36,6 +37,7 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     pauseComma: true,
     showToolbar: true,
     suppressKeyboard: true,
+    keepScreenOn: true,
 };
 
 // 旧バージョン（単一 serverUrl）の設定を新モデルへ移行する。
@@ -51,6 +53,7 @@ export function migrateSettings(s: VoxCraftSettings): VoxCraftSettings {
     if (typeof s.pauseComma !== "boolean") s.pauseComma = true;
     if (typeof s.showToolbar !== "boolean") s.showToolbar = true;
     if (typeof s.suppressKeyboard !== "boolean") s.suppressKeyboard = true;
+    if (typeof s.keepScreenOn !== "boolean") s.keepScreenOn = true;
     delete s.serverUrl;
     return s;
 }
@@ -308,6 +311,20 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                         this.plugin.settings.suppressKeyboard = v;
                         await this.plugin.saveSettings();
                         this.plugin.refreshKeyboardSuppression();
+                    })
+                );
+
+            new Setting(containerEl)
+                .setName("文字起こし中は画面を消さない")
+                .setDesc(
+                    "文字起こしの録音中、放置による画面の自動消灯を抑える（Android は画面が消えると録音が止まるため）。" +
+                    "電源ボタンを押した場合や他アプリに切り替えた場合は OS が解除するので、そこでは止まる。" +
+                    "口述（通常の音声入力）には掛からない。"
+                )
+                .addToggle((t) =>
+                    t.setValue(this.plugin.settings.keepScreenOn).onChange(async (v) => {
+                        this.plugin.settings.keepScreenOn = v;
+                        await this.plugin.saveSettings();
                     })
                 );
         }

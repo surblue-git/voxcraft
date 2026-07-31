@@ -26,6 +26,7 @@ import { AsrMode, AsrSocket, ServerMessage } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
 import { keyboardExtension, isKeyboardSuppressed, setKeyboardSuppressed } from "./keyboard";
 import { DictationToolbar } from "./toolbar";
+import { ScreenWakeLock } from "./wakelock";
 
 // 右クリック相当（Mac では Ctrl+クリックも）か。メニュー用の操作なので録音トグルからは除外する。
 function isSecondaryClick(evt: MouseEvent): boolean {
@@ -100,6 +101,8 @@ export default class VoxCraftPlugin extends Plugin {
     private toolbar: DictationToolbar | null = null;
     // ツールバーのマイクボタンで停止したときはバーを残す（そこから再開できるように）。
     private keepToolbarOnStop = false;
+    // 文字起こし中に画面を消させないための wake lock。
+    private wakeLock = new ScreenWakeLock();
 
     // 入力レベルメーター表示のスロットリング用。
     private lastMeterAt = 0;
@@ -152,19 +155,23 @@ export default class VoxCraftPlugin extends Plugin {
         this.statusEl = this.addStatusBarItem();
         this.setStatus("停止中");
 
+        // icon は主にモバイルのツールバー用。未指定だと「?」で並ぶ。
         this.addCommand({
             id: "toggle-recording",
             name: "音声入力の開始/停止",
+            icon: "mic",
             callback: () => this.toggleRecording(),
         });
         this.addCommand({
             id: "stop-recording",
             name: "音声入力を停止",
+            icon: "mic-off",
             callback: () => this.stopRecording(),
         });
         this.addCommand({
             id: "toggle-transcribe",
             name: "文字起こし（動画・会議）の開始/停止",
+            icon: "file-audio",
             callback: () => {
                 if (this.recording) this.stopRecording();
                 else void this.startRecording("transcribe");
@@ -173,31 +180,37 @@ export default class VoxCraftPlugin extends Plugin {
         this.addCommand({
             id: "cancel-last-input",
             name: "直前の入力をキャンセル（一文削除）",
+            icon: "eraser",
             callback: () => this.cancelLast(),
         });
         this.addCommand({
             id: "restore-canceled-input",
             name: "キャンセルした入力を元に戻す",
+            icon: "rotate-ccw",
             callback: () => this.restoreCanceled(),
         });
         this.addCommand({
             id: "recover-selection",
             name: "選択範囲を音声から再認識（復旧）",
+            icon: "history",
             callback: () => void this.recoverSelection(),
         });
         this.addCommand({
             id: "manage-recordings",
             name: "文字起こしの録音を整理",
+            icon: "folder-open",
             callback: () => this.openRecordingsModal(),
         });
         this.addCommand({
             id: "reconvert-last",
             name: "直前の入力を変換戻し",
+            icon: "refresh-cw",
             callback: () => this.requestReconvert(),
         });
         this.addCommand({
             id: "reconvert-selection",
             name: "選択範囲を再変換",
+            icon: "type",
             callback: () => void this.reconvertSelection(),
         });
         // 音声の「ここを言い直し」は認識が化けると起動できない。手で確実に起動できる
@@ -205,16 +218,19 @@ export default class VoxCraftPlugin extends Plugin {
         this.addCommand({
             id: "respeak-selection",
             name: "選択範囲を言い直す（次の発話で置き換え）",
+            icon: "repeat",
             callback: () => this.startRespeak(),
         });
         this.addCommand({
             id: "select-endpoint",
             name: "接続先を選択",
+            icon: "server",
             callback: () => this.openEndpointMenu(),
         });
         this.addCommand({
             id: "edit-userdict",
             name: "ユーザー辞書を編集",
+            icon: "book-open",
             callback: () => this.openDictModal(),
         });
 
@@ -302,6 +318,9 @@ export default class VoxCraftPlugin extends Plugin {
             // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
             mode === "transcribe" ? RAW_MIC : DICTATION_MIC
         );
+        // 「録音中」の表示のまま実は音が来ていない、という壊れ方を必ず外へ出す。
+        this.recorder.onStalled = () => this.reportStall();
+        this.recorder.onGap = (sec) => this.reportGap(sec);
         try {
             await this.recorder.start();
         } catch (e) {
@@ -324,6 +343,9 @@ export default class VoxCraftPlugin extends Plugin {
             this.spans = [];
             this.lastAudioEnd = 0;
             this.session = null;
+            // 画面が消えると AudioContext ごと止まる（Android）。長時間まわす
+            // 文字起こしだけ、その間の自動消灯を抑える。
+            if (Platform.isMobile && this.settings.keepScreenOn) void this.acquireWakeLock();
         }
 
         this.recording = true;
@@ -339,6 +361,7 @@ export default class VoxCraftPlugin extends Plugin {
     stopRecording(): void {
         if (!this.recording) return;
         this.recording = false;
+        void this.wakeLock.release();
         this.ribbonEl.removeClass("voxcraft-recording");
         // ツールバーのマイクで止めたときはバーを残し、そこから再開できるようにする。
         this.toolbar?.setRecording(false);
@@ -363,6 +386,7 @@ export default class VoxCraftPlugin extends Plugin {
 
     private async teardownSession(): Promise<void> {
         this.recording = false;
+        await this.wakeLock.release();
         this.ribbonEl?.removeClass("voxcraft-recording");
         this.hideToolbar();
         this.refreshKeyboardSuppression();
@@ -377,6 +401,37 @@ export default class VoxCraftPlugin extends Plugin {
     private clearDictationAnchor(): void {
         if (this.cm && this.cm.dom.isConnected) clearAnchor(this.cm);
         this.cm = null;
+    }
+
+    // ---- 録音が途切れていないかの見張り ----
+
+    // 画面を消させない。取れなかったときは黙って効かないので、必ず知らせる。
+    private async acquireWakeLock(): Promise<void> {
+        if (await this.wakeLock.acquire()) return;
+        new Notice(
+            "VoxCraft: 画面を点けたままにできませんでした。" +
+            "端末の画面が消えると録音が止まります（設定 →「画面の自動消灯」を長めに）。"
+        );
+    }
+
+    // 今まさに音が来ていない。録音中の表示のままにしない。
+    private reportStall(): void {
+        if (!this.recording) return;
+        this.setStatus("⚠ 音声が止まっています");
+        new Notice(
+            "VoxCraft: マイクからの音声が止まっています。" +
+            "Obsidian を前面に戻し、画面を点けたままにしてください。"
+        );
+    }
+
+    // 途切れが終わった。その間は録れていないので、長さごと知らせる。
+    private reportGap(seconds: number): void {
+        if (!this.recording) return;
+        this.setStatus(this.idleStatus());
+        new Notice(
+            `VoxCraft: 音声が約${Math.round(seconds)}秒途切れました（画面オフ／バックグラウンドの可能性）。` +
+            "その間は録音・文字起こしされていません。"
+        );
     }
 
     // ---- 確定チャンクの処理 ----

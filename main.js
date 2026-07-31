@@ -29,6 +29,8 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian7 = require("obsidian");
 
 // audio.ts
+var STALL_MS = 3e3;
+var WATCHDOG_MS = 1e3;
 var DICTATION_MIC = {
   echoCancellation: true,
   noiseSuppression: true,
@@ -63,6 +65,14 @@ var MicRecorder = class {
     this.workletNode = null;
     this.scriptProcessor = null;
     this.workletBlobUrl = null;
+    // 録音が止まったことを知らせるための監視。無音のまま録れていた事故の再発防止で、
+    // 「録音中の表示のまま実は死んでいる」状態を必ず外に出す。
+    // onStalled: 今まさに止まっている（1回だけ）。onGap: 途切れが終わった（欠落秒数）。
+    this.onStalled = null;
+    this.onGap = null;
+    this.lastPcmAt = 0;
+    this.stalled = false;
+    this.watchdog = null;
     this.onPcm = onPcm;
     this.onLevel = onLevel;
     this.mic = mic;
@@ -94,11 +104,7 @@ var MicRecorder = class {
         await this.ctx.audioWorklet.addModule(blobUrl);
         this.workletNode = new AudioWorkletNode(this.ctx, "voxcraft-audio-processor");
         this.workletNode.port.onmessage = (e) => {
-          const input = e.data;
-          if (this.onLevel)
-            this.onLevel(rms(input));
-          const down = downsample(input, inputRate, this.targetRate);
-          this.onPcm(floatToPcm16(down));
+          this.handleInput(e.data, inputRate);
         };
         this.source.connect(this.workletNode);
         const mute = this.ctx.createGain();
@@ -114,11 +120,7 @@ var MicRecorder = class {
     if (!workletLoaded) {
       this.scriptProcessor = this.ctx.createScriptProcessor(4096, 1, 1);
       this.scriptProcessor.onaudioprocess = (ev) => {
-        const input = ev.inputBuffer.getChannelData(0);
-        if (this.onLevel)
-          this.onLevel(rms(input));
-        const down = downsample(input, inputRate, this.targetRate);
-        this.onPcm(floatToPcm16(down));
+        this.handleInput(ev.inputBuffer.getChannelData(0), inputRate);
       };
       this.source.connect(this.scriptProcessor);
       const mute = this.ctx.createGain();
@@ -126,8 +128,46 @@ var MicRecorder = class {
       this.scriptProcessor.connect(mute);
       mute.connect(this.ctx.destination);
     }
+    this.lastPcmAt = Date.now();
+    this.stalled = false;
+    this.watchdog = window.setInterval(() => this.tick(), WATCHDOG_MS);
+  }
+  // PCM 1ブロックの処理。途切れの検出もここで行う。
+  // 監視タイマーはバックグラウンドで間引かれるが、この経路は「実際に音が戻った
+  // 瞬間」に必ず通るので、画面オフ中に空いた穴もその長さごと確実に拾える。
+  handleInput(input, inputRate) {
+    var _a;
+    const now = Date.now();
+    const gap = this.lastPcmAt ? now - this.lastPcmAt : 0;
+    this.lastPcmAt = now;
+    if (gap > STALL_MS) {
+      this.stalled = false;
+      (_a = this.onGap) == null ? void 0 : _a.call(this, gap / 1e3);
+    }
+    if (this.onLevel)
+      this.onLevel(rms(input));
+    const down = downsample(input, inputRate, this.targetRate);
+    this.onPcm(floatToPcm16(down));
+  }
+  // 止まったままになっていないかの定期確認（復帰も試みる）。
+  tick() {
+    var _a;
+    const ctx = this.ctx;
+    if (!ctx)
+      return;
+    if (ctx.state === "suspended")
+      void ctx.resume().catch(() => void 0);
+    if (this.stalled || Date.now() - this.lastPcmAt < STALL_MS)
+      return;
+    this.stalled = true;
+    (_a = this.onStalled) == null ? void 0 : _a.call(this);
   }
   async stop() {
+    if (this.watchdog !== null) {
+      window.clearInterval(this.watchdog);
+      this.watchdog = null;
+    }
+    this.stalled = false;
     if (this.workletNode) {
       this.workletNode.port.onmessage = null;
       this.workletNode.disconnect();
@@ -674,7 +714,8 @@ var DEFAULT_SETTINGS = {
   insertAt: "anchor",
   pauseComma: true,
   showToolbar: true,
-  suppressKeyboard: true
+  suppressKeyboard: true,
+  keepScreenOn: true
 };
 function migrateSettings(s) {
   if ((!s.endpoints || s.endpoints.length === 0) && s.serverUrl) {
@@ -693,6 +734,8 @@ function migrateSettings(s) {
     s.showToolbar = true;
   if (typeof s.suppressKeyboard !== "boolean")
     s.suppressKeyboard = true;
+  if (typeof s.keepScreenOn !== "boolean")
+    s.keepScreenOn = true;
   delete s.serverUrl;
   return s;
 }
@@ -865,6 +908,14 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
           this.plugin.settings.suppressKeyboard = v;
           await this.plugin.saveSettings();
           this.plugin.refreshKeyboardSuppression();
+        })
+      );
+      new import_obsidian3.Setting(containerEl).setName("\u6587\u5B57\u8D77\u3053\u3057\u4E2D\u306F\u753B\u9762\u3092\u6D88\u3055\u306A\u3044").setDesc(
+        "\u6587\u5B57\u8D77\u3053\u3057\u306E\u9332\u97F3\u4E2D\u3001\u653E\u7F6E\u306B\u3088\u308B\u753B\u9762\u306E\u81EA\u52D5\u6D88\u706F\u3092\u6291\u3048\u308B\uFF08Android \u306F\u753B\u9762\u304C\u6D88\u3048\u308B\u3068\u9332\u97F3\u304C\u6B62\u307E\u308B\u305F\u3081\uFF09\u3002\u96FB\u6E90\u30DC\u30BF\u30F3\u3092\u62BC\u3057\u305F\u5834\u5408\u3084\u4ED6\u30A2\u30D7\u30EA\u306B\u5207\u308A\u66FF\u3048\u305F\u5834\u5408\u306F OS \u304C\u89E3\u9664\u3059\u308B\u306E\u3067\u3001\u305D\u3053\u3067\u306F\u6B62\u307E\u308B\u3002\u53E3\u8FF0\uFF08\u901A\u5E38\u306E\u97F3\u58F0\u5165\u529B\uFF09\u306B\u306F\u639B\u304B\u3089\u306A\u3044\u3002"
+      ).addToggle(
+        (t) => t.setValue(this.plugin.settings.keepScreenOn).onChange(async (v) => {
+          this.plugin.settings.keepScreenOn = v;
+          await this.plugin.saveSettings();
         })
       );
     }
@@ -1513,6 +1564,69 @@ var DictationToolbar = class {
   }
 };
 
+// wakelock.ts
+var ScreenWakeLock = class {
+  constructor() {
+    this.sentinel = null;
+    this.wanted = false;
+    this.listening = false;
+    this.onVisibility = () => {
+      void this.reacquire();
+    };
+  }
+  get held() {
+    return this.sentinel !== null && !this.sentinel.released;
+  }
+  // 取得できたら true。非対応・拒否なら false。
+  async acquire() {
+    this.wanted = true;
+    if (!this.listening) {
+      document.addEventListener("visibilitychange", this.onVisibility);
+      this.listening = true;
+    }
+    return this.request();
+  }
+  async release() {
+    this.wanted = false;
+    if (this.listening) {
+      document.removeEventListener("visibilitychange", this.onVisibility);
+      this.listening = false;
+    }
+    const s = this.sentinel;
+    this.sentinel = null;
+    if (s && !s.released) {
+      try {
+        await s.release();
+      } catch (e) {
+      }
+    }
+  }
+  async request() {
+    if (this.held)
+      return true;
+    const api = navigator.wakeLock;
+    if (!api)
+      return false;
+    try {
+      const s = await api.request("screen");
+      s.addEventListener("release", () => {
+        if (this.sentinel === s)
+          this.sentinel = null;
+      });
+      this.sentinel = s;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  // 表示に戻ったときの取り直し。hidden の間の request() は必ず失敗するので試さない。
+  async reacquire() {
+    if (!this.wanted || document.visibilityState !== "visible")
+      return;
+    await this.request();
+  }
+};
+
 // main.ts
 function isSecondaryClick(evt) {
   return evt.button !== 0 || import_obsidian7.Platform.isMacOS && evt.ctrlKey;
@@ -1572,6 +1686,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.toolbar = null;
     // ツールバーのマイクボタンで停止したときはバーを残す（そこから再開できるように）。
     this.keepToolbarOnStop = false;
+    // 文字起こし中に画面を消させないための wake lock。
+    this.wakeLock = new ScreenWakeLock();
     // 入力レベルメーター表示のスロットリング用。
     this.lastMeterAt = 0;
     this.transcribing = false;
@@ -1619,16 +1735,19 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.addCommand({
       id: "toggle-recording",
       name: "\u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB/\u505C\u6B62",
+      icon: "mic",
       callback: () => this.toggleRecording()
     });
     this.addCommand({
       id: "stop-recording",
       name: "\u97F3\u58F0\u5165\u529B\u3092\u505C\u6B62",
+      icon: "mic-off",
       callback: () => this.stopRecording()
     });
     this.addCommand({
       id: "toggle-transcribe",
       name: "\u6587\u5B57\u8D77\u3053\u3057\uFF08\u52D5\u753B\u30FB\u4F1A\u8B70\uFF09\u306E\u958B\u59CB/\u505C\u6B62",
+      icon: "file-audio",
       callback: () => {
         if (this.recording)
           this.stopRecording();
@@ -1639,46 +1758,55 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.addCommand({
       id: "cancel-last-input",
       name: "\u76F4\u524D\u306E\u5165\u529B\u3092\u30AD\u30E3\u30F3\u30BB\u30EB\uFF08\u4E00\u6587\u524A\u9664\uFF09",
+      icon: "eraser",
       callback: () => this.cancelLast()
     });
     this.addCommand({
       id: "restore-canceled-input",
       name: "\u30AD\u30E3\u30F3\u30BB\u30EB\u3057\u305F\u5165\u529B\u3092\u5143\u306B\u623B\u3059",
+      icon: "rotate-ccw",
       callback: () => this.restoreCanceled()
     });
     this.addCommand({
       id: "recover-selection",
       name: "\u9078\u629E\u7BC4\u56F2\u3092\u97F3\u58F0\u304B\u3089\u518D\u8A8D\u8B58\uFF08\u5FA9\u65E7\uFF09",
+      icon: "history",
       callback: () => void this.recoverSelection()
     });
     this.addCommand({
       id: "manage-recordings",
       name: "\u6587\u5B57\u8D77\u3053\u3057\u306E\u9332\u97F3\u3092\u6574\u7406",
+      icon: "folder-open",
       callback: () => this.openRecordingsModal()
     });
     this.addCommand({
       id: "reconvert-last",
       name: "\u76F4\u524D\u306E\u5165\u529B\u3092\u5909\u63DB\u623B\u3057",
+      icon: "refresh-cw",
       callback: () => this.requestReconvert()
     });
     this.addCommand({
       id: "reconvert-selection",
       name: "\u9078\u629E\u7BC4\u56F2\u3092\u518D\u5909\u63DB",
+      icon: "type",
       callback: () => void this.reconvertSelection()
     });
     this.addCommand({
       id: "respeak-selection",
       name: "\u9078\u629E\u7BC4\u56F2\u3092\u8A00\u3044\u76F4\u3059\uFF08\u6B21\u306E\u767A\u8A71\u3067\u7F6E\u304D\u63DB\u3048\uFF09",
+      icon: "repeat",
       callback: () => this.startRespeak()
     });
     this.addCommand({
       id: "select-endpoint",
       name: "\u63A5\u7D9A\u5148\u3092\u9078\u629E",
+      icon: "server",
       callback: () => this.openEndpointMenu()
     });
     this.addCommand({
       id: "edit-userdict",
       name: "\u30E6\u30FC\u30B6\u30FC\u8F9E\u66F8\u3092\u7DE8\u96C6",
+      icon: "book-open",
       callback: () => this.openDictModal()
     });
     this.addSettingTab(new VoxCraftSettingTab(this.app, this));
@@ -1762,6 +1890,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
       mode === "transcribe" ? RAW_MIC : DICTATION_MIC
     );
+    this.recorder.onStalled = () => this.reportStall();
+    this.recorder.onGap = (sec) => this.reportGap(sec);
     try {
       await this.recorder.start();
     } catch (e) {
@@ -1781,6 +1911,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       this.spans = [];
       this.lastAudioEnd = 0;
       this.session = null;
+      if (import_obsidian7.Platform.isMobile && this.settings.keepScreenOn)
+        void this.acquireWakeLock();
     }
     this.recording = true;
     this.ribbonEl.addClass("voxcraft-recording");
@@ -1796,6 +1928,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     if (!this.recording)
       return;
     this.recording = false;
+    void this.wakeLock.release();
     this.ribbonEl.removeClass("voxcraft-recording");
     (_a = this.toolbar) == null ? void 0 : _a.setRecording(false);
     if (this.keepToolbarOnStop)
@@ -1820,6 +1953,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
   async teardownSession() {
     var _a, _b, _c;
     this.recording = false;
+    await this.wakeLock.release();
     (_a = this.ribbonEl) == null ? void 0 : _a.removeClass("voxcraft-recording");
     this.hideToolbar();
     this.refreshKeyboardSuppression();
@@ -1834,6 +1968,33 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     if (this.cm && this.cm.dom.isConnected)
       clearAnchor(this.cm);
     this.cm = null;
+  }
+  // ---- 録音が途切れていないかの見張り ----
+  // 画面を消させない。取れなかったときは黙って効かないので、必ず知らせる。
+  async acquireWakeLock() {
+    if (await this.wakeLock.acquire())
+      return;
+    new import_obsidian7.Notice(
+      "VoxCraft: \u753B\u9762\u3092\u70B9\u3051\u305F\u307E\u307E\u306B\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u7AEF\u672B\u306E\u753B\u9762\u304C\u6D88\u3048\u308B\u3068\u9332\u97F3\u304C\u6B62\u307E\u308A\u307E\u3059\uFF08\u8A2D\u5B9A \u2192\u300C\u753B\u9762\u306E\u81EA\u52D5\u6D88\u706F\u300D\u3092\u9577\u3081\u306B\uFF09\u3002"
+    );
+  }
+  // 今まさに音が来ていない。録音中の表示のままにしない。
+  reportStall() {
+    if (!this.recording)
+      return;
+    this.setStatus("\u26A0 \u97F3\u58F0\u304C\u6B62\u307E\u3063\u3066\u3044\u307E\u3059");
+    new import_obsidian7.Notice(
+      "VoxCraft: \u30DE\u30A4\u30AF\u304B\u3089\u306E\u97F3\u58F0\u304C\u6B62\u307E\u3063\u3066\u3044\u307E\u3059\u3002Obsidian \u3092\u524D\u9762\u306B\u623B\u3057\u3001\u753B\u9762\u3092\u70B9\u3051\u305F\u307E\u307E\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+    );
+  }
+  // 途切れが終わった。その間は録れていないので、長さごと知らせる。
+  reportGap(seconds) {
+    if (!this.recording)
+      return;
+    this.setStatus(this.idleStatus());
+    new import_obsidian7.Notice(
+      `VoxCraft: \u97F3\u58F0\u304C\u7D04${Math.round(seconds)}\u79D2\u9014\u5207\u308C\u307E\u3057\u305F\uFF08\u753B\u9762\u30AA\u30D5\uFF0F\u30D0\u30C3\u30AF\u30B0\u30E9\u30A6\u30F3\u30C9\u306E\u53EF\u80FD\u6027\uFF09\u3002\u305D\u306E\u9593\u306F\u9332\u97F3\u30FB\u6587\u5B57\u8D77\u3053\u3057\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002`
+    );
   }
   // ---- 確定チャンクの処理 ----
   handleChunk(text, msg) {
