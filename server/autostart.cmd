@@ -29,5 +29,10 @@ if not errorlevel 1 (
 set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 
+rem Force UTF-8 for stdout/stderr. Without this, Python encodes log lines in the
+rem system codepage (cp932) and the Japanese diagnostics in server.log become
+rem unreadable mojibake, which defeats the purpose of logging them.
+set "PYTHONIOENCODING=utf-8"
+
 echo [VoxCraft] starting %DATE% %TIME% on %VOXCRAFT_HOST%:%VOXCRAFT_PORT%> "%LOG%"
 "%PY%" -m uvicorn main:app --host %VOXCRAFT_HOST% --port %VOXCRAFT_PORT% >> "%LOG%" 2>&1
