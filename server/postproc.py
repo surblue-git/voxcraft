@@ -144,6 +144,69 @@ def strip_trailing_hallucinations(text: str) -> str:
     return text.strip()
 
 
+class ParagraphBreaker:
+    """文字起こしの本文を段落に割る（チャンクの前に空行を入れるかを決める）。
+
+    なぜ「秒数だけ」で決めないか
+    ---------------------------
+    「N秒の無音で改行」は一見自然だが、しきい値が録音をまたいで通用しない。
+    マイクが遠いと VAD が発話の途中で落ちるので、見かけの無音が長く・頻繁になるため。
+    実測（2026-07-30）で同じ 2.0秒が:
+
+        近接マイクの取材（6.8分）  : 2回   → ほとんど改行されない（1段落 約950字）
+        遠いマイクの発表会（47.5分）: 269回 → 48字ごとにブツ切れる
+
+    そこで**字数を主・息継ぎを従**にする。「min_chars を超えていて、かつ
+    pause_sec 以上の息継ぎがある所」で改行し、息継ぎが来ないまま max_chars まで
+    伸びたら区切りが無くても改行する。この規則だと上の2本とも 100〜300字程度に収まる
+    （実測: 発表会 平均139字、取材 平均287字）。
+
+    区切りはチャンクの境目にしか置けないので、直前のチャンクが文の途中で終わって
+    いるときは見送って次の機会を待つ（「発想の変化と／いうところになっていて」のような
+    割れ方を防ぐ）。判定は3段階:
+
+        1. min_chars を超え、pause_sec 以上の息継ぎがあり、文が終わっている → 切る
+        2. max_chars を超え、文が終わっている → 息継ぎは問わず切る
+        3. hard_chars を超えた → 文の途中でも切る（最後の砦）
+
+    min_chars=0 で無効（従来どおりのベタ打ち）。
+    """
+
+    # 文が終わっているとみなす文字。
+    _SENTENCE_END = "。！？!?」』）"
+
+    def __init__(
+        self,
+        min_chars: int = 120,
+        pause_sec: float = 0.7,
+        max_chars: int = 400,
+        hard_chars: int = 0,
+    ):
+        self.min_chars = min_chars
+        self.pause_sec = pause_sec
+        self.max_chars = max_chars
+        # 0 なら max_chars の2倍。文末が来ないまま延々と続くのを防ぐだけの値なので、
+        # 通常は使われない（実測では原稿の読み上げでも max_chars 側で切れる）。
+        self.hard_chars = hard_chars or max_chars * 2
+        self._chars = 0
+        self._ends_sentence = False
+
+    def feed(self, text: str, pause: float | None) -> str:
+        """このチャンクの前に入れる区切り（"" か "\\n\\n"）を返し、字数を進める。"""
+        if not text:
+            return ""
+        sep = ""
+        if self.min_chars > 0 and self._chars > 0:
+            paused = self._chars >= self.min_chars and (pause or 0.0) >= self.pause_sec
+            overflow = self._chars >= self.max_chars
+            if ((paused or overflow) and self._ends_sentence) or self._chars >= self.hard_chars:
+                sep = "\n\n"
+                self._chars = 0
+        self._chars += len(text)
+        self._ends_sentence = text.rstrip()[-1:] in self._SENTENCE_END
+        return sep
+
+
 def collapse_symbols(text: str) -> str:
     """重複した句読点・空白を整理する。"""
     text = re.sub(r"、{2,}", "、", text)

@@ -18,3 +18,6 @@ server/server.log
 
 # 文字起こしモードの保存音声（復旧用。中身は生の会話なので追跡しない）
 server/recordings/
+
+# 精度解析のレポート（会話の中身がそのまま入るので追跡しない）
+server/analysis/

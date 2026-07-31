@@ -22,6 +22,16 @@ class Config:
     # kotoba-whisper-v2.0 の faster-whisper(CTranslate2) 版。
     # 精度優先なら "large-v3"、速度優先なら "small" 等に差し替え可能。
     model: str = _env("VOXCRAFT_MODEL", "kotoba-tech/kotoba-whisper-v2.0-faster")
+    # 文字起こし・復旧で使うモデル（口述とは別に持つ）。空にすると model と同じ。
+    # 50分の取材音声での実測（analyze_session.py）:
+    #   kotoba  : 12,808字 / 直後反復 42件 / 平均logprob -0.327 / 257秒*
+    #   turbo   : 17,190字 / 直後反復  7件 / 平均logprob -0.228 / 257秒
+    #   large-v3: 17,681字 / 直後反復  7件 / 平均logprob -0.222 / 632秒
+    # turbo と large-v3 は品質がほぼ同じで large-v3 が2.5倍遅いため turbo を既定にする。
+    # kotoba は12秒チャンクを丸ごと空で返すことがあり、実測で録音の7.1%
+    # （216秒＝12秒×18）が ⟨未認識⟩ として欠落していた。
+    # 口述は短い発話が中心で挙動を変えない方針のため、こちらは model のまま。
+    transcribe_model: str = _env("VOXCRAFT_TRANSCRIBE_MODEL", "turbo")
     # "auto"（GPUがあれば cuda、無ければ cpu）/ "cpu" / "cuda"
     device: str = _env("VOXCRAFT_DEVICE", "auto")
     # "auto"（cuda→int8_float16 / cpu→int8）/ "int8" / "float16" / "int8_float16" ...
@@ -57,6 +67,33 @@ class Config:
     vad_threshold: float = float(_env("VOXCRAFT_VAD_THRESHOLD", "0.5"))
     # 発話チャンク後方のパディング（秒）。語尾切れ（「です」「ます」が途切れる現象）を防ぐ。
     speech_pad_sec: float = float(_env("VOXCRAFT_SPEECH_PAD_SEC", "0.2"))
+
+    # --- チャンク連結（文字起こしモード専用。口述には一切かからない） ---
+    # この長さに満たないチャンクは、次のチャンクと連結してから認識する。
+    # 短いチャンクを単体で Whisper に渡すと定型句の幻覚が出るため（vad.ChunkJoiner 参照）。
+    # 実測（VAIO発表会47.5分）: 1秒未満のチャンクは29.5%が「ご視聴ありがとうございました」。
+    transcribe_join_sec: float = float(_env("VOXCRAFT_JOIN_SEC", "4.0"))
+    # ただし実時間でこれ以上は次を待たない（孤立した短い発話を画面に出さないため）。
+    # 表示の遅れはこの秒数が上限になる。
+    transcribe_join_hold_sec: float = float(_env("VOXCRAFT_JOIN_HOLD_SEC", "2.0"))
+    # これ以上の息継ぎをまたぐ連結はしない。繋いでしまうと「話の切れ目」が
+    # チャンクの内側に埋もれ、段落分けの材料が消えるため。
+    transcribe_join_break_sec: float = float(_env("VOXCRAFT_JOIN_BREAK_SEC", "2.0"))
+
+    # --- 段落分け（文字起こしモード専用。ベタ打ち防止） ---
+    # 「一定の字数を超えていて、かつ息継ぎがある所」で空行を入れる。
+    # 秒数だけで決めないのは、マイクが遠いとVADが発話の途中で落ちて見かけの無音が
+    # 増えるため（実測: 同じ2.0秒が、近接マイクの取材では6.8分で2回、遠いマイクの
+    # 発表会では47.5分で269回。前者は改行がほぼ入らず、後者は48字ごとにブツ切れる）。
+    # 字数を主、息継ぎを従にすると、どちらの録音でも100〜300字程度の段落に収まる。
+    # 0 にすると段落分けをしない（従来どおりのベタ打ち）。
+    paragraph_chars: int = int(_env("VOXCRAFT_PARA_CHARS", "120"))
+    # 段落の切れ目として認める息継ぎの下限（秒）。
+    paragraph_pause_sec: float = float(_env("VOXCRAFT_PARA_PAUSE", "0.7"))
+    # 息継ぎが来ないまま伸びた場合に、息継ぎを問わず（文末で）改行する字数。
+    paragraph_max_chars: int = int(_env("VOXCRAFT_PARA_MAX", "400"))
+    # 文末すら来ないまま伸びた場合に、文の途中でも改行する字数。0 で上の2倍。
+    paragraph_hard_chars: int = int(_env("VOXCRAFT_PARA_HARD", "0"))
 
     # --- 高速化・GPU最適化 ---
     # CTranslate2 の FlashAttention 有効化（RTX 30xx/40xx 等で速度向上）。

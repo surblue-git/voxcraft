@@ -8,6 +8,7 @@ silero-onnx が使えればそれを、無ければ簡易エネルギーVADに�
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -256,3 +257,100 @@ class VadChunker:
         self._cur_len = 0
         self._carried = 0
         self._first_speech_pos = None
+
+
+def _merge(a: Chunk, b: Chunk) -> Chunk:
+    """隣り合う2チャンクを1つにする（a の直後が b であること）。"""
+    return Chunk(
+        audio=np.concatenate([a.audio, b.audio]),
+        reason=b.reason,   # 終わり方は後ろのチャンクのもの
+        start=a.start,
+        end=b.end,
+        pause=a.pause,     # 息継ぎは「連結したかたまりの前」の無音
+    )
+
+
+class ChunkJoiner:
+    """短いチャンクを次のチャンクと連結してから認識に回す（文字起こし専用）。
+
+    なぜ必要か
+    ----------
+    Whisper は30秒窓のモデルで、1秒に満たない音声を単体で渡すと、残りを無音で
+    埋めた入力に対して学習データの定型句（動画のアウトロ）を吐く。
+    実測（2026-07-30, VAIO発表会47.5分, 1120チャンク）:
+
+        1秒未満  29.5% が「ご視聴ありがとうございました」
+        1〜2秒   12.9%
+        2〜4秒    7.5%
+        4秒以上   7.3%
+
+    同じ音声でも前後3秒を足して認識し直すと幻覚は消え、本物の発話が出た（7/7）。
+    つまり**短いまま単体で投げない**ことが根本的な対処になる。幻覚だけでなく、
+    チャンク境界で語が割れることによる誤変換も同時に減る。
+    副次効果として、Whisper は入力長によらず30秒窓ぶん計算するため、チャンク数が
+    減るとGPU負荷もそのぶん下がる。
+
+    口述（dictation）では使わない ＝ 既存の挙動は不変。
+
+    連結の条件
+    ----------
+    - 直前に溜めたチャンクの終端と、次のチャンクの始端が**隙間なく続く**ときだけ連結する。
+      VADが捨てた区間を挟む場合に繋ぐと、テキストと音声の対応（復旧の土台）がずれるため。
+    - 実時間で max_hold_sec を超えて待たない。孤立した短い発話をいつまでも
+      画面に出さないより、単体で認識して出したほうがよい（幻覚は asr 側の
+      定型句ブロックが受け止める）。
+    - break_sec 以上の息継ぎをまたぐ連結もしない。ここは話の切れ目なので、
+      繋ぐとチャンクの内側に埋もれて段落分け（main.py）の材料が消える。
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        min_sec: float = 4.0,
+        max_hold_sec: float = 2.0,
+        break_sec: float = 2.0,
+    ):
+        self._sr = sample_rate
+        self._min_samples = int(min_sec * sample_rate)
+        self._max_hold_sec = max_hold_sec
+        self._break_sec = break_sec
+        self._pending: Chunk | None = None
+        self._held_at = 0.0
+
+    def push(self, chunk: Chunk, now: float | None = None) -> list[Chunk]:
+        """チャンクを流し込み、認識に回してよいものを返す。"""
+        now = time.monotonic() if now is None else now
+        out: list[Chunk] = []
+        held_at = now
+        long_pause = chunk.pause is not None and chunk.pause >= self._break_sec
+
+        if self._pending is not None:
+            if self._pending.end == chunk.start and not long_pause:
+                chunk = _merge(self._pending, chunk)
+                held_at = self._held_at  # 待ち始めた時刻は引き継ぐ（延々と待たない）
+            else:
+                # 音声が途切れている（繋ぐと span と音声がずれる）か、
+                # 話の切れ目（繋ぐと段落の境目が消える）。溜めていた分を先に出す。
+                out.append(self._pending)
+            self._pending = None
+
+        if chunk.audio.size >= self._min_samples:
+            out.append(chunk)
+        else:
+            self._pending = chunk
+            self._held_at = held_at
+        return out
+
+    def tick(self, now: float | None = None) -> list[Chunk]:
+        """待たせすぎた短いチャンクを吐き出す（音声を受け取るたびに呼ぶ）。"""
+        if self._pending is None:
+            return []
+        now = time.monotonic() if now is None else now
+        if now - self._held_at < self._max_hold_sec:
+            return []
+        return self.flush()
+
+    def flush(self) -> list[Chunk]:
+        """溜めているチャンクを無条件に出す（停止時に呼ぶ）。"""
+        pending, self._pending = self._pending, None
+        return [pending] if pending is not None else []

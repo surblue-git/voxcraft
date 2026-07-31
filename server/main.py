@@ -25,13 +25,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
-from asr import AsrOptions, transcriber
+from asr import AsrOptions, hq_transcriber, transcriber
 from config import config
-from postproc import postprocess
+from postproc import ParagraphBreaker, postprocess
 from recording import (
     RECORDINGS_DIR,
     SessionAudio,
@@ -50,7 +51,7 @@ from userdict import (
     read_raw,
     write_raw,
 )
-from vad import VadChunker
+from vad import ChunkJoiner, VadChunker
 
 app = FastAPI(title="VoxCraft ASR Server")
 
@@ -71,6 +72,9 @@ def health() -> dict:
         "resolvedModel": transcriber.resolved_model,
         "device": transcriber.device,
         "compute": transcriber.compute,
+        # 文字起こし・復旧用モデル（遅延ロードなので未使用なら ready=false）。
+        "transcribeModel": config.transcribe_model or config.model,
+        "transcribeReady": hq_transcriber().ready,
         "beamSize": config.beam_size,
         "autoPunctuation": config.enable_auto_punctuation and punctuation_available(),
         "silenceSec": config.silence_sec,
@@ -121,11 +125,23 @@ def _pcm16_to_float32(data: bytes) -> np.ndarray:
     return (ints.astype(np.float32) / 32768.0)
 
 
-async def _transcribe_chunk(audio: np.ndarray, opts: AsrOptions):
-    """認識をスレッドプールで実行（イベントループを塞がない）。"""
+async def _transcribe_chunk(audio: np.ndarray, opts: AsrOptions, *, hq: bool = False):
+    """認識をスレッドプールで実行（イベントループを塞がない）。
+
+    hq=True は文字起こし・復旧用の高品質モデル（既定 turbo）を使う。
+    口述は従来どおり config.model のまま ＝ 挙動不変。
+    ロードもスレッド側で行う（10秒前後かかるのでイベントループを塞がない）。
+    """
     # hotwords は既定OFF（長いと kotoba-whisper が認識を空にするため。config 参照）。
     hotwords = get_hotwords() if config.use_hotwords else None
-    return await asyncio.to_thread(transcriber.transcribe, audio, hotwords, opts)
+    target = hq_transcriber() if hq else transcriber
+
+    def _run():
+        if hq:
+            target.ensure_loaded()
+        return target.transcribe(audio, hotwords, opts)
+
+    return await asyncio.to_thread(_run)
 
 
 @app.get("/recordings")
@@ -176,7 +192,7 @@ async def recognize(payload: dict = Body(...)) -> dict:
     if audio.size == 0:
         raise HTTPException(status_code=400, detail="その範囲に音声がありません")
 
-    result = await _transcribe_chunk(audio, AsrOptions.recovery())
+    result = await _transcribe_chunk(audio, AsrOptions.recovery(), hq=True)
     text = postprocess(
         result.text,
         strip_space=config.strip_ja_alnum_space,
@@ -185,7 +201,16 @@ async def recognize(payload: dict = Body(...)) -> dict:
         symbols=get_symbols(),
         auto_punctuate=config.enable_auto_punctuation,
     )
-    return {"text": text, "dropped": result.dropped, "seconds": round(audio.size / config.sample_rate, 2)}
+    if result.blocked:
+        # 復旧でも定型句は返さない。選んだ区間が幻覚だった場合は結果が空になる
+        # （＝「その音声にその文言は無い」が正しい答え）。理由はログに残す。
+        print(f"[VoxCraft] 定型句をブロック（復旧）: {result.blocked[0]} ({session} {start}-{end}秒)")
+    return {
+        "text": text,
+        "dropped": result.dropped,
+        "blocked": result.blocked,
+        "seconds": round(audio.size / config.sample_rate, 2),
+    }
 
 
 def _build_chunker(mode: str) -> VadChunker:
@@ -220,6 +245,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
     # モードはセッション単位。既定は口述＝従来どおりで、グローバル設定は触らない。
     mode = "dictation"
     chunker = _build_chunker(mode)
+    # 短いチャンクの連結と段落分けは文字起こしモードだけ（None なら従来どおり）。
+    joiner: ChunkJoiner | None = None
+    breaker: ParagraphBreaker | None = None
     opts = AsrOptions.dictation()
     strip_space = config.strip_ja_alnum_space
     symbols = config.enable_symbol_dictation
@@ -233,7 +261,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
     ) -> None:
         # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
         await ws.send_text(json.dumps({"type": "partial", "reason": reason}))
-        result = await _transcribe_chunk(audio, opts)
+        # mode は下のコマンド処理で書き換わる。ここは常に現在のモードを見る。
+        result = await _transcribe_chunk(audio, opts, hq=(mode == "transcribe"))
         text = postprocess(
             result.text,
             strip_space=strip_space,
@@ -242,8 +271,39 @@ async def ws_endpoint(ws: WebSocket) -> None:
             symbols=get_symbols(),
             auto_punctuate=punctuate,
         )
-        if not text and not result.dropped:
+        if not text and result.blocked:
+            # 動画のアウトロ定型句（「ご視聴ありがとうございました」等）。本文には出さない。
+            # ただし位置は通しておく: 何も送らないとクライアントが音声の切れ目とみなして
+            # ⟨未認識⟩ マーカーを置いてしまい、幻覚が別のノイズに化けるだけになる。
+            # 件数が多い（実測206件/47.5分）ので dropped には入れず警告も出さない。
+            print(
+                f"[VoxCraft] 定型句をブロック: {result.blocked[0]} "
+                f"({start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒)"
+            )
+            if session is not None:
+                await ws.send_text(json.dumps({
+                    "type": "chunk", "text": "",
+                    "session": session.session_id,
+                    "start": round(start / config.sample_rate, 3),
+                    "end": round(end / config.sample_rate, 3),
+                }))
             return
+        if not text and not result.dropped:
+            # 認識が1セグメントも返さなかったチャンク。クライアント側は音声の
+            # 連続性が切れたことから ⟨未認識⟩ を置くが、サーバー側に記録が無いと
+            # 後から原因を追えない（実測: 50分の取材で12秒×18ぶんが消えたのに
+            # ログには何も残っていなかった）。位置と長さを必ず残す。
+            print(
+                f"[VoxCraft] 空チャンク（認識結果なし）: "
+                f"{start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒 "
+                f"({(end - start) / config.sample_rate:.1f}秒, reason={reason})"
+            )
+            return
+        # 段落分け（文字起こしのみ）。ベタ打ちを避けるため、話の切れ目で空行を挟む。
+        # クライアントは受け取ったテキストをそのまま挿入するので、区切りはここで付ける
+        # ＝ プラグインを更新しなくても全端末で効く。
+        if breaker is not None:
+            text = breaker.feed(text, pause) + text
         msg: dict = {"type": "chunk", "text": text}
         # 前チャンクとの息継ぎ長（秒）。クライアントの「息継ぎで読点」判断に使う。
         if pause is not None:
@@ -271,11 +331,28 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     return
                 await emit_chunk(*item)
             except Exception as exc:  # noqa: BLE001 - 1チャンクの失敗で全体を止めない
-                print(f"[VoxCraft] チャンクの認識に失敗: {exc}")
+                # str(exc) が空になる例外があり、実際にログが
+                # 「チャンクの認識に失敗: 」だけで終わっていた。型と位置まで残す。
+                where = ""
+                if isinstance(item, tuple) and len(item) >= 4:
+                    where = (f" 位置={item[2] / config.sample_rate:.1f}-"
+                             f"{item[3] / config.sample_rate:.1f}秒")
+                print(f"[VoxCraft] チャンクの認識に失敗: {type(exc).__name__}: {exc}{where}")
+                traceback.print_exc()
             finally:
                 queue.task_done()
 
     worker_task = asyncio.create_task(worker())
+
+    def put(chunks: list) -> None:
+        """認識キューへそのまま流す。"""
+        for c in chunks:
+            queue.put_nowait((c.audio, c.reason, c.start, c.end, c.pause))
+
+    def enqueue(chunks: list) -> None:
+        """確定チャンクを認識キューへ流す（文字起こしでは短いものを連結してから）。"""
+        for chunk in chunks:
+            put(joiner.push(chunk) if joiner is not None else [chunk])
 
     try:
         while True:
@@ -291,10 +368,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 # ここで残しておけば、後段が何を捨てても後から取り戻せる。
                 if session is not None:
                     session.append(pcm)
-                for chunk in chunker.push(pcm):
-                    queue.put_nowait(
-                        (chunk.audio, chunk.reason, chunk.start, chunk.end, chunk.pause)
-                    )
+                enqueue(chunker.push(pcm))
+                # 連結待ちのまま止まらないよう、音声を受け取るたびに時間切れを見る。
+                if joiner is not None:
+                    put(joiner.tick())
                 continue
 
             # --- 制御コマンド（テキスト JSON） ---
@@ -312,6 +389,25 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     chunker = _build_chunker(mode)
                     if mode == "transcribe":
                         opts = AsrOptions.transcription()
+                        joiner = ChunkJoiner(
+                            sample_rate=config.sample_rate,
+                            min_sec=config.transcribe_join_sec,
+                            max_hold_sec=config.transcribe_join_hold_sec,
+                            break_sec=config.transcribe_join_break_sec,
+                        )
+                        breaker = ParagraphBreaker(
+                            min_chars=config.paragraph_chars,
+                            pause_sec=config.paragraph_pause_sec,
+                            max_chars=config.paragraph_max_chars,
+                            hard_chars=config.paragraph_hard_chars,
+                        )
+                        # 初回チャンクを待たせないよう、高品質モデルのロードを
+                        # 先に走らせておく（音声が届くまでの間に間に合う）。
+                        hq = hq_transcriber()
+                        if not hq.ready:
+                            asyncio.get_running_loop().run_in_executor(
+                                None, hq.ensure_loaded
+                            )
                         # 復旧の素材として、このセッションの音声を丸ごと保存する。
                         if session is None:
                             session = SessionAudio(config.sample_rate)
@@ -321,6 +417,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             }))
                     else:
                         opts = AsrOptions.dictation()
+                        joiner = None
+                        breaker = None
                     punctuate = config.enable_auto_punctuation
                     # 辞書が壊れていたらクライアントに知らせる（無言で無効化しない）。
                     dict_err = get_error()
@@ -333,9 +431,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 elif ctype == "stop":
                     tail = chunker.flush()
                     if tail is not None:
-                        queue.put_nowait(
-                            (tail.audio, tail.reason, tail.start, tail.end, tail.pause)
-                        )
+                        enqueue([tail])
+                    # 連結待ちが残っていれば、短くてもここで出し切る。
+                    if joiner is not None:
+                        put(joiner.flush())
                     # 溜まっている分を全部出し切ってから停止を通知する。
                     await queue.join()
                     await ws.send_text(json.dumps({"type": "stopped"}))
