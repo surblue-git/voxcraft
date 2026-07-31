@@ -13,8 +13,9 @@ server/__pycache__/
 server/models/
 .cache/
 
-# 自動起動時のサーバーログ
+# 自動起動時のサーバーログ（.1〜.5 は起動ごとに世代を送った過去ぶん）
 server/server.log
+server/server.log.*
 
 # 文字起こしモードの保存音声（復旧用。中身は生の会話なので追跡しない）
 server/recordings/
