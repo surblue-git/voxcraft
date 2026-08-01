@@ -1214,6 +1214,119 @@ var ConfirmModal = class extends import_obsidian5.Modal {
   }
 };
 
+// refinement.ts
+function normalizeForComparison(text) {
+  return text.normalize("NFKC").replace(/[\s、。！？!?・：:；;,.「」『』（）()\[\]…]/g, "");
+}
+function lcsLength(left, right) {
+  if (!left || !right)
+    return 0;
+  let previous = new Uint16Array(right.length + 1);
+  let current = new Uint16Array(right.length + 1);
+  for (let i = 1; i <= left.length; i += 1) {
+    for (let j = 1; j <= right.length; j += 1) {
+      current[j] = left[i - 1] === right[j - 1] ? previous[j - 1] + 1 : Math.max(previous[j], current[j - 1]);
+    }
+    [previous, current] = [current, previous];
+    current.fill(0);
+  }
+  return previous[right.length];
+}
+function coverage(reference, candidate) {
+  return reference.length === 0 ? 1 : lcsLength(reference, candidate) / reference.length;
+}
+function assessRefinementSafety(provisional, refined) {
+  const before = normalizeForComparison(provisional).slice(0, 1200);
+  const after = normalizeForComparison(refined).slice(0, 1200);
+  if (before.length === 0)
+    return { safe: true };
+  if (after.length / before.length < 0.78) {
+    return { safe: false, reason: "too-short" };
+  }
+  if (before.length < 24)
+    return { safe: true };
+  const edgeLength = Math.min(48, Math.max(16, Math.floor(before.length * 0.25)));
+  const leadingBefore = before.slice(0, edgeLength);
+  const leadingAfter = after.slice(0, Math.min(after.length, edgeLength * 2));
+  if (coverage(leadingBefore, leadingAfter) < 0.4) {
+    return { safe: false, reason: "leading-content-lost" };
+  }
+  const trailingBefore = before.slice(-edgeLength);
+  const trailingAfter = after.slice(-Math.min(after.length, edgeLength * 2));
+  if (coverage(trailingBefore, trailingAfter) < 0.4) {
+    return { safe: false, reason: "trailing-content-lost" };
+  }
+  if (coverage(before, after) < 0.45) {
+    return { safe: false, reason: "content-diverged" };
+  }
+  return { safe: true };
+}
+function withoutLineBreaks(text) {
+  return text.replace(/[\r\n]+/g, "");
+}
+function paragraphMarkers(text) {
+  const markers = [];
+  const pattern = /(?:\r?\n){2,}/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    markers.push({
+      offset: withoutLineBreaks(text.slice(0, match.index)).length,
+      // ParagraphBreaker の出力と同じく、段落間は常に空行1つへそろえる。
+      separator: "\n\n"
+    });
+  }
+  return markers;
+}
+function closestBoundary(text, target, minimum) {
+  const clamped = Math.max(minimum, Math.min(text.length, target));
+  for (const pattern of [/[。！？!?」』）]/g, /[、，,：:；;\s]/g]) {
+    let best = -1;
+    let distance = Number.POSITIVE_INFINITY;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const position = match.index + match[0].length;
+      if (position < minimum || position >= text.length)
+        continue;
+      const candidateDistance = Math.abs(position - clamped);
+      if (candidateDistance < distance) {
+        best = position;
+        distance = candidateDistance;
+      }
+    }
+    if (best >= 0)
+      return best;
+  }
+  return null;
+}
+function preserveParagraphBreaks(refined, provisional) {
+  const markers = paragraphMarkers(provisional);
+  if (markers.length === 0)
+    return refined;
+  const flatRefined = withoutLineBreaks(refined);
+  const provisionalLength = withoutLineBreaks(provisional).length;
+  if (!flatRefined || provisionalLength === 0)
+    return refined;
+  const placements = [];
+  let previous = -1;
+  for (const marker of markers) {
+    const target = Math.round(
+      marker.offset / provisionalLength * flatRefined.length
+    );
+    const minimum = marker.offset === 0 ? 0 : Math.min(flatRefined.length, previous + 1);
+    const position = marker.offset === 0 ? 0 : marker.offset >= provisionalLength ? flatRefined.length : closestBoundary(flatRefined, target, minimum);
+    if (position === null)
+      continue;
+    placements.push({ offset: position, separator: marker.separator });
+    previous = position;
+  }
+  let result = flatRefined;
+  for (let i = placements.length - 1; i >= 0; i -= 1) {
+    const marker = placements[i];
+    result = result.slice(0, marker.offset) + marker.separator + result.slice(marker.offset);
+  }
+  return result;
+}
+
 // ws.ts
 function safeClose(ws) {
   try {
@@ -1319,7 +1432,7 @@ var AsrSocket = class {
     };
   }
   dispatch(msg) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s;
     switch (msg.type) {
       case "ready":
         (_b = (_a = this.handlers).onReady) == null ? void 0 : _b.call(_a);
@@ -1345,24 +1458,27 @@ var AsrSocket = class {
       case "chunk":
         (_g = (_f = this.handlers).onChunk) == null ? void 0 : _g.call(_f, msg.text || "", msg);
         break;
+      case "refinement":
+        (_i = (_h = this.handlers).onRefinement) == null ? void 0 : _i.call(_h, msg.text || "", msg);
+        break;
       case "session":
         if (msg.session)
-          (_i = (_h = this.handlers).onSession) == null ? void 0 : _i.call(_h, msg.session);
+          (_k = (_j = this.handlers).onSession) == null ? void 0 : _k.call(_j, msg.session);
         break;
       case "reconvert":
-        (_k = (_j = this.handlers).onReconvert) == null ? void 0 : _k.call(_j, msg);
+        (_m = (_l = this.handlers).onReconvert) == null ? void 0 : _m.call(_l, msg);
         break;
       case "stopped":
-        (_m = (_l = this.handlers).onStopped) == null ? void 0 : _m.call(_l, msg.reason);
+        (_o = (_n = this.handlers).onStopped) == null ? void 0 : _o.call(_n, msg.reason);
         break;
       case "level":
         if (typeof msg.level === "number")
-          (_o = (_n = this.handlers).onLevel) == null ? void 0 : _o.call(_n, msg.level);
+          (_q = (_p = this.handlers).onLevel) == null ? void 0 : _q.call(_p, msg.level);
         break;
       case "error":
         if (msg.fatal)
           this.rejectStart(msg.message || "PC\u97F3\u58F0\u5165\u529B\u3092\u958B\u59CB\u3067\u304D\u307E\u305B\u3093");
-        (_q = (_p = this.handlers).onError) == null ? void 0 : _q.call(_p, msg.message || "unknown error", Boolean(msg.fatal));
+        (_s = (_r = this.handlers).onError) == null ? void 0 : _s.call(_r, msg.message || "unknown error", Boolean(msg.fatal));
         break;
     }
   }
@@ -1773,6 +1889,10 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.spans = [];
     // 直前チャンクの音声終端。次チャンクとの間が空いていれば、そこは捨てられた音声。
     this.lastAudioEnd = 0;
+    // PC音声の遅延補正。古い応答と、手編集を検出した際の通知連打を防ぐ。
+    this.lastRefinementRevision = 0;
+    this.refinementEditWarningShown = false;
+    this.refinementCoverageWarningShown = false;
   }
   async onload() {
     var _a;
@@ -1928,6 +2048,14 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.source = source;
     this.sourceDevice = "";
     this.autoStopSec = 0;
+    if (mode === "transcribe") {
+      this.spans = [];
+      this.lastAudioEnd = 0;
+      this.session = null;
+      this.lastRefinementRevision = 0;
+      this.refinementEditWarningShown = false;
+      this.refinementCoverageWarningShown = false;
+    }
     this.stopping = false;
     this.setStatus(urls.length > 1 ? "\u63A5\u7D9A\u4E2D\u2026\uFF08\u3064\u306A\u304C\u308B\u65B9\u3092\u9078\u629E\uFF09" : "\u63A5\u7D9A\u4E2D\u2026");
     this.socket = new AsrSocket(urls, {
@@ -1949,6 +2077,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         this.transcribing = false;
         this.handleChunk(text, msg);
       },
+      onRefinement: (text, msg) => this.handleTranscribeRefinement(text, msg),
       onLevel: (level) => this.showLevel(level),
       onStopped: (reason) => this.handleServerStopped(reason),
       onReconvert: (msg) => this.handleReconvert(msg),
@@ -2028,9 +2157,6 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.suppressJoiner = true;
     setAnchor(cm, cm.state.selection.main.head);
     if (mode === "transcribe") {
-      this.spans = [];
-      this.lastAudioEnd = 0;
-      this.session = null;
       if (import_obsidian7.Platform.isMobile && this.settings.keepScreenOn)
         void this.acquireWakeLock();
     }
@@ -2241,6 +2367,83 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     }
     if (end !== void 0)
       this.lastAudioEnd = end;
+  }
+  // PC音声の速報範囲を、同じ音声を30秒前後まとめて認識した結果へ差し替える。
+  // 追記後にユーザーが本文を編集していた場合は、変更を上書きせず補正を見送る。
+  handleTranscribeRefinement(text, msg) {
+    if (this.mode !== "transcribe" || this.source !== "system" || !text)
+      return;
+    const start = msg.start;
+    const end = msg.end;
+    const revision = msg.revision;
+    if (typeof start !== "number" || typeof end !== "number" || typeof revision !== "number" || end <= start || revision <= this.lastRefinementRevision) {
+      return;
+    }
+    if (this.session && msg.session && msg.session !== this.session)
+      return;
+    this.lastRefinementRevision = revision;
+    const cm = this.cm;
+    if (!cm || !cm.dom.isConnected || this.spans.length === 0)
+      return;
+    const EPS = 0.02;
+    let first = -1;
+    let last = -1;
+    for (let i = 0; i < this.spans.length; i += 1) {
+      const span = this.spans[i];
+      if (span.end > start + EPS && span.start < end - EPS) {
+        if (first < 0)
+          first = i;
+        last = i;
+      }
+    }
+    if (first < 0 || last < first)
+      return;
+    if (this.spans[first].start < start - EPS || this.spans[last].end > end + EPS) {
+      return;
+    }
+    const anchor = getAnchor(cm);
+    if (anchor === null)
+      return;
+    const trackedText = this.spans.map((span) => span.text).join("");
+    const regionStart = anchor - trackedText.length;
+    if (regionStart < 0 || cm.state.doc.sliceString(regionStart, anchor) !== trackedText) {
+      if (!this.refinementEditWarningShown) {
+        this.refinementEditWarningShown = true;
+        new import_obsidian7.Notice(
+          "VoxCraft: \u6587\u5B57\u8D77\u3053\u3057\u672C\u6587\u304C\u624B\u52D5\u7DE8\u96C6\u3055\u308C\u3066\u3044\u308B\u305F\u3081\u3001\u81EA\u52D5\u88DC\u6B63\u306F\u4E0A\u66F8\u304D\u305B\u305A\u898B\u9001\u308A\u307E\u3057\u305F\u3002"
+        );
+      }
+      return;
+    }
+    let beforeLength = 0;
+    for (let i = 0; i < first; i += 1)
+      beforeLength += this.spans[i].text.length;
+    let oldLength = 0;
+    for (let i = first; i <= last; i += 1)
+      oldLength += this.spans[i].text.length;
+    const from = regionStart + beforeLength;
+    const to = from + oldLength;
+    const oldText = cm.state.doc.sliceString(from, to);
+    const expected = this.spans.slice(first, last + 1).map((span) => span.text).join("");
+    if (oldText !== expected)
+      return;
+    const safety = assessRefinementSafety(expected, text);
+    if (!safety.safe) {
+      if (!this.refinementCoverageWarningShown) {
+        this.refinementCoverageWarningShown = true;
+        new import_obsidian7.Notice("VoxCraft: \u88DC\u6B63\u7A3F\u306B\u5927\u304D\u306A\u6B20\u843D\u3092\u691C\u51FA\u3057\u305F\u305F\u3081\u3001\u901F\u5831\u7A3F\u3092\u4FDD\u6301\u3057\u307E\u3057\u305F\u3002");
+      }
+      console.warn("[VoxCraft] Incomplete refinement rejected", {
+        reason: safety.reason,
+        start,
+        end
+      });
+      return;
+    }
+    const replacement = preserveParagraphBreaks(text, expected);
+    cm.dispatch({ changes: { from, to, insert: replacement } });
+    this.spans.splice(first, last - first + 1, { text: replacement, start, end });
+    this.chunks = this.spans.slice(-200).map((span) => span.text);
   }
   // コマンドを実行し、処理したら true を返す。false ならチャンクは本文として扱われる。
   runCommand(cmd) {
