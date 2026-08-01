@@ -23,6 +23,7 @@ import {
     spanRangeFor,
 } from "./recover";
 import { RecordingsModal } from "./recordings";
+import { preserveParagraphBreaks } from "./refinement";
 import { AsrMode, AsrSocket, AsrSource, ServerMessage } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
 import { keyboardExtension, isKeyboardSuppressed, setKeyboardSuppressed } from "./keyboard";
@@ -717,8 +718,11 @@ export default class VoxCraftPlugin extends Plugin {
         const expected = this.spans.slice(first, last + 1).map((span) => span.text).join("");
         if (oldText !== expected) return;
 
-        cm.dispatch({ changes: { from, to, insert: text } });
-        this.spans.splice(first, last - first + 1, { text, start, end });
+        // 速報側の ParagraphBreaker が入れた空行を、補正後の最寄りの文末へ戻す。
+        // これをしないと、30秒単位の補正が来るたびに段落がベタ打ちへ戻ってしまう。
+        const replacement = preserveParagraphBreaks(text, expected);
+        cm.dispatch({ changes: { from, to, insert: replacement } });
+        this.spans.splice(first, last - first + 1, { text: replacement, start, end });
         // 文字起こし中は取消操作を使わないが、停止後の直前入力情報も実本文へそろえる。
         this.chunks = this.spans.slice(-200).map((span) => span.text);
     }
