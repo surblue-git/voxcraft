@@ -22,5 +22,16 @@ equal(
     preserveParagraphBreaks("改行のない補正稿です。", "改行のない速報稿です。"),
     "改行のない補正稿です。",
 );
+equal(
+    preserveParagraphBreaks("サービスを提供します。", "サ\n\nービスを提供します。"),
+    "サービスを提供します。",
+);
+equal(
+    preserveParagraphBreaks(
+        "魅力的な商品を提供します。続いて新商品を紹介します。",
+        "魅力的な商品を\n\n提供します。続いて新商品を紹介します。",
+    ),
+    "魅力的な商品を提供します。\n\n続いて新商品を紹介します。",
+);
 
 console.log("paragraph refinement tests passed");

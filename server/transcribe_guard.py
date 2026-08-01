@@ -127,6 +127,11 @@ _OBVIOUS_VIDEO_ARTIFACTS = (
     "次回予告",
     "次の動画でお会いしましょう",
 )
+# 本物の動画末尾でも発話されるため常時禁止にはしないが、後ろに本文が続くなら
+# Whisper がチャンク途中へ差し込んだ定型幻覚と判断できる句。
+_MIDSTREAM_VIDEO_ARTIFACTS = (
+    "ご視聴ありがとうございました",
+)
 _CONTEXTUAL_ARTIFACTS = (
     "おやすみなさい",
 )
@@ -199,6 +204,16 @@ def filter_contextual_artifacts(
         # 癒着していれば、前後の実文を守りつつ該当句だけを外す。
         if embedded or weak_audio:
             cleaned = cleaned.replace(phrase, "")
+            removed.append(phrase)
+
+    for phrase in _MIDSTREAM_VIDEO_ARTIFACTS:
+        position = cleaned.find(phrase)
+        if position < 0:
+            continue
+        following = cleaned[position + len(phrase):].strip(" 、。！？!?　")
+        # 実際の締めの挨拶は残す。直後に別の本文が十分続く場合だけ癒着幻覚とみなす。
+        if len(following) >= 12:
+            cleaned = cleaned[:position] + cleaned[position + len(phrase):]
             removed.append(phrase)
 
     for phrase in _POSSIBLY_REAL_ENDINGS:

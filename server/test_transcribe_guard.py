@@ -73,6 +73,19 @@ def test_embedded_video_artifact_is_removed_without_losing_real_text():
     assert removed == ["次回予告"]
 
 
+def test_midstream_thanks_is_removed_but_real_ending_is_kept():
+    strong = SpeechEvidence(30.0, 0.02, 0.2, 0.6)
+    text, removed = filter_contextual_artifacts(
+        "体験価値を提供します。ご視聴ありがとうございました。昨年は新施設を開設しました。",
+        strong,
+    )
+    assert text == "体験価値を提供します。昨年は新施設を開設しました。"
+    assert removed == ["ご視聴ありがとうございました"]
+    assert filter_contextual_artifacts(
+        "以上で発表を終わります。ご視聴ありがとうございました。", strong
+    )[0] == "以上で発表を終わります。ご視聴ありがとうございました。"
+
+
 def test_real_strong_standalone_phrase_is_kept():
     strong = SpeechEvidence(2.0, 0.02, 0.2, 0.6)
     text, removed = filter_contextual_artifacts("おやすみなさい。", strong)

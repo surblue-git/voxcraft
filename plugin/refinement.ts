@@ -25,28 +25,29 @@ function closestBoundary(
     text: string,
     target: number,
     minimum: number,
-): number {
+): number | null {
     const clamped = Math.max(minimum, Math.min(text.length, target));
-    const radius = Math.max(12, Math.round(text.length * 0.08));
 
-    // まず文末を優先する。見つからない場合だけ読点・空白へ落とし、
-    // それも遠ければ元の段落比率をそのまま使う。
+    // まず文末を優先する。文末が無い場合だけ読点・空白へ落とす。
+    // 比率どおりの位置へ強制挿入すると日本語の語中を割るため、候補が無ければ
+    // null を返し、その段落区切り自体を今回は見送る。
     for (const pattern of [/[。！？!?」』）]/g, /[、，,：:；;\s]/g]) {
         let best = -1;
         let distance = Number.POSITIVE_INFINITY;
         let match: RegExpExecArray | null;
         while ((match = pattern.exec(text)) !== null) {
             const position = match.index + match[0].length;
-            if (position < minimum) continue;
+            // 内部の段落候補なので、補正ブロック末尾の空行には変換しない。
+            if (position < minimum || position >= text.length) continue;
             const candidateDistance = Math.abs(position - clamped);
             if (candidateDistance < distance) {
                 best = position;
                 distance = candidateDistance;
             }
         }
-        if (best >= 0 && distance <= radius) return best;
+        if (best >= 0) return best;
     }
-    return clamped;
+    return null;
 }
 
 /**
@@ -70,11 +71,12 @@ export function preserveParagraphBreaks(refined: string, provisional: string): s
             (marker.offset / provisionalLength) * flatRefined.length,
         );
         const minimum = marker.offset === 0 ? 0 : Math.min(flatRefined.length, previous + 1);
-        const position = marker.offset === 0
+        const position: number | null = marker.offset === 0
             ? 0
             : marker.offset >= provisionalLength
                 ? flatRefined.length
                 : closestBoundary(flatRefined, target, minimum);
+        if (position === null) continue;
         placements.push({ offset: position, separator: marker.separator });
         previous = position;
     }
