@@ -134,6 +134,44 @@ _POSSIBLY_REAL_ENDINGS = (
     "以上で終わります",
 )
 
+_FORMAL_HANDOFF_RE = re.compile(
+    r"(?:それでは|では).{0,40}(?:お願い(?:いた)?します|お願いいたします)"
+    r"|(?:お願い(?:いた)?します|お願いいたします)[。！？!?]*\Z"
+)
+_FORMAL_INTRO_RE = re.compile(
+    r"\A.{0,12}(?:皆様|みなさま).{0,8}"
+    r"(?:こんにちは|おはようございます|こんばんは)"
+    r"|\A.{0,30}(?:でございます|と申します|本日(?:の|は))"
+)
+
+
+def standalone_contextual_artifact(text: str) -> str | None:
+    """前後チャンクの確認が必要な、単独の疑わしい定型句を返す。"""
+    normalized = text.strip(" 、。！？!?　")
+    for phrase in _CONTEXTUAL_ARTIFACTS:
+        if normalized == phrase:
+            return phrase
+    return None
+
+
+def should_remove_between_context(
+    phrase: str,
+    previous_text: str,
+    next_text: str,
+) -> bool:
+    """単独句が企業説明会の話者交代に挟まれた幻覚なら True。
+
+    両隣が揃い、直前が登壇依頼、直後が正式な自己紹介の場合だけ除去する。
+    「おやすみなさい」を常時禁止しないため、日常会話や動画の本物の挨拶は残る。
+    """
+    if phrase not in _CONTEXTUAL_ARTIFACTS:
+        return False
+    previous = previous_text.strip()
+    following = next_text.strip()
+    if not previous or not following:
+        return False
+    return bool(_FORMAL_HANDOFF_RE.search(previous) and _FORMAL_INTRO_RE.search(following))
+
 
 def filter_contextual_artifacts(
     text: str,

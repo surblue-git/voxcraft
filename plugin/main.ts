@@ -141,6 +141,9 @@ export default class VoxCraftPlugin extends Plugin {
     private spans: AudioSpan[] = [];
     // 直前チャンクの音声終端。次チャンクとの間が空いていれば、そこは捨てられた音声。
     private lastAudioEnd = 0;
+    // PC音声の遅延補正。古い応答と、手編集を検出した際の通知連打を防ぐ。
+    private lastRefinementRevision = 0;
+    private refinementEditWarningShown = false;
 
     async onload(): Promise<void> {
         await this.loadSettings();
@@ -305,6 +308,14 @@ export default class VoxCraftPlugin extends Plugin {
         this.source = source;
         this.sourceDevice = "";
         this.autoStopSec = 0;
+        if (mode === "transcribe") {
+            // onSession は started より先に届くため、開始要求より前に初期化する。
+            this.spans = [];
+            this.lastAudioEnd = 0;
+            this.session = null;
+            this.lastRefinementRevision = 0;
+            this.refinementEditWarningShown = false;
+        }
         this.stopping = false;
         this.setStatus(urls.length > 1 ? "接続中…（つながる方を選択）" : "接続中…");
         this.socket = new AsrSocket(urls, {
@@ -325,6 +336,7 @@ export default class VoxCraftPlugin extends Plugin {
                 this.transcribing = false;
                 this.handleChunk(text, msg);
             },
+            onRefinement: (text, msg) => this.handleTranscribeRefinement(text, msg),
             onLevel: (level) => this.showLevel(level),
             onStopped: (reason) => this.handleServerStopped(reason),
             onReconvert: (msg) => this.handleReconvert(msg),
@@ -409,9 +421,6 @@ export default class VoxCraftPlugin extends Plugin {
         setAnchor(cm, cm.state.selection.main.head);
 
         if (mode === "transcribe") {
-            this.spans = [];
-            this.lastAudioEnd = 0;
-            this.session = null;
             // 画面が消えると AudioContext ごと止まる（Android）。長時間まわす
             // 文字起こしだけ、その間の自動消灯を抑える。
             if (Platform.isMobile && this.settings.keepScreenOn) void this.acquireWakeLock();
@@ -641,6 +650,77 @@ export default class VoxCraftPlugin extends Plugin {
             }
         }
         if (end !== undefined) this.lastAudioEnd = end;
+    }
+
+    // PC音声の速報範囲を、同じ音声を30秒前後まとめて認識した結果へ差し替える。
+    // 追記後にユーザーが本文を編集していた場合は、変更を上書きせず補正を見送る。
+    private handleTranscribeRefinement(text: string, msg: ServerMessage): void {
+        if (this.mode !== "transcribe" || this.source !== "system" || !text) return;
+        const start = msg.start;
+        const end = msg.end;
+        const revision = msg.revision;
+        if (
+            typeof start !== "number" ||
+            typeof end !== "number" ||
+            typeof revision !== "number" ||
+            end <= start ||
+            revision <= this.lastRefinementRevision
+        ) {
+            return;
+        }
+        if (this.session && msg.session && msg.session !== this.session) return;
+        this.lastRefinementRevision = revision;
+
+        const cm = this.cm;
+        if (!cm || !cm.dom.isConnected || this.spans.length === 0) return;
+        const EPS = 0.02;
+        let first = -1;
+        let last = -1;
+        for (let i = 0; i < this.spans.length; i += 1) {
+            const span = this.spans[i];
+            if (span.end > start + EPS && span.start < end - EPS) {
+                if (first < 0) first = i;
+                last = i;
+            }
+        }
+        if (first < 0 || last < first) return;
+        // 補正境界は速報チャンクの境界であること。部分的に重なる範囲は壊さない。
+        if (this.spans[first].start < start - EPS || this.spans[last].end > end + EPS) {
+            return;
+        }
+
+        const anchor = getAnchor(cm);
+        if (anchor === null) return;
+        const trackedText = this.spans.map((span) => span.text).join("");
+        const regionStart = anchor - trackedText.length;
+        if (
+            regionStart < 0 ||
+            cm.state.doc.sliceString(regionStart, anchor) !== trackedText
+        ) {
+            if (!this.refinementEditWarningShown) {
+                this.refinementEditWarningShown = true;
+                new Notice(
+                    "VoxCraft: 文字起こし本文が手動編集されているため、" +
+                    "自動補正は上書きせず見送りました。"
+                );
+            }
+            return;
+        }
+
+        let beforeLength = 0;
+        for (let i = 0; i < first; i += 1) beforeLength += this.spans[i].text.length;
+        let oldLength = 0;
+        for (let i = first; i <= last; i += 1) oldLength += this.spans[i].text.length;
+        const from = regionStart + beforeLength;
+        const to = from + oldLength;
+        const oldText = cm.state.doc.sliceString(from, to);
+        const expected = this.spans.slice(first, last + 1).map((span) => span.text).join("");
+        if (oldText !== expected) return;
+
+        cm.dispatch({ changes: { from, to, insert: text } });
+        this.spans.splice(first, last - first + 1, { text, start, end });
+        // 文字起こし中は取消操作を使わないが、停止後の直前入力情報も実本文へそろえる。
+        this.chunks = this.spans.slice(-200).map((span) => span.text);
     }
 
     // コマンドを実行し、処理したら true を返す。false ならチャンクは本文として扱われる。

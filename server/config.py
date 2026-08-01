@@ -80,6 +80,20 @@ class Config:
     # チャンクの内側に埋もれ、段落分けの材料が消えるため。
     transcribe_join_break_sec: float = float(_env("VOXCRAFT_JOIN_BREAK_SEC", "2.0"))
 
+    # --- PC音声専用: 長めチャンク + 二段階補正 ---
+    # ループバック音声は入力終了コマンドの応答性を気にする必要がないため、
+    # マイク文字起こしより長い文脈をWhisperへ渡して精度を優先する。
+    system_silence_sec: float = float(_env("VOXCRAFT_SYSTEM_SILENCE_SEC", "0.8"))
+    system_max_chunk_sec: float = float(_env("VOXCRAFT_SYSTEM_MAX_CHUNK_SEC", "12.0"))
+    system_join_sec: float = float(_env("VOXCRAFT_SYSTEM_JOIN_SEC", "10.0"))
+    system_join_hold_sec: float = float(_env("VOXCRAFT_SYSTEM_JOIN_HOLD_SEC", "6.0"))
+    system_join_break_sec: float = float(_env("VOXCRAFT_SYSTEM_JOIN_BREAK_SEC", "4.0"))
+    # 速報テキストをこの秒数ごとにまとめて再認識し、同じ音声範囲を差し替える。
+    system_refine_enabled: bool = _env("VOXCRAFT_SYSTEM_REFINE", "1") == "1"
+    system_refine_window_sec: float = float(_env("VOXCRAFT_SYSTEM_REFINE_WINDOW_SEC", "30.0"))
+    # 停止時の端数は短すぎると幻覚が増えるため、この長さ以上だけ補正する。
+    system_refine_min_sec: float = float(_env("VOXCRAFT_SYSTEM_REFINE_MIN_SEC", "8.0"))
+
     # --- 欠落区間の選択的自動再認識（文字起こし専用） ---
     # VADが捨てた区間がこれ以上続き、かつ下の音声根拠を満たす場合だけ再認識する。
     # ほぼ無音の相談・マイク離席は無理に文字化せず、従来どおり欠落として残す。

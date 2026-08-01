@@ -15,6 +15,8 @@
     - {"type": "started", "source": "system", "device": "..."}
     - {"type": "partial", "reason": "silence|max_len"} # チャンク認識開始の合図（任意）
     - {"type": "chunk", "text": "確定テキスト"}          # 確定チャンク
+    - {"type": "refinement", "text": "補正後", "start": 0, "end": 30,
+       "revision": 1}                                    # PC音声の範囲補正
     - {"type": "reconvert", "reading": "...", "segments": [...], "online": bool}
     - {"type": "error", "message": "..."}
 
@@ -44,6 +46,7 @@ from recording import (
 )
 from punctuate import available as punctuation_available
 from reconvert import reconvert
+from refinement import RefinementPlanner, RefinementRange
 from system_audio import SystemAudioError, WasapiLoopbackCapture
 from transcribe_guard import (
     AudioRingBuffer,
@@ -51,6 +54,8 @@ from transcribe_guard import (
     SpeechEvidence,
     filter_contextual_artifacts,
     speech_evidence,
+    should_remove_between_context,
+    standalone_contextual_artifact,
 )
 from userdict import (
     DictValidationError,
@@ -89,6 +94,9 @@ def health() -> dict:
         "autoPunctuation": config.enable_auto_punctuation and punctuation_available(),
         "silenceSec": config.silence_sec,
         "systemAudioAutoStopSec": config.transcribe_auto_stop_sec,
+        "systemChunkSeconds": config.system_join_sec,
+        "systemRefineEnabled": config.system_refine_enabled,
+        "systemRefineWindowSeconds": config.system_refine_window_sec,
         "dictError": get_error(),
     }
 
@@ -236,7 +244,7 @@ async def recognize(payload: dict = Body(...)) -> dict:
     }
 
 
-def _build_chunker(mode: str) -> VadChunker:
+def _build_chunker(mode: str, source: str = "microphone") -> VadChunker:
     """モードに応じた分割器を作る。dictation は config の既定値そのまま。"""
     if mode != "transcribe":
         return VadChunker(
@@ -247,7 +255,18 @@ def _build_chunker(mode: str) -> VadChunker:
             vad_threshold=config.vad_threshold,
             speech_pad_sec=config.speech_pad_sec,
         )
-    # 文字起こしは切れ目なく喋り続ける音声が相手。
+    if source == "system":
+        # PC音声は応答コマンドを聞く必要がない。短い息継ぎで細切れにせず、
+        # 8〜12秒程度の文脈を速報認識へ渡す。
+        return VadChunker(
+            sample_rate=config.sample_rate,
+            silence_sec=config.system_silence_sec,
+            max_chunk_sec=config.system_max_chunk_sec,
+            min_speech_sec=0.1,
+            vad_threshold=config.vad_threshold,
+            speech_pad_sec=max(config.speech_pad_sec, 0.5),
+        )
+    # マイク文字起こしは切れ目なく喋り続ける音声が相手。
     # 原稿の読み上げは息継ぎが短く、無音を長く待つと強制確定でしか切れなくなる。
     # 強制確定は語の途中を断ち切るので、短い息継ぎでも拾える側に寄せた方が
     # 待ち時間も精度も良くなる。語尾は口述より厚めに残す。
@@ -287,8 +306,108 @@ async def ws_endpoint(ws: WebSocket) -> None:
     auto_stop_task: asyncio.Task | None = None
     input_finished = False
     finish_lock = asyncio.Lock()
+    previous_transcript_text = ""
+    pending_contextual_chunk: dict | None = None
+    refinement_planner = RefinementPlanner(
+        config.sample_rate,
+        config.system_refine_window_sec,
+        config.system_refine_min_sec,
+    )
+    refinement_delivered_end = 0
 
     await ws.send_text(json.dumps({"type": "ready"}))
+
+    async def deliver_chunk(prepared: dict) -> None:
+        """認識・文脈判定済みの1チャンクを順序どおりクライアントへ返す。"""
+        nonlocal previous_transcript_text
+        text = prepared["text"]
+        result = prepared["result"]
+        start = prepared["start"]
+        end = prepared["end"]
+        pause = prepared["pause"]
+        recovery = prepared["recovery"]
+        evidence = prepared["evidence"]
+
+        if recovery:
+            # 音声根拠を通過しても、Whisper側の確信度が低い結果や定型句は採用しない。
+            accepted = (
+                bool(text)
+                and result.avg_logprob is not None
+                and result.avg_logprob >= config.retry_min_logprob
+            )
+            if not accepted:
+                ev = evidence or SpeechEvidence(0.0, 0.0, 0.0, 0.0)
+                print(
+                    f"[VoxCraft] 自動再認識を不採用: "
+                    f"{start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒 "
+                    f"rms={ev.rms:.5f} active={ev.active_ratio:.1%} "
+                    f"logprob={result.avg_logprob} blocked={result.blocked[:1]}"
+                )
+                return
+            print(
+                f"[VoxCraft] 欠落を自動復旧: "
+                f"{start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒 "
+                f"logprob={result.avg_logprob:.2f} text={text[:80]}"
+            )
+        if not text and result.blocked:
+            # 除去位置を送って、クライアントが未認識マーカーを置くのを防ぐ。
+            print(
+                f"[VoxCraft] 定型句をブロック: {result.blocked[0]} "
+                f"({start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒)"
+            )
+            if session is not None:
+                await ws.send_text(json.dumps({
+                    "type": "chunk", "text": "",
+                    "session": session.session_id,
+                    "start": round(start / config.sample_rate, 3),
+                    "end": round(end / config.sample_rate, 3),
+                }))
+                note_provisional_delivery(end, recovery)
+            return
+        if not text and not result.dropped:
+            print(
+                f"[VoxCraft] 空チャンク（認識結果なし）: "
+                f"{start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒 "
+                f"({(end - start) / config.sample_rate:.1f}秒, reason={prepared['reason']})"
+            )
+            return
+        if breaker is not None and not recovery:
+            text = breaker.feed(text, pause) + text
+        msg: dict = {"type": "chunk", "text": text}
+        if recovery:
+            msg["recovered"] = True
+        if pause is not None:
+            msg["pause"] = round(pause, 2)
+        if session is not None:
+            msg["session"] = session.session_id
+            msg["start"] = round(start / config.sample_rate, 3)
+            msg["end"] = round(end / config.sample_rate, 3)
+        if result.dropped:
+            msg["dropped"] = result.dropped
+        await ws.send_text(json.dumps(msg))
+        note_provisional_delivery(end, recovery)
+        if text:
+            previous_transcript_text = text
+
+    async def resolve_pending_context(next_text: str | None) -> None:
+        """保留した単独句を、両隣が揃えば判定し、末尾なら安全側で残す。"""
+        nonlocal pending_contextual_chunk
+        pending = pending_contextual_chunk
+        if pending is None:
+            return
+        pending_contextual_chunk = None
+        phrase = pending["artifact"]
+        if next_text is not None and should_remove_between_context(
+            phrase, previous_transcript_text, next_text
+        ):
+            pending["text"] = ""
+            pending["result"].blocked.append(phrase)
+            print(
+                f"[VoxCraft] 前後文脈から定型句を除去: {phrase} "
+                f"({pending['start'] / config.sample_rate:.1f}-"
+                f"{pending['end'] / config.sample_rate:.1f}秒)"
+            )
+        await deliver_chunk(pending)
 
     async def emit_chunk(
         audio: np.ndarray,
@@ -299,6 +418,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         recovery: bool = False,
         evidence: SpeechEvidence | None = None,
     ) -> None:
+        nonlocal pending_contextual_chunk
         # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
         await ws.send_text(json.dumps({"type": "partial", "reason": reason}))
         # mode は下のコマンド処理で書き換わる。ここは常に現在のモードを見る。
@@ -331,76 +451,68 @@ async def ws_endpoint(ws: WebSocket) -> None:
             symbols=get_symbols(),
             auto_punctuate=punctuate,
         )
-        if recovery:
-            # 音声根拠を通過しても、Whisper側の確信度が低い結果や定型句は採用しない。
-            # 何も送らなければ、直後の通常チャンクを受けたクライアントが従来どおり
-            # この区間を ⟨未認識 ...⟩ として残す。
-            accepted = (
-                bool(text)
-                and result.avg_logprob is not None
-                and result.avg_logprob >= config.retry_min_logprob
-            )
-            if not accepted:
-                ev = evidence or SpeechEvidence(0.0, 0.0, 0.0, 0.0)
-                print(
-                    f"[VoxCraft] 自動再認識を不採用: "
-                    f"{start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒 "
-                    f"rms={ev.rms:.5f} active={ev.active_ratio:.1%} "
-                    f"logprob={result.avg_logprob} blocked={result.blocked[:1]}"
-                )
-                return
-            print(
-                f"[VoxCraft] 欠落を自動復旧: "
-                f"{start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒 "
-                f"logprob={result.avg_logprob:.2f} text={text[:80]}"
-            )
-        if not text and result.blocked:
-            # 動画のアウトロ定型句（「ご視聴ありがとうございました」等）。本文には出さない。
-            # ただし位置は通しておく: 何も送らないとクライアントが音声の切れ目とみなして
-            # ⟨未認識⟩ マーカーを置いてしまい、幻覚が別のノイズに化けるだけになる。
-            # 件数が多い（実測206件/47.5分）ので dropped には入れず警告も出さない。
-            print(
-                f"[VoxCraft] 定型句をブロック: {result.blocked[0]} "
-                f"({start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒)"
-            )
-            if session is not None:
-                await ws.send_text(json.dumps({
-                    "type": "chunk", "text": "",
-                    "session": session.session_id,
-                    "start": round(start / config.sample_rate, 3),
-                    "end": round(end / config.sample_rate, 3),
-                }))
+        prepared = {
+            "text": text, "result": result, "reason": reason,
+            "start": start, "end": end, "pause": pause,
+            "recovery": recovery, "evidence": evidence,
+        }
+        await resolve_pending_context(text or None)
+        artifact = standalone_contextual_artifact(text)
+        if mode == "transcribe" and not recovery and artifact:
+            # 次チャンクを受け取るまで、この句だけを保留する。通常チャンクの遅延はない。
+            prepared["artifact"] = artifact
+            pending_contextual_chunk = prepared
             return
-        if not text and not result.dropped:
-            # 認識が1セグメントも返さなかったチャンク。クライアント側は音声の
-            # 連続性が切れたことから ⟨未認識⟩ を置くが、サーバー側に記録が無いと
-            # 後から原因を追えない（実測: 50分の取材で12秒×18ぶんが消えたのに
-            # ログには何も残っていなかった）。位置と長さを必ず残す。
+        await deliver_chunk(prepared)
+
+    async def emit_refinement(job: dict) -> None:
+        """30秒前後のPC音声を再認識し、同じ範囲の差し替えを送る。"""
+        audio = job["audio"]
+        span: RefinementRange = job["range"]
+        result = await _transcribe_chunk(audio, AsrOptions.refinement(), hq=True)
+        raw_text = result.text
+        if raw_text:
+            evidence = speech_evidence(
+                audio,
+                config.sample_rate,
+                active_rms=config.retry_active_rms,
+            )
+            raw_text, contextual_blocked = filter_contextual_artifacts(
+                raw_text,
+                evidence,
+                weak_rms=config.retry_min_rms,
+                weak_active_ratio=config.retry_active_ratio,
+            )
+            result.blocked.extend(contextual_blocked)
+        text = postprocess(
+            raw_text,
+            strip_space=strip_space,
+            # 動画中の「まる」を句点命令として扱わない。
+            symbol_dictation=False,
+            replacements=get_replacements(),
+            symbols=get_symbols(),
+            auto_punctuate=punctuate,
+        )
+        if not text:
             print(
-                f"[VoxCraft] 空チャンク（認識結果なし）: "
-                f"{start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒 "
-                f"({(end - start) / config.sample_rate:.1f}秒, reason={reason})"
+                f"[VoxCraft] PC音声の補正を不採用（空結果）: "
+                f"{span.start / config.sample_rate:.1f}-"
+                f"{span.end / config.sample_rate:.1f}秒"
             )
             return
-        # 段落分け（文字起こしのみ）。ベタ打ちを避けるため、話の切れ目で空行を挟む。
-        # クライアントは受け取ったテキストをそのまま挿入するので、区切りはここで付ける
-        # ＝ プラグインを更新しなくても全端末で効く。
-        if breaker is not None and not recovery:
-            text = breaker.feed(text, pause) + text
-        msg: dict = {"type": "chunk", "text": text}
-        if recovery:
-            msg["recovered"] = True
-        # 前チャンクとの息継ぎ長（秒）。クライアントの「息継ぎで読点」判断に使う。
-        if pause is not None:
-            msg["pause"] = round(pause, 2)
-        # 録音を残している間は、テキストと音声の対応（秒）を添えて復旧できるようにする。
-        if session is not None:
-            msg["session"] = session.session_id
-            msg["start"] = round(start / config.sample_rate, 3)
-            msg["end"] = round(end / config.sample_rate, 3)
-        if result.dropped:
-            msg["dropped"] = result.dropped
-        await ws.send_text(json.dumps(msg))
+        await ws.send_text(json.dumps({
+            "type": "refinement",
+            "text": text,
+            "session": job["session"],
+            "start": round(span.start / config.sample_rate, 3),
+            "end": round(span.end / config.sample_rate, 3),
+            "revision": span.revision,
+        }))
+        print(
+            f"[VoxCraft] PC音声を補正: revision={span.revision} "
+            f"{span.start / config.sample_rate:.1f}-"
+            f"{span.end / config.sample_rate:.1f}秒 ({len(text)}字)"
+        )
 
     # 認識は受信ループから切り離してキューで回す。
     # 直列に await すると、認識中（数秒）は ws.receive() が呼ばれず音声が溜まり、
@@ -408,13 +520,55 @@ async def ws_endpoint(ws: WebSocket) -> None:
     # 認識自体はモデルのロックで直列化されるため、ワーカーは1本で足りる（順序も保たれる）。
     queue: asyncio.Queue = asyncio.Queue()
 
+    def schedule_refinement(*, flush: bool = False) -> None:
+        """補正範囲の音声をリングバッファからコピーして認識キューへ積む。"""
+        if (
+            not config.system_refine_enabled
+            or mode != "transcribe"
+            or source != "system"
+            or session is None
+        ):
+            return
+        span = (
+            refinement_planner.flush(refinement_delivered_end)
+            if flush
+            else refinement_planner.ready(refinement_delivered_end)
+        )
+        if span is None:
+            return
+        audio = audio_ring.slice(span.start, span.end)
+        if audio is None:
+            print(
+                f"[VoxCraft] PC音声の補正範囲がバッファ外: "
+                f"{span.start / config.sample_rate:.1f}-"
+                f"{span.end / config.sample_rate:.1f}秒"
+            )
+            return
+        queue.put_nowait({
+            "kind": "refinement",
+            "audio": audio,
+            "range": span,
+            "session": session.session_id,
+        })
+
+    def note_provisional_delivery(end: int, recovery: bool) -> None:
+        """クライアントが置換可能になった速報範囲だけを補正対象へ進める。"""
+        nonlocal refinement_delivered_end
+        if recovery or mode != "transcribe" or source != "system":
+            return
+        refinement_delivered_end = max(refinement_delivered_end, end)
+        schedule_refinement()
+
     async def worker() -> None:
         while True:
             item = await queue.get()
             try:
                 if item is None:
                     return
-                await emit_chunk(*item)
+                if isinstance(item, dict) and item.get("kind") == "refinement":
+                    await emit_refinement(item)
+                else:
+                    await emit_chunk(*item)
             except Exception as exc:  # noqa: BLE001 - 1チャンクの失敗で全体を止めない
                 # str(exc) が空になる例外があり、実際にログが
                 # 「チャンクの認識に失敗: 」だけで終わっていた。型と位置まで残す。
@@ -590,6 +744,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 put(joiner.flush())
             # 自動停止でも、停止直前までの認識をすべて本文へ返してから閉じる。
             await queue.join()
+            # 末尾に本物の単独発話が来た可能性を守るため、次文脈が無ければ残す。
+            await resolve_pending_context(None)
+            # 最後の速報位置が確定してから端数を補正し、その結果まで返して停止する。
+            schedule_refinement(flush=True)
+            await queue.join()
             await ws.send_text(json.dumps({"type": "stopped", "reason": reason}))
 
     async def watch_system_silence() -> None:
@@ -628,9 +787,17 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 if ctype == "start":
                     created_session = False
                     input_finished = False
+                    previous_transcript_text = ""
+                    pending_contextual_chunk = None
+                    refinement_planner.reset()
+                    refinement_delivered_end = 0
                     silence_tracker = None
                     audio_ring = AudioRingBuffer(
-                        max(1, int(config.retry_buffer_sec * config.sample_rate))
+                        max(1, int(max(
+                            config.retry_buffer_sec,
+                            # 認識待ちが重なっても、補正対象の音声を失わない余裕を持つ。
+                            config.system_refine_window_sec * 4,
+                        ) * config.sample_rate))
                     )
                     last_source_chunk_end = 0
                     strip_space = bool(cmd.get("stripSpace", config.strip_ja_alnum_space))
@@ -645,14 +812,24 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             "fatal": True,
                         }))
                         continue
-                    chunker = _build_chunker(mode)
+                    chunker = _build_chunker(mode, source)
                     if mode == "transcribe":
                         opts = AsrOptions.transcription()
+                        system_mode = source == "system"
                         joiner = ChunkJoiner(
                             sample_rate=config.sample_rate,
-                            min_sec=config.transcribe_join_sec,
-                            max_hold_sec=config.transcribe_join_hold_sec,
-                            break_sec=config.transcribe_join_break_sec,
+                            min_sec=(
+                                config.system_join_sec if system_mode
+                                else config.transcribe_join_sec
+                            ),
+                            max_hold_sec=(
+                                config.system_join_hold_sec if system_mode
+                                else config.transcribe_join_hold_sec
+                            ),
+                            break_sec=(
+                                config.system_join_break_sec if system_mode
+                                else config.transcribe_join_break_sec
+                            ),
                         )
                         breaker = ParagraphBreaker(
                             min_chars=config.paragraph_chars,

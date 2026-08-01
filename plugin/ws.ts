@@ -13,8 +13,8 @@ export interface StartResult {
 }
 
 export interface ServerMessage {
-    type: "ready" | "started" | "chunk" | "stopped" | "reconvert" | "error" |
-        "partial" | "session" | "level";
+    type: "ready" | "started" | "chunk" | "refinement" | "stopped" |
+        "reconvert" | "error" | "partial" | "session" | "level";
     text?: string;
     reason?: string;
     reading?: string;
@@ -34,6 +34,7 @@ export interface ServerMessage {
     channels?: number;
     autoStopSec?: number;
     recovered?: boolean;
+    revision?: number; // PC音声の範囲補正。大きい番号だけを適用して古い応答を無視する
     level?: number;
     fatal?: boolean;
 }
@@ -42,6 +43,7 @@ export interface WsHandlers {
     onReady?: () => void;
     onPartial?: () => void; // 発話検出→認識開始の合図
     onChunk?: (text: string, msg: ServerMessage) => void;
+    onRefinement?: (text: string, msg: ServerMessage) => void;
     onSession?: (id: string) => void;
     onReconvert?: (msg: ServerMessage) => void;
     onStopped?: (reason?: string) => void;
@@ -192,6 +194,9 @@ export class AsrSocket {
                 break;
             case "chunk":
                 this.handlers.onChunk?.(msg.text || "", msg);
+                break;
+            case "refinement":
+                this.handlers.onRefinement?.(msg.text || "", msg);
                 break;
             case "session":
                 if (msg.session) this.handlers.onSession?.(msg.session);

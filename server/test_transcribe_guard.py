@@ -7,6 +7,8 @@ from transcribe_guard import (
     SpeechEvidence,
     filter_contextual_artifacts,
     speech_evidence,
+    should_remove_between_context,
+    standalone_contextual_artifact,
 )
 
 SR = 16000
@@ -76,6 +78,30 @@ def test_real_strong_standalone_phrase_is_kept():
     text, removed = filter_contextual_artifacts("おやすみなさい。", strong)
     assert text == "おやすみなさい。"
     assert removed == []
+
+
+def test_standalone_artifact_is_identified_for_delayed_context_check():
+    assert standalone_contextual_artifact(" おやすみなさい。 ") == "おやすみなさい"
+    assert standalone_contextual_artifact("皆様、おやすみなさい。") is None
+
+
+def test_artifact_between_formal_handoff_and_introduction_is_removed():
+    assert should_remove_between_context(
+        "おやすみなさい",
+        "それでは中山さんお願いいたします。",
+        "皆様こんにちは中山でございます。",
+    )
+
+
+def test_real_standalone_phrase_is_not_removed_without_both_formal_neighbors():
+    assert not should_remove_between_context(
+        "おやすみなさい",
+        "それでは、また明日。",
+        "皆様もゆっくり休んでください。",
+    )
+    assert not should_remove_between_context(
+        "おやすみなさい", "それでは中山さんお願いいたします。", ""
+    )
 
 
 def test_weak_standalone_artifact_is_removed():

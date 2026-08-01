@@ -152,6 +152,22 @@ class AsrOptions:
             block_boilerplate=True,
         )
 
+    @staticmethod
+    def refinement() -> "AsrOptions":
+        """PC音声の速報を30秒前後の文脈で認識し直す補正パス。"""
+        return AsrOptions(
+            # 元の連続音声を渡すため、長い無音だけ内蔵VADで除く。
+            vad_filter=True,
+            no_speech_threshold=0.99,
+            logprob_threshold=-5.0,
+            beam_size=max(config.beam_size, 5),
+            block_hallucinations=False,
+            # 30秒窓をまたぐ文章の接続を保つ。今回の実音声では反復暴走なしを確認済み。
+            condition_on_previous=True,
+            initial_prompt=None,
+            block_boilerplate=True,
+        )
+
 
 @dataclass
 class TranscribeResult:

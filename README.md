@@ -62,6 +62,27 @@ cd server
 - 環境変数で設定を変えたい場合は、ログオン時にも効くようユーザー環境変数にする
   （例 `setx VOXCRAFT_MODEL v3-turbo`）。
 
+#### サーバーを手動で制御する
+
+コードや設定の変更後に再起動するときは、ローカル制御スクリプトを使う。
+
+```powershell
+cd server
+.\control.ps1 status   # 稼働状態とPIDを表示
+.\control.ps1 start    # 停止中ならバックグラウンド起動
+.\control.ps1 stop     # VoxCraftと確認できたプロセスだけを停止
+.\control.ps1 restart  # 停止してからバックグラウンド起動
+```
+
+停止はWindowsのプロセス終了を使うため、**文字起こし・録音中には実行しないこと**。
+別のプログラムが同じポートを使用している場合は、誤停止を避けるため処理を中止する。
+
+このスクリプトは手動操作専用であり、クラッシュや応答停止を監視するwatchdogではない。
+また、VoxCraft停止中はVoxCraft自身が起動要求を受け取れないため、Obsidianからの完全な
+遠隔制御には使用できない。将来遠隔制御を追加する場合は、別の常駐コントローラーを置き、
+推測困難なトークンによる認証とTailscale等のプライベートネットワーク制限を必須にする。
+現在のAPIは認証なしで `0.0.0.0` に待ち受けるため、停止・再起動APIをそのまま追加してはならない。
+
 **GPU高速化（強く推奨）**: NVIDIA GPUがあれば以下でCPU比 約10倍速（RTF 2.1→0.2）。
 
 ```powershell
@@ -124,6 +145,9 @@ git push origin 0.2.0
 PC音声モードはサーバーが動いているWindows PCの再生音を取得する。初回追加時は
 `pip install -r requirements.txt`をもう一度実行し、サーバーを再起動する。
 自分のマイク音声は含まれないため、現時点では通話相手側だけが文字起こし対象になる。
+PC音声は短い無音ごとに即座に確定せず、既定では約10秒を目標に連結して前後の文脈を保つ。
+さらに約30秒ごとに同じ音声を精度優先の設定で再認識し、先に表示した速報テキストを
+確定稿へ自動で差し替える。差し替え対象を手で編集していた場合は上書きせず、速報を残す。
 PC出力の実音が5分間ない場合は、末尾の認識を完了してから自動停止する。この停止と、
 欠落区間の選別再認識・文脈付き定型句フィルターは文字起こしモードだけに作用し、口述には作用しない。
 
@@ -237,6 +261,14 @@ PC出力の実音が5分間ない場合は、末尾の認識を完了してか�
 | `VOXCRAFT_VAD_FILTER` | 1 | 内蔵VADで非発話部分を除去（幻覚対策） |
 | `VOXCRAFT_NO_SPEECH_THRESHOLD` | 0.6 | これ超の無音確率セグメントを捨てる（上げると緩く） |
 | `VOXCRAFT_SILENCE_SEC` | 0.5 | 息継ぎ確定の無音長（秒） |
+| `VOXCRAFT_SYSTEM_SILENCE_SEC` | 0.8 | PC音声で生チャンクを切る無音長（秒） |
+| `VOXCRAFT_SYSTEM_MAX_CHUNK_SEC` | 12 | PC音声の生チャンク上限（秒） |
+| `VOXCRAFT_SYSTEM_JOIN_SEC` | 10 | PC音声の速報チャンクを連結する目標長（秒） |
+| `VOXCRAFT_SYSTEM_JOIN_HOLD_SEC` | 6 | 目標長未満のPC音声を次の発話まで保持する上限（秒） |
+| `VOXCRAFT_SYSTEM_JOIN_BREAK_SEC` | 4 | これ以上の無音ではPC音声チャンクを連結しない（秒） |
+| `VOXCRAFT_SYSTEM_REFINE` | 1 | PC音声の遅延補正を有効化。0で無効 |
+| `VOXCRAFT_SYSTEM_REFINE_WINDOW_SEC` | 30 | 確定稿としてまとめて再認識する長さ（秒） |
+| `VOXCRAFT_SYSTEM_REFINE_MIN_SEC` | 8 | 停止時の端数を再認識する最短長（秒） |
 | `VOXCRAFT_AUTO_STOP_SEC` | 300 | PC音声文字起こしを自動停止する連続無音（秒）。0で無効 |
 | `VOXCRAFT_AUDIBLE_RMS` | 0.0001 | 自動停止で「実音あり」とみなすPC出力RMS |
 | `VOXCRAFT_RETRY_GAP_MIN` | 2.0 | 欠落区間を自動再認識する最短秒数 |
