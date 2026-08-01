@@ -11,6 +11,8 @@ export interface RecognizeResult {
     text: string;
     dropped?: string[];
     seconds?: number;
+    dictionarySetId?: string;
+    dictionaryRevision?: string;
 }
 
 // テキストと、それを生んだ音声の位置（秒）。ノート上の位置ではなく本文で対応づけるため、
@@ -26,13 +28,14 @@ export async function recognizeRange(
     session: string,
     start: number,
     end: number,
-    margin = 1.0
+    margin = 1.0,
+    dictionarySetId = "default"
 ): Promise<RecognizeResult> {
     const res = await requestUrl({
         url: `${httpBase(wsUrl)}/recognize`,
         method: "POST",
         contentType: "application/json",
-        body: JSON.stringify({ session, start, end, margin }),
+        body: JSON.stringify({ session, start, end, margin, dictionarySetId }),
         throw: false,
     });
     if (res.status >= 400) {

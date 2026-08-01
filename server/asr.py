@@ -309,6 +309,7 @@ class Transcriber:
         audio: np.ndarray,
         hotwords: str | None = None,
         opts: AsrOptions | None = None,
+        hallucinations: set[str] | frozenset[str] | None = None,
     ) -> TranscribeResult:
         """float32 16kHz モノラル音声を認識する。
 
@@ -318,7 +319,12 @@ class Transcriber:
         if self._model is None:
             raise RuntimeError("model not loaded")
 
-        from userdict import get_hallucinations
+        if hallucinations is None:
+            from userdict import get_hallucinations
+
+            active_hallucinations = get_hallucinations()
+        else:
+            active_hallucinations = hallucinations
 
         o = opts or AsrOptions.dictation()
         dropped: list[str] = []
@@ -359,8 +365,7 @@ class Transcriber:
 
         # 丸ごと定番の幻覚なら捨てる（本文中に混ざった場合は残す）。
         if o.block_hallucinations:
-            user_halls = get_hallucinations()
-            if text in _HALLUCINATIONS or text in user_halls:
+            if text in _HALLUCINATIONS or text in active_hallucinations:
                 dropped.append(f"{text}（幻覚ブロックリスト）")
                 text = ""
 

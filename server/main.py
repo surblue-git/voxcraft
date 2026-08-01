@@ -5,14 +5,15 @@
     - バイナリフレーム: PCM16LE モノラル 16kHz の音声ブロック
     - テキストフレーム(JSON): 制御コマンド
         {"type": "start", "symbols": true, "stripSpace": true,
-         "mode": "transcribe", "source": "system"}
+         "mode": "transcribe", "source": "system", "dictionarySetId": "default"}
         {"type": "stop"}                     # 残り音声をflushして確定
         {"type": "reconvert", "text": "..."} # 再変換候補を要求
         {"type": "tune", "fast": true}       # 候補選択中だけ応答速度優先に切替（false で復帰）
 
   サーバー → クライアント（すべて JSON テキストフレーム）
     - {"type": "ready"}                                # 接続確立
-    - {"type": "started", "source": "system", "device": "..."}
+    - {"type": "started", "source": "system", "device": "...",
+       "dictionarySetId": "default", "dictionaryRevision": "..."}
     - {"type": "partial", "reason": "silence|max_len"} # チャンク認識開始の合図（任意）
     - {"type": "chunk", "text": "確定テキスト"}          # 確定チャンク
     - {"type": "refinement", "text": "補正後", "start": 0, "end": 30,
@@ -36,6 +37,11 @@ from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
 from asr import AsrOptions, hq_transcriber, transcriber
 from config import config
+from dictionary_registry import (
+    DictionaryRevisionConflict,
+    DictionarySchemaError,
+    DictionarySnapshot,
+)
 from postproc import ParagraphBreaker, postprocess
 from recording import (
     RECORDINGS_DIR,
@@ -59,11 +65,13 @@ from transcribe_guard import (
 )
 from userdict import (
     DictValidationError,
+    add_profile_entry,
+    dictionary_catalog,
+    get_dictionary_snapshot,
     get_error,
-    get_hotwords,
-    get_replacements,
-    get_symbols,
+    read_profile,
     read_raw,
+    validate_profile_raw,
     write_raw,
 )
 from vad import ChunkJoiner, VadChunker
@@ -116,11 +124,66 @@ async def dict_post(payload: dict = Body(...)) -> dict:
     """
     try:
         counts = write_raw(payload.get("replacements", {}), payload.get("symbols", {}))
-    except DictValidationError as exc:
+    except (DictValidationError, DictionarySchemaError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"保存できません: {exc}") from exc
     return {"ok": True, **counts}
+
+
+@app.get("/dictionaries")
+def dictionaries_get() -> dict:
+    """新形式の辞書プロファイルと辞書セットの一覧を返す。"""
+    try:
+        return dictionary_catalog()
+    except (DictionarySchemaError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=f"辞書一覧を読めません: {exc}") from exc
+
+
+@app.post("/dictionaries/validate")
+async def dictionaries_validate(payload: dict = Body(...)) -> dict:
+    """辞書ファイルを保存せずに検証する。"""
+    return validate_profile_raw(payload)
+
+
+@app.get("/dictionaries/{profile_id}")
+def dictionary_profile_get(profile_id: str) -> dict:
+    """検証済みの辞書プロファイル本文を返す。"""
+    try:
+        return read_profile(profile_id)
+    except DictionarySchemaError as exc:
+        detail = str(exc)
+        status = 404 if "見つかりません" in detail else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"辞書を読めません: {exc}") from exc
+
+
+@app.post("/dictionaries/{profile_id}/entries")
+async def dictionary_entry_post(profile_id: str, payload: dict = Body(...)) -> dict:
+    """競合を検出しながら、辞書プロファイルへ置換を1件だけ追加する。"""
+    expected_revision = payload.get("expectedRevision")
+    if expected_revision is not None and not isinstance(expected_revision, str):
+        raise HTTPException(status_code=400, detail="expectedRevision が不正です")
+    try:
+        return add_profile_entry(
+            profile_id,
+            payload.get("observed"),
+            payload.get("output"),
+            expected_revision=expected_revision,
+            hotword=payload.get("hotword", False),
+            priority=payload.get("priority", 0),
+            note=payload.get("note", ""),
+        )
+    except DictionaryRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "currentRevision": exc.current_revision},
+        ) from exc
+    except DictionarySchemaError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"辞書を保存できません: {exc}") from exc
 
 
 @app.post("/reconvert")
@@ -135,7 +198,20 @@ async def reconvert_post(payload: dict = Body(...)) -> dict:
         raise HTTPException(status_code=400, detail="text を指定してください")
     if len(text) > 1000:
         raise HTTPException(status_code=400, detail="text が長すぎます（1000文字まで）")
-    return await asyncio.to_thread(reconvert, text)
+    dictionary = _resolve_dictionary_snapshot(payload.get("dictionarySetId", "default"))
+    result = await asyncio.to_thread(reconvert, text, dictionary.reverse_replacements)
+    return {**result, **dictionary.metadata()}
+
+
+def _resolve_dictionary_snapshot(set_id) -> DictionarySnapshot:
+    if not isinstance(set_id, str) or not set_id:
+        raise HTTPException(status_code=400, detail="dictionarySetId が不正です")
+    try:
+        return get_dictionary_snapshot(set_id)
+    except DictionarySchemaError as exc:
+        raise HTTPException(status_code=400, detail=f"辞書セットを解決できません: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"辞書セットを読めません: {exc}") from exc
 
 
 def _pcm16_to_float32(data: bytes) -> np.ndarray:
@@ -144,7 +220,13 @@ def _pcm16_to_float32(data: bytes) -> np.ndarray:
     return (ints.astype(np.float32) / 32768.0)
 
 
-async def _transcribe_chunk(audio: np.ndarray, opts: AsrOptions, *, hq: bool = False):
+async def _transcribe_chunk(
+    audio: np.ndarray,
+    opts: AsrOptions,
+    dictionary: DictionarySnapshot,
+    *,
+    hq: bool = False,
+):
     """認識をスレッドプールで実行（イベントループを塞がない）。
 
     hq=True は文字起こし・復旧用の高品質モデル（既定 turbo）を使う。
@@ -152,13 +234,13 @@ async def _transcribe_chunk(audio: np.ndarray, opts: AsrOptions, *, hq: bool = F
     ロードもスレッド側で行う（10秒前後かかるのでイベントループを塞がない）。
     """
     # hotwords は既定OFF（長いと kotoba-whisper が認識を空にするため。config 参照）。
-    hotwords = get_hotwords() if config.use_hotwords else None
+    hotwords = dictionary.hotword_prompt if config.use_hotwords else None
     target = hq_transcriber() if hq else transcriber
 
     def _run():
         if hq:
             target.ensure_loaded()
-        return target.transcribe(audio, hotwords, opts)
+        return target.transcribe(audio, hotwords, opts, dictionary.hallucinations)
 
     return await asyncio.to_thread(_run)
 
@@ -194,6 +276,7 @@ async def recognize(payload: dict = Body(...)) -> dict:
     前後にマージンを付けて渡すので、チャンク境界で切れた語も復元されやすい。
     """
     session = str(payload.get("session", ""))
+    dictionary = _resolve_dictionary_snapshot(payload.get("dictionarySetId", "default"))
     try:
         start = float(payload.get("start", 0.0))
         end = float(payload.get("end", 0.0))
@@ -211,7 +294,7 @@ async def recognize(payload: dict = Body(...)) -> dict:
     if audio.size == 0:
         raise HTTPException(status_code=400, detail="その範囲に音声がありません")
 
-    result = await _transcribe_chunk(audio, AsrOptions.recovery(), hq=True)
+    result = await _transcribe_chunk(audio, AsrOptions.recovery(), dictionary, hq=True)
     evidence = speech_evidence(
         audio,
         config.sample_rate,
@@ -228,8 +311,8 @@ async def recognize(payload: dict = Body(...)) -> dict:
         guarded_text,
         strip_space=config.strip_ja_alnum_space,
         symbol_dictation=False,  # 復旧では「まる」等を記号に変換しない（原音に忠実に）
-        replacements=get_replacements(),
-        symbols=get_symbols(),
+        replacements=dictionary.replacement_plan,
+        symbols=dictionary.symbols,
         auto_punctuate=config.enable_auto_punctuation,
     )
     if result.blocked:
@@ -241,6 +324,7 @@ async def recognize(payload: dict = Body(...)) -> dict:
         "dropped": result.dropped,
         "blocked": result.blocked,
         "seconds": round(audio.size / config.sample_rate, 2),
+        **dictionary.metadata(),
     }
 
 
@@ -294,6 +378,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     strip_space = config.strip_ja_alnum_space
     symbols = config.enable_symbol_dictation
     punctuate = config.enable_auto_punctuation
+    dictionary_snapshot: DictionarySnapshot | None = None
     session: SessionAudio | None = None
     source = "microphone"
     system_capture: WasapiLoopbackCapture | None = None
@@ -417,13 +502,18 @@ async def ws_endpoint(ws: WebSocket) -> None:
         pause: float | None = None,
         recovery: bool = False,
         evidence: SpeechEvidence | None = None,
+        dictionary: DictionarySnapshot | None = None,
     ) -> None:
         nonlocal pending_contextual_chunk
+        if dictionary is None:
+            raise RuntimeError("辞書スナップショットがありません")
         # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
         await ws.send_text(json.dumps({"type": "partial", "reason": reason}))
         # mode は下のコマンド処理で書き換わる。ここは常に現在のモードを見る。
         chunk_opts = AsrOptions.recovery() if recovery else opts
-        result = await _transcribe_chunk(audio, chunk_opts, hq=(mode == "transcribe"))
+        result = await _transcribe_chunk(
+            audio, chunk_opts, dictionary, hq=(mode == "transcribe")
+        )
         raw_text = result.text
         if mode == "transcribe" and raw_text:
             chunk_evidence = evidence or speech_evidence(
@@ -447,8 +537,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
             raw_text,
             strip_space=strip_space,
             symbol_dictation=symbols,
-            replacements=get_replacements(),
-            symbols=get_symbols(),
+            replacements=dictionary.replacement_plan,
+            symbols=dictionary.symbols,
             auto_punctuate=punctuate,
         )
         prepared = {
@@ -469,7 +559,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
         """30秒前後のPC音声を再認識し、同じ範囲の差し替えを送る。"""
         audio = job["audio"]
         span: RefinementRange = job["range"]
-        result = await _transcribe_chunk(audio, AsrOptions.refinement(), hq=True)
+        dictionary: DictionarySnapshot = job["dictionary"]
+        result = await _transcribe_chunk(
+            audio, AsrOptions.refinement(), dictionary, hq=True
+        )
         raw_text = result.text
         if raw_text:
             evidence = speech_evidence(
@@ -489,8 +582,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
             strip_space=strip_space,
             # 動画中の「まる」を句点命令として扱わない。
             symbol_dictation=False,
-            replacements=get_replacements(),
-            symbols=get_symbols(),
+            replacements=dictionary.replacement_plan,
+            symbols=dictionary.symbols,
             auto_punctuate=punctuate,
         )
         if not text:
@@ -527,6 +620,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             or mode != "transcribe"
             or source != "system"
             or session is None
+            or dictionary_snapshot is None
         ):
             return
         span = (
@@ -549,6 +643,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             "audio": audio,
             "range": span,
             "session": session.session_id,
+            "dictionary": dictionary_snapshot,
         })
 
     def note_provisional_delivery(end: int, recovery: bool) -> None:
@@ -585,11 +680,21 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
     def put(chunks: list) -> None:
         """認識キューへそのまま流す。"""
+        if dictionary_snapshot is None:
+            raise RuntimeError("辞書スナップショットがありません")
         for c in chunks:
-            queue.put_nowait((c.audio, c.reason, c.start, c.end, c.pause, False, None))
+            queue.put_nowait((
+                c.audio, c.reason, c.start, c.end, c.pause, False, None,
+                dictionary_snapshot,
+            ))
 
     def put_recovery(audio: np.ndarray, start: int, end: int, evidence: SpeechEvidence) -> None:
-        queue.put_nowait((audio, "auto_recovery", start, end, None, True, evidence))
+        if dictionary_snapshot is None:
+            raise RuntimeError("辞書スナップショットがありません")
+        queue.put_nowait((
+            audio, "auto_recovery", start, end, None, True, evidence,
+            dictionary_snapshot,
+        ))
 
     def enqueue(chunks: list) -> None:
         """確定チャンクを認識キューへ流す（文字起こしでは短いものを連結してから）。"""
@@ -785,6 +890,26 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 ctype = cmd.get("type")
 
                 if ctype == "start":
+                    requested_dictionary_set = cmd.get("dictionarySetId", "default")
+                    if not isinstance(requested_dictionary_set, str) or not requested_dictionary_set:
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "message": "dictionarySetId が不正です。",
+                            "fatal": True,
+                        }))
+                        continue
+                    try:
+                        resolved_dictionary = get_dictionary_snapshot(requested_dictionary_set)
+                    except (DictionarySchemaError, OSError) as exc:
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "message": f"辞書セットを解決できません: {exc}",
+                            "fatal": True,
+                        }))
+                        continue
+                    # この代入以後、ファイルが変更されてもキュー済みジョブは
+                    # resolved_dictionary 自体を保持するためセッション内で混在しない。
+                    dictionary_snapshot = resolved_dictionary
                     created_session = False
                     input_finished = False
                     previous_transcript_text = ""
@@ -899,22 +1024,32 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             auto_stop_task = asyncio.create_task(watch_system_silence())
                             source_info["autoStopSec"] = config.transcribe_auto_stop_sec
                     await ws.send_text(json.dumps({
-                        "type": "started", "source": source, **source_info,
+                        "type": "started",
+                        "source": source,
+                        **source_info,
+                        **dictionary_snapshot.metadata(),
                     }))
-                    # 辞書が壊れていたらクライアントに知らせる（無言で無効化しない）。
-                    dict_err = get_error()
-                    if dict_err:
-                        await ws.send_text(json.dumps({
-                            "type": "error",
-                            "message": f"辞書(userdict.json)を読めません: {dict_err}",
-                        }))
+                    print(
+                        f"[VoxCraft] 辞書セット固定: {dictionary_snapshot.set_id} "
+                        f"revision={dictionary_snapshot.revision} "
+                        f"profiles={','.join(dictionary_snapshot.profile_ids)}"
+                    )
 
                 elif ctype == "stop":
                     await finish_input("manual")
 
                 elif ctype == "reconvert":
-                    payload = await asyncio.to_thread(reconvert, cmd.get("text", ""))
-                    await ws.send_text(json.dumps({"type": "reconvert", **payload}))
+                    active_dictionary = dictionary_snapshot or get_dictionary_snapshot("default")
+                    payload = await asyncio.to_thread(
+                        reconvert,
+                        cmd.get("text", ""),
+                        active_dictionary.reverse_replacements,
+                    )
+                    await ws.send_text(json.dumps({
+                        "type": "reconvert",
+                        **payload,
+                        **active_dictionary.metadata(),
+                    }))
 
                 elif ctype == "tune":
                     # 候補モーダルを開いている間だけ「短い発話に速く応える」側へ寄せる。

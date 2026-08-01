@@ -1,0 +1,381 @@
+{
+  "schemaVersion": 1,
+  "id": "common",
+  "name": "共通",
+  "description": "旧 userdict.json から移行した共通辞書",
+  "language": "ja",
+  "entries": [
+    {
+      "observed": "じょうぷらほう",
+      "output": "情プラ法",
+      "enabled": true
+    },
+    {
+      "observed": "ウィンドウズ",
+      "output": "Windows",
+      "enabled": true
+    },
+    {
+      "observed": "ウインドーズ",
+      "output": "Windows",
+      "enabled": true
+    },
+    {
+      "observed": "ウィンドーズ",
+      "output": "Windows",
+      "enabled": true
+    },
+    {
+      "observed": "アンドロイド",
+      "output": "Android",
+      "enabled": true
+    },
+    {
+      "observed": "ギットハブ",
+      "output": "GitHub",
+      "enabled": true
+    },
+    {
+      "observed": "オブシディアン",
+      "output": "Obsidian",
+      "enabled": true
+    },
+    {
+      "observed": "パイソン",
+      "output": "Python",
+      "enabled": true
+    },
+    {
+      "observed": "ジェイソン",
+      "output": "JSON",
+      "enabled": true
+    },
+    {
+      "observed": "ユーアールエル",
+      "output": "URL",
+      "enabled": true
+    },
+    {
+      "observed": "エーピーアイ",
+      "output": "API",
+      "enabled": true
+    },
+    {
+      "observed": "エーアイ",
+      "output": "AI",
+      "enabled": true
+    },
+    {
+      "observed": "エイトック",
+      "output": "ATOK",
+      "enabled": true
+    },
+    {
+      "observed": "エートック",
+      "output": "ATOK",
+      "enabled": true
+    },
+    {
+      "observed": "Aトック",
+      "output": "ATOK",
+      "enabled": true
+    },
+    {
+      "observed": "エートッ",
+      "output": "ATOK",
+      "enabled": true
+    },
+    {
+      "observed": "べっし",
+      "output": "別紙",
+      "enabled": true
+    },
+    {
+      "observed": "苦闘点",
+      "output": "句読点",
+      "enabled": true
+    },
+    {
+      "observed": "収集説明",
+      "output": "趣旨説明",
+      "enabled": true
+    },
+    {
+      "observed": "協裁",
+      "output": "共催",
+      "enabled": true
+    },
+    {
+      "observed": "各金予算",
+      "output": "各企業さん",
+      "enabled": true
+    },
+    {
+      "observed": "サイバー対象能力強化法",
+      "output": "サイバー対処能力強化法",
+      "enabled": true
+    },
+    {
+      "observed": "サイバー対象の力強化法",
+      "output": "サイバー対処能力強化法",
+      "enabled": true
+    },
+    {
+      "observed": "サイバー対象の協力強化法",
+      "output": "サイバー対処能力強化法",
+      "enabled": true
+    },
+    {
+      "observed": "サイバー対象の強化法",
+      "output": "サイバー対処能力強化法",
+      "enabled": true
+    },
+    {
+      "observed": "サイバー協議",
+      "output": "サイバー脅威",
+      "enabled": true
+    },
+    {
+      "observed": "サイバー協意",
+      "output": "サイバー脅威",
+      "enabled": true
+    },
+    {
+      "observed": "NTTドコモフィナンシャルグループ",
+      "output": "NTTドコモ・フィナンシャルグループ",
+      "enabled": true
+    },
+    {
+      "observed": "SMTV",
+      "output": "SMTB",
+      "enabled": true
+    },
+    {
+      "observed": "Dカード",
+      "output": "dカード",
+      "enabled": true
+    },
+    {
+      "observed": "D払い",
+      "output": "d払い",
+      "enabled": true
+    },
+    {
+      "observed": "どこもSMTVネット銀行",
+      "output": "ドコモSMTBネット銀行",
+      "enabled": true
+    },
+    {
+      "observed": "こやまやすひろ",
+      "output": "小山安博",
+      "enabled": true
+    },
+    {
+      "observed": "小山安広",
+      "output": "小山安博",
+      "enabled": true
+    },
+    {
+      "observed": "再変更",
+      "output": "再変換",
+      "enabled": true
+    },
+    {
+      "observed": "再変化",
+      "output": "再変換",
+      "enabled": true
+    },
+    {
+      "observed": "再変感",
+      "output": "再変換",
+      "enabled": true
+    },
+    {
+      "observed": "再復環",
+      "output": "再変換",
+      "enabled": true
+    },
+    {
+      "observed": "再返還",
+      "output": "再変換",
+      "enabled": true
+    },
+    {
+      "observed": "ここを医療し",
+      "output": "ここを言い直し",
+      "enabled": true
+    },
+    {
+      "observed": "アクテー",
+      "output": "確定",
+      "enabled": true
+    },
+    {
+      "observed": "どこもふぃなんしゃるぐるーぷ",
+      "output": "ドコモ・フィナンシャルグループ",
+      "enabled": true
+    },
+    {
+      "observed": "どこもフィナンシャルグループ",
+      "output": "ドコモ・フィナンシャルグループ",
+      "enabled": true
+    },
+    {
+      "observed": "らくてんぺい",
+      "output": "楽天ペイ",
+      "enabled": true
+    },
+    {
+      "observed": "リキット",
+      "output": "Liquid",
+      "enabled": true
+    },
+    {
+      "observed": "リキッド",
+      "output": "Liquid",
+      "enabled": true
+    },
+    {
+      "observed": "ポラリパイ",
+      "output": "ポラリファイ",
+      "enabled": true
+    },
+    {
+      "observed": "一軒米氏",
+      "output": "eKYC",
+      "enabled": true
+    },
+    {
+      "observed": "EKYC",
+      "output": "eKYC",
+      "enabled": true
+    },
+    {
+      "observed": "らくする",
+      "output": "ラクスル",
+      "enabled": true
+    },
+    {
+      "observed": "水尾銀行",
+      "output": "みずほ銀行",
+      "enabled": true
+    },
+    {
+      "observed": "超音",
+      "output": "長音",
+      "enabled": true
+    },
+    {
+      "observed": "セブン&アイホールディングス",
+      "output": "セブン&アイ・ホールディングス",
+      "enabled": true
+    },
+    {
+      "observed": "ぺいぺい",
+      "output": "PayPay",
+      "enabled": true
+    },
+    {
+      "observed": "ペイペイ",
+      "output": "PayPay",
+      "enabled": true
+    },
+    {
+      "observed": "面積事項",
+      "output": "免責事項",
+      "enabled": true
+    },
+    {
+      "observed": "アープ",
+      "output": "ARPU",
+      "enabled": true
+    },
+    {
+      "observed": "あーぷ",
+      "output": "ARPU",
+      "enabled": true
+    },
+    {
+      "observed": "ARP",
+      "output": "ARPU",
+      "enabled": true
+    },
+    {
+      "observed": "ペーペーカード",
+      "output": "PayPayカード",
+      "enabled": true
+    },
+    {
+      "observed": "ペーペー銀行",
+      "output": "PayPay銀行",
+      "enabled": true
+    },
+    {
+      "observed": "ペーペー証券",
+      "output": "PayPay証券",
+      "enabled": true
+    },
+    {
+      "observed": "不良再建",
+      "output": "不良債権",
+      "enabled": true
+    },
+    {
+      "observed": "やふーじゃぱん",
+      "output": "Yahoo! JAPAN",
+      "enabled": true
+    },
+    {
+      "observed": "セブンイレブン",
+      "output": "セブン-イレブン",
+      "enabled": true
+    },
+    {
+      "observed": "アメリカエクスプレス",
+      "output": "アメリカン・エキスプレス",
+      "enabled": true
+    },
+    {
+      "observed": "アメリカのエクスプレス",
+      "output": "アメリカン・エキスプレス",
+      "enabled": true
+    },
+    {
+      "observed": "アメリカンエクスプレス",
+      "output": "アメリカン・エキスプレス",
+      "enabled": true
+    },
+    {
+      "observed": "アメリカンエンスプレス",
+      "output": "アメリカン・エキスプレス",
+      "enabled": true
+    },
+    {
+      "observed": "アメリカンエンチプレス",
+      "output": "アメリカン・エキスプレス",
+      "enabled": true
+    }
+  ],
+  "symbols": {
+    "当点": "、",
+    "当店": "、",
+    "とうてんてん": "、",
+    "トーティン": "、",
+    "海業": "改行",
+    "かよ": "改行",
+    "かぎかっこ": "「",
+    "かぎかっことじ": "」",
+    "なかぐろ": "・",
+    "中黒": "・",
+    "はてなまーく": "？",
+    "ハテナマーク": "？",
+    "てんてんてん": "……"
+  },
+  "hotwords": [],
+  "hallucinations": [],
+  "migration": {
+    "source": "userdict.json",
+    "sourceSha256": "9165f77ec999de57ce0b643d2faa9839be093b1d7695f52103e183e854d0e932",
+    "migratedAt": "2026-08-01T17:28:42.021512+00:00"
+  }
+}

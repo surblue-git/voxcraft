@@ -10,6 +10,21 @@ export interface StartResult {
     inputSampleRate?: number;
     channels?: number;
     autoStopSec?: number;
+    dictionarySetId: string;
+    dictionarySetName: string;
+    dictionaryRevision: string;
+    dictionaryProfiles: string[];
+    dictionaryProfileRevisions: Record<string, string>;
+    dictionaryWritableProfile: string;
+    dictionaryWarningCount: number;
+    dictionaryWarnings: DictionaryDiagnostic[];
+}
+
+export interface DictionaryDiagnostic {
+    severity: "warning" | "error";
+    code: string;
+    message: string;
+    entry?: number;
 }
 
 export interface ServerMessage {
@@ -33,6 +48,14 @@ export interface ServerMessage {
     inputSampleRate?: number;
     channels?: number;
     autoStopSec?: number;
+    dictionarySetId?: string;
+    dictionarySetName?: string;
+    dictionaryRevision?: string;
+    dictionaryProfiles?: string[];
+    dictionaryProfileRevisions?: Record<string, string>;
+    dictionaryWritableProfile?: string;
+    dictionaryWarningCount?: number;
+    dictionaryWarnings?: DictionaryDiagnostic[];
     recovered?: boolean;
     revision?: number; // PC音声の範囲補正。大きい番号だけを適用して古い応答を無視する
     level?: number;
@@ -185,6 +208,14 @@ export class AsrSocket {
                         inputSampleRate: msg.inputSampleRate,
                         channels: msg.channels,
                         autoStopSec: msg.autoStopSec,
+                        dictionarySetId: msg.dictionarySetId ?? "default",
+                        dictionarySetName: msg.dictionarySetName ?? "共通",
+                        dictionaryRevision: msg.dictionaryRevision ?? "",
+                        dictionaryProfiles: msg.dictionaryProfiles ?? ["common"],
+                        dictionaryProfileRevisions: msg.dictionaryProfileRevisions ?? {},
+                        dictionaryWritableProfile: msg.dictionaryWritableProfile ?? "common",
+                        dictionaryWarningCount: msg.dictionaryWarningCount ?? 0,
+                        dictionaryWarnings: msg.dictionaryWarnings ?? [],
                     });
                 }
                 break;
@@ -225,7 +256,8 @@ export class AsrSocket {
         stripSpace: boolean,
         symbols: boolean,
         mode: AsrMode = "dictation",
-        source: AsrSource = "microphone"
+        source: AsrSource = "microphone",
+        dictionarySetId = "default"
     ): Promise<StartResult> {
         if (!this.connected) return Promise.reject(new Error("サーバーに接続されていません"));
         this.rejectStart("別の開始要求に置き換えられました");
@@ -236,7 +268,7 @@ export class AsrSocket {
                 reject(new Error("音声入力の開始がタイムアウトしました"));
             }, 15000);
             this.pendingStart = { resolve, reject, timer };
-            this.send({ type: "start", stripSpace, symbols, mode, source });
+            this.send({ type: "start", stripSpace, symbols, mode, source, dictionarySetId });
         });
     }
 

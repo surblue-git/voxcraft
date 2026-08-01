@@ -2,10 +2,10 @@ name: Release Obsidian plugin
 
 # バージョンタグ（例: 0.2.0）を push すると:
 #   1. プラグインをビルド
-#   2. main.js / manifest.json / styles.css をリポジトリのルートへ同期してコミット
-#      （BRAT はルートの manifest.json でプラグインを認識・バージョン判定する）
-#   3. 同じ3ファイルを添付したリリースを作成（BRAT はリリース資産をDLする）
-# ルートとリリースの両方を最新に保つことで、BRAT のどの参照経路でも更新が届く。
+#   2. タグと manifest.json のバージョン一致を検証
+#   3. main.js / manifest.json / styles.css を添付したリリースを作成
+# BRAT 1.1+ は GitHub Release の資産を正として取得する。タグのコミットそのものを
+# ビルドするため、main 以外の検証ブランチから切ったプレリリースにも対応する。
 
 on:
   push:
@@ -20,8 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: main
 
       - uses: actions/setup-node@v4
         with:
@@ -32,27 +30,32 @@ jobs:
         env:
           OBSIDIAN_PLUGIN_DIR: dist
         run: |
-          npm install
+          npm ci
           npm run build
 
-      - name: Sync root files for BRAT
+      - name: Verify release version
+        shell: bash
         run: |
-          cp plugin/dist/main.js plugin/dist/manifest.json plugin/dist/styles.css .
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add main.js manifest.json styles.css
-          git commit -m "chore: sync root plugin files for ${GITHUB_REF_NAME}" || echo "no changes to commit"
-          git push origin HEAD:main
+          VERSION=$(node -p "require('./plugin/dist/manifest.json').version")
+          test "$VERSION" = "$GITHUB_REF_NAME" || {
+            echo "tag ($GITHUB_REF_NAME) and manifest version ($VERSION) differ"
+            exit 1
+          }
 
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
+          FLAGS=(--notes "自動ビルド ($TAG)。BRAT でインストール／更新できます。")
+          if [[ "$TAG" == *-* ]]; then
+            FLAGS+=(--prerelease)
+          else
+            FLAGS+=(--latest)
+          fi
           gh release create "$TAG" \
             plugin/dist/main.js \
             plugin/dist/manifest.json \
             plugin/dist/styles.css \
             --title "VoxCraft $TAG" \
-            --notes "自動ビルド ($TAG)。BRAT でインストール／更新できます。" \
-            --latest
+            "${FLAGS[@]}"

@@ -602,7 +602,7 @@ def build_report(
     cands = vocab_candidates(ref_raw, top)
     A(" / ".join(f"{w}({c})" for w, c in cands) or "（該当なし）")
     A("")
-    A("誤った表記が上位にあれば `userdict.json` の replacements に1行足すだけで全体が直る。")
+    A("誤った表記が上位にあれば `dictionaries/profiles/common.json` の entries に足すだけで全体が直る。")
     A("**同じ語が2通りの綴りで並んでいたら要注意**（実測: 「リキット14/リキッド14」＝"
       "社名が半々で割れていた）。この節が最も確実に成果につながる。")
     A("")
@@ -614,7 +614,7 @@ def build_report(
     A("|---|---|")
     A("| C に中身のある発話が並ぶ | `AsrOptions.transcription()` の閾値を緩める（asr.py） |")
     A("| A の「脱落」が境界に集中 | `VOXCRAFT_SILENCE_SEC` / `MAX_CHUNK_SEC` / `SPEECH_PAD_SEC` |")
-    A("| A の「相違」が固有名詞 | `userdict.json` の replacements |")
+    A("| A の「相違」が固有名詞 | `dictionaries/profiles/common.json` の entries |")
     A("| B・D に専門用語の誤り | `VOXCRAFT_INITIAL_PROMPT` に語彙を足す |")
     A("| 全体的に苦しい | `VOXCRAFT_MODEL=large-v3` 等へ差し替えて再測定 |")
     A("| B の直後反復が多い | 蒸留モデル(kotoba)の長尺での弱点。`large-v3` で再測定して比較 |")

@@ -40,15 +40,100 @@ export interface ReconvertPayload {
     reading: string;
     segments: { reading: string; candidates: string[] }[];
     online: boolean;
+    dictionarySetId?: string;
+    dictionaryRevision?: string;
+    dictionaryProfileRevisions?: Record<string, string>;
+    dictionaryWritableProfile?: string;
+}
+
+export interface DictionaryDiagnostic {
+    severity: "warning" | "error";
+    code: string;
+    message: string;
+    entry?: number;
+}
+
+export interface DictionaryProfileSummary {
+    id: string;
+    name: string;
+    description?: string;
+    entries: number;
+    enabledEntries: number;
+    valid: boolean;
+    diagnostics: DictionaryDiagnostic[];
+}
+
+export interface DictionarySetSummary {
+    id: string;
+    name: string;
+    description?: string;
+    profiles: string[];
+    writableProfile?: string;
+    valid: boolean;
+    revision?: string | null;
+    profileRevisions: Record<string, string>;
+    diagnostics: DictionaryDiagnostic[];
+}
+
+export interface DictionaryCatalog {
+    schemaVersion: number;
+    profiles: DictionaryProfileSummary[];
+    sets: DictionarySetSummary[];
+}
+
+export interface DictionaryEntryResult {
+    ok: boolean;
+    created: boolean;
+    profileId: string;
+    revision: string;
+}
+
+function errorDetail(res: { status: number; json?: unknown }): string {
+    const detail = (res.json as { detail?: string | { message?: string } } | undefined)?.detail;
+    if (typeof detail === "string") return detail;
+    if (detail && typeof detail.message === "string") return detail.message;
+    return `HTTP ${res.status}`;
+}
+
+export async function fetchDictionaryCatalog(wsUrl: string): Promise<DictionaryCatalog> {
+    const res = await requestUrl({
+        url: `${httpBase(wsUrl)}/dictionaries`,
+        method: "GET",
+        throw: false,
+    });
+    if (res.status >= 400) throw new Error(errorDetail(res));
+    return res.json as DictionaryCatalog;
+}
+
+export async function addDictionaryEntry(
+    wsUrl: string,
+    profileId: string,
+    observed: string,
+    output: string,
+    expectedRevision?: string
+): Promise<DictionaryEntryResult> {
+    const res = await requestUrl({
+        url: `${httpBase(wsUrl)}/dictionaries/${encodeURIComponent(profileId)}/entries`,
+        method: "POST",
+        contentType: "application/json",
+        body: JSON.stringify({ observed, output, expectedRevision }),
+        throw: false,
+    });
+    if (res.status >= 400) throw new Error(errorDetail(res));
+    return res.json as DictionaryEntryResult;
 }
 
 // テキストの再変換候補を REST で取得する（WS 接続不要。録音外でも使える）。
-export async function fetchReconvert(wsUrl: string, text: string): Promise<ReconvertPayload> {
+export async function fetchReconvert(
+    wsUrl: string,
+    text: string,
+    dictionarySetId = "default"
+): Promise<ReconvertPayload> {
     const res = await requestUrl({
         url: `${httpBase(wsUrl)}/reconvert`,
         method: "POST",
         contentType: "application/json",
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, dictionarySetId }),
         throw: false,
     });
     if (res.status >= 400) {
@@ -74,6 +159,116 @@ export async function saveDict(wsUrl: string, data: DictData): Promise<void> {
     if (res.status >= 400) {
         const detail = (res.json && (res.json as { detail?: string }).detail) || `HTTP ${res.status}`;
         throw new Error(detail);
+    }
+}
+
+export class DictionarySetModal extends Modal {
+    constructor(
+        app: App,
+        private wsUrl: string,
+        private currentId: string,
+        private onSelect: (setId: string) => Promise<void>
+    ) {
+        super(app);
+    }
+
+    async onOpen(): Promise<void> {
+        this.titleEl.setText("VoxCraft 辞書セットを選択");
+        const status = this.contentEl.createEl("p", {
+            text: "辞書一覧を読み込み中…",
+            cls: "setting-item-description",
+        });
+        status.setAttribute("aria-live", "polite");
+        try {
+            const catalog = await fetchDictionaryCatalog(this.wsUrl);
+            const sets = catalog.sets.filter((item) => item.valid);
+            if (sets.length === 0) throw new Error("利用できる辞書セットがありません");
+            status.setText("この接続先で、次回の録音・再変換・音声復旧に使う辞書を選びます。");
+            let selected = sets.some((item) => item.id === this.currentId)
+                ? this.currentId
+                : sets[0].id;
+            const detail = this.contentEl.createEl("p", { cls: "setting-item-description" });
+            const renderDetail = () => {
+                const set = sets.find((item) => item.id === selected)!;
+                detail.setText(
+                    `${set.description || set.name} / 構成: ${set.profiles.join(" + ")} / ` +
+                    `登録先: ${set.writableProfile || set.profiles[set.profiles.length - 1]}`
+                );
+            };
+            new Setting(this.contentEl)
+                .setName("辞書セット")
+                .addDropdown((dropdown) => {
+                    for (const item of sets) dropdown.addOption(item.id, item.name);
+                    dropdown.setValue(selected).onChange((value) => {
+                        selected = value;
+                        renderDetail();
+                    });
+                });
+            renderDetail();
+            new Setting(this.contentEl)
+                .addButton((button) => button.setButtonText("適用").setCta().onClick(async () => {
+                    await this.onSelect(selected);
+                    this.close();
+                }))
+                .addButton((button) => button.setButtonText("キャンセル").onClick(() => this.close()));
+        } catch (error) {
+            status.setText(`辞書一覧を取得できませんでした: ${error instanceof Error ? error.message : error}`);
+        }
+    }
+}
+
+export class QuickAddDictionaryModal extends Modal {
+    constructor(
+        app: App,
+        private observedInitial: string,
+        private targetLabel: string,
+        private onSubmit: (observed: string, output: string) => Promise<void>
+    ) {
+        super(app);
+    }
+
+    onOpen(): void {
+        this.titleEl.setText("VoxCraft 辞書へ追加");
+        this.contentEl.createEl("p", {
+            text: `登録先: ${this.targetLabel}。Whisperが実際に出した表記を、望む表記へ置換します。`,
+            cls: "setting-item-description",
+        });
+        let observed = this.observedInitial;
+        let output = "";
+        new Setting(this.contentEl)
+            .setName("誤認識した表記")
+            .setDesc("ノートに出力された文字をそのまま指定")
+            .addText((text) => text.setValue(observed).onChange((value) => { observed = value; }));
+        new Setting(this.contentEl)
+            .setName("正しい表記")
+            .setDesc("今後、自動的に置き換える文字")
+            .addText((text) => {
+                text.setPlaceholder("正しい表記").onChange((value) => { output = value; });
+                window.setTimeout(() => text.inputEl.focus(), 0);
+            });
+        const status = this.contentEl.createEl("p", { cls: "setting-item-description" });
+        status.setAttribute("aria-live", "polite");
+        new Setting(this.contentEl)
+            .addButton((button) => button.setButtonText("登録").setCta().onClick(async () => {
+                const from = observed.trim();
+                const to = output.trim();
+                if (!from || !to) {
+                    status.setText("誤認識した表記と正しい表記を入力してください。");
+                    return;
+                }
+                if (from === to) {
+                    status.setText("変換前と変換後が同じです。");
+                    return;
+                }
+                status.setText("登録中…");
+                try {
+                    await this.onSubmit(from, to);
+                    this.close();
+                } catch (error) {
+                    status.setText(error instanceof Error ? error.message : String(error));
+                }
+            }))
+            .addButton((button) => button.setButtonText("キャンセル").onClick(() => this.close()));
     }
 }
 
