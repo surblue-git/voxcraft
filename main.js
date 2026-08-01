@@ -231,7 +231,8 @@ function floatToPcm16(input) {
 
 // commands.ts
 var STOP = ["\u5165\u529B\u7D42\u4E86", "\u97F3\u58F0\u5165\u529B\u7D42\u4E86", "\u7D42\u4E86", "\u30B9\u30C8\u30C3\u30D7"];
-var UNDO = ["\u53D6\u308A\u6D88\u3057", "\u53D6\u6D88", "\u4E00\u6587\u524A\u9664", "\u4ECA\u306E\u3092\u524A\u9664", "\u5143\u306B\u623B\u3057\u3066"];
+var INPUT_CANCEL = ["\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB", "\u76F4\u524D\u5165\u529B\u3092\u30AD\u30E3\u30F3\u30BB\u30EB", "\u4ECA\u306E\u5165\u529B\u3092\u30AD\u30E3\u30F3\u30BB\u30EB"];
+var INPUT_RESTORE = ["\u5165\u529B\u5FA9\u5143", "\u5165\u529B\u3092\u5FA9\u5143", "\u30AD\u30E3\u30F3\u30BB\u30EB\u3092\u623B\u3059"];
 var NEWLINE = ["\u6539\u884C", "\u6B21\u306E\u884C"];
 var RECONVERT = ["\u5909\u63DB\u623B\u3057", "\u5909\u63DB\u3057\u76F4\u3057", "\u5909\u63DB\u3084\u308A\u76F4\u3057", "\u518D\u5909\u63DB"];
 var RESPEAK = [
@@ -338,8 +339,10 @@ function parseCommand(rawText, prefix = "") {
   }
   if (STOP.includes(text))
     return { kind: "stop" };
-  if (UNDO.includes(text))
-    return { kind: "undo" };
+  if (INPUT_CANCEL.includes(text))
+    return { kind: "cancelInput" };
+  if (INPUT_RESTORE.includes(text))
+    return { kind: "restoreInput" };
   if (NEWLINE.includes(text))
     return { kind: "newline" };
   if (RECONVERT.includes(text))
@@ -608,6 +611,12 @@ var ReconvertModal = class extends import_obsidian2.Modal {
     const { contentEl } = this;
     contentEl.addClass("voxcraft-reconvert");
     contentEl.createEl("h3", { text: "\u5909\u63DB\u623B\u3057 \u2014 \u5019\u88DC\u3092\u9078\u629E" });
+    if (this.opts.locationLabel) {
+      contentEl.createEl("p", {
+        cls: "voxcraft-hint",
+        text: this.opts.locationLabel
+      });
+    }
     contentEl.createEl("p", {
       cls: "voxcraft-hint",
       text: "\u30AF\u30EA\u30C3\u30AF / \u6570\u5B57\u30AD\u30FC / \u97F3\u58F0\u300C3\u756A\u300D\u3067\u9078\u629E\u3002\u6587\u7BC0\u306FTab\u3067\u79FB\u52D5\u3002Enter \u307E\u305F\u306F\u97F3\u58F0\u300C\u78BA\u5B9A\u300D\u3067\u78BA\u5B9A\u3001Esc \u307E\u305F\u306F\u300C\u30AD\u30E3\u30F3\u30BB\u30EB\u300D\u3067\u9589\u3058\u308B\uFF08\u958B\u3044\u3066\u3044\u308B\u9593\u306F\u767A\u8A71\u304C\u672C\u6587\u306B\u5165\u308A\u307E\u305B\u3093\uFF09\u3002"
@@ -635,6 +644,15 @@ var ReconvertModal = class extends import_obsidian2.Modal {
     if (this.opts.onRegister && this.opts.originalText) {
       buttons.addButton(
         (b) => b.setButtonText("\u78BA\u5B9A\u3057\u3066\u8F9E\u66F8\u306B\u767B\u9332").setTooltip("\u4EE5\u5F8C\u3001\u540C\u3058\u8AA4\u5909\u63DB\u3092\u81EA\u52D5\u3067\u4FEE\u6B63\u3059\u308B").onClick(() => this.submit(true))
+      );
+    }
+    if (this.opts.onSkip) {
+      buttons.addButton(
+        (b) => b.setButtonText("\u3053\u306E\u7B87\u6240\u3092\u30B9\u30AD\u30C3\u30D7").setTooltip("\u5909\u66F4\u305B\u305A\u3001\u6B21\u306E\u540C\u3058\u518D\u5909\u63DB\u3067\u306F\u4E00\u3064\u524D\u306E\u4E00\u81F4\u3092\u63A2\u3059").onClick(() => {
+          var _a, _b;
+          this.close();
+          (_b = (_a = this.opts).onSkip) == null ? void 0 : _b.call(_a);
+        })
       );
     }
     buttons.addButton((b) => b.setButtonText("\u30AD\u30E3\u30F3\u30BB\u30EB").onClick(() => this.close()));
@@ -893,7 +911,7 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     new import_obsidian3.Setting(containerEl).setName("\u9332\u97F3\u4E2D\u306B\u64CD\u4F5C\u30C4\u30FC\u30EB\u30D0\u30FC\u3092\u8868\u793A").setDesc(
-      "\u97F3\u58F0\u5165\u529B\uFF08\u53E3\u8FF0\uFF09\u4E2D\u3001\u753B\u9762\u4E0B\u90E8\u306B\u30DE\u30A4\u30AF\u30FB\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\u30FB\u5143\u306B\u623B\u3059\u30FB\u53E5\u8AAD\u70B9\u30FB\u8F9E\u66F8\u306A\u3069\u306E\u30DC\u30BF\u30F3\u3092\u8868\u793A\u3059\u308B\u3002\u30E2\u30D0\u30A4\u30EB\u3067\u7279\u306B\u4FBF\u5229\u3002\u6587\u5B57\u8D77\u3053\u3057\u30E2\u30FC\u30C9\u3067\u306F\u8868\u793A\u3057\u306A\u3044\u3002"
+      "\u97F3\u58F0\u5165\u529B\uFF08\u53E3\u8FF0\uFF09\u4E2D\u3001\u753B\u9762\u4E0B\u90E8\u306B\u30DE\u30A4\u30AF\u30FB\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\u30FB\u5165\u529B\u5FA9\u5143\u30FB\u53E5\u8AAD\u70B9\u30FB\u8F9E\u66F8\u306A\u3069\u306E\u30DC\u30BF\u30F3\u3092\u8868\u793A\u3059\u308B\u3002\u30E2\u30D0\u30A4\u30EB\u3067\u7279\u306B\u4FBF\u5229\u3002\u6587\u5B57\u8D77\u3053\u3057\u30E2\u30FC\u30C9\u3067\u306F\u8868\u793A\u3057\u306A\u3044\u3002"
     ).addToggle(
       (t) => t.setValue(this.plugin.settings.showToolbar).onChange(async (v) => {
         this.plugin.settings.showToolbar = v;
@@ -920,7 +938,7 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
       );
     }
     new import_obsidian3.Setting(containerEl).setName("\u97F3\u58F0\u30B3\u30DE\u30F3\u30C9\u3092\u6709\u52B9\u5316").setDesc(
-      "\u300C\u53D6\u308A\u6D88\u3057\u300D\u300C\u5909\u63DB\u623B\u3057\u300D\u300CA\u3092B\u306B\u4FEE\u6B63\u300D\u300CA\u3092\u518D\u5909\u63DB\u300D\u300C\u3053\u3053\u3092\u8A00\u3044\u76F4\u3057\u300D\u300C\u5165\u529B\u7D42\u4E86\u300D\u7B49\u3092\u8A8D\u8B58\u3059\u308B\u3002"
+      "\u300C\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\u300D\u300C\u5165\u529B\u5FA9\u5143\u300D\u300C\u5909\u63DB\u623B\u3057\u300D\u300CA\u3092B\u306B\u4FEE\u6B63\u300D\u300CA\u3092\u518D\u5909\u63DB\u300D\u300C\u3053\u3053\u3092\u8A00\u3044\u76F4\u3057\u300D\u300C\u5165\u529B\u7D42\u4E86\u300D\u7B49\u3092\u8A8D\u8B58\u3059\u308B\u3002"
     ).addToggle(
       (t) => t.setValue(this.plugin.settings.enableCommands).onChange(async (v) => {
         this.plugin.settings.enableCommands = v;
@@ -1212,6 +1230,7 @@ var AsrSocket = class {
     this.ws = null;
     // レースで採用した URL（どの接続先が使われたかの表示に使う）。
     this.activeUrl = null;
+    this.pendingStart = null;
     this.urls = (Array.isArray(urls) ? urls : [urls]).map((u) => u.trim()).filter(Boolean);
     this.handlers = handlers;
   }
@@ -1284,6 +1303,7 @@ var AsrSocket = class {
     ws.onerror = null;
     ws.onclose = () => {
       var _a, _b;
+      this.rejectStart("\u63A5\u7D9A\u304C\u5207\u308C\u307E\u3057\u305F");
       (_b = (_a = this.handlers).onClose) == null ? void 0 : _b.call(_a);
     };
     ws.onmessage = (ev) => {
@@ -1299,26 +1319,50 @@ var AsrSocket = class {
     };
   }
   dispatch(msg) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q;
     switch (msg.type) {
       case "ready":
         (_b = (_a = this.handlers).onReady) == null ? void 0 : _b.call(_a);
         break;
+      case "started": {
+        const pending = this.pendingStart;
+        if (pending) {
+          window.clearTimeout(pending.timer);
+          this.pendingStart = null;
+          pending.resolve({
+            source: (_c = msg.source) != null ? _c : "microphone",
+            device: msg.device,
+            inputSampleRate: msg.inputSampleRate,
+            channels: msg.channels,
+            autoStopSec: msg.autoStopSec
+          });
+        }
+        break;
+      }
       case "partial":
-        (_d = (_c = this.handlers).onPartial) == null ? void 0 : _d.call(_c);
+        (_e = (_d = this.handlers).onPartial) == null ? void 0 : _e.call(_d);
         break;
       case "chunk":
-        (_f = (_e = this.handlers).onChunk) == null ? void 0 : _f.call(_e, msg.text || "", msg);
+        (_g = (_f = this.handlers).onChunk) == null ? void 0 : _g.call(_f, msg.text || "", msg);
         break;
       case "session":
         if (msg.session)
-          (_h = (_g = this.handlers).onSession) == null ? void 0 : _h.call(_g, msg.session);
+          (_i = (_h = this.handlers).onSession) == null ? void 0 : _i.call(_h, msg.session);
         break;
       case "reconvert":
-        (_j = (_i = this.handlers).onReconvert) == null ? void 0 : _j.call(_i, msg);
+        (_k = (_j = this.handlers).onReconvert) == null ? void 0 : _k.call(_j, msg);
+        break;
+      case "stopped":
+        (_m = (_l = this.handlers).onStopped) == null ? void 0 : _m.call(_l, msg.reason);
+        break;
+      case "level":
+        if (typeof msg.level === "number")
+          (_o = (_n = this.handlers).onLevel) == null ? void 0 : _o.call(_n, msg.level);
         break;
       case "error":
-        (_l = (_k = this.handlers).onError) == null ? void 0 : _l.call(_k, msg.message || "unknown error");
+        if (msg.fatal)
+          this.rejectStart(msg.message || "PC\u97F3\u58F0\u5165\u529B\u3092\u958B\u59CB\u3067\u304D\u307E\u305B\u3093");
+        (_q = (_p = this.handlers).onError) == null ? void 0 : _q.call(_p, msg.message || "unknown error", Boolean(msg.fatal));
         break;
     }
   }
@@ -1326,8 +1370,20 @@ var AsrSocket = class {
     if (this.connected)
       this.ws.send(pcm16);
   }
-  sendStart(stripSpace, symbols, mode = "dictation") {
-    this.send({ type: "start", stripSpace, symbols, mode });
+  sendStart(stripSpace, symbols, mode = "dictation", source = "microphone") {
+    if (!this.connected)
+      return Promise.reject(new Error("\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093"));
+    this.rejectStart("\u5225\u306E\u958B\u59CB\u8981\u6C42\u306B\u7F6E\u304D\u63DB\u3048\u3089\u308C\u307E\u3057\u305F");
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        if (!this.pendingStart)
+          return;
+        this.pendingStart = null;
+        reject(new Error("\u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB\u304C\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F"));
+      }, 15e3);
+      this.pendingStart = { resolve, reject, timer };
+      this.send({ type: "start", stripSpace, symbols, mode, source });
+    });
   }
   sendStop() {
     this.send({ type: "stop" });
@@ -1344,6 +1400,7 @@ var AsrSocket = class {
       this.ws.send(JSON.stringify(obj));
   }
   close() {
+    this.rejectStart("\u63A5\u7D9A\u3092\u9589\u3058\u307E\u3057\u305F");
     if (this.ws) {
       this.ws.onclose = null;
       try {
@@ -1352,6 +1409,14 @@ var AsrSocket = class {
       }
       this.ws = null;
     }
+  }
+  rejectStart(message) {
+    const pending = this.pendingStart;
+    if (!pending)
+      return;
+    window.clearTimeout(pending.timer);
+    this.pendingStart = null;
+    pending.reject(new Error(message));
   }
 };
 
@@ -1465,8 +1530,8 @@ var DictationToolbar = class {
     bar.addEventListener("pointerdown", (e) => e.preventDefault());
     this.micBtn = this.iconBtn(bar, "mic", "\u97F3\u58F0\u5165\u529B\u306E\u30AA\u30F3/\u30AA\u30D5", () => this.cb.onMicToggle());
     this.micBtn.addClass("voxcraft-tb-mic");
-    this.iconBtn(bar, "delete", "\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\uFF08\u76F4\u524D\u306E\u4E00\u6587\u3092\u524A\u9664\uFF09", () => this.cb.onCancel());
-    this.iconBtn(bar, "undo-2", "\u5143\u306B\u623B\u3059\uFF08\u30AD\u30E3\u30F3\u30BB\u30EB\u3057\u305F\u6587\u3092\u518D\u633F\u5165\uFF09", () => this.cb.onRestore());
+    this.iconBtn(bar, "delete", "\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\uFF08\u76F4\u524D\u306E\u4E00\u6587\u3092\u524A\u9664\uFF0F\u97F3\u58F0\u300C\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\u300D\uFF09", () => this.cb.onCancel());
+    this.iconBtn(bar, "undo-2", "\u5165\u529B\u5FA9\u5143\uFF08\u30AD\u30E3\u30F3\u30BB\u30EB\u3057\u305F\u6587\u3092\u518D\u633F\u5165\uFF0F\u97F3\u58F0\u300C\u5165\u529B\u5FA9\u5143\u300D\uFF09", () => this.cb.onRestore());
     this.textBtn(bar, "\u3001", "\u8AAD\u70B9\u3092\u633F\u5165", () => this.cb.onInsert("\u3001"));
     this.textBtn(bar, "\u3002", "\u53E5\u70B9\u3092\u633F\u5165", () => this.cb.onInsert("\u3002"));
     this.iconBtn(bar, "corner-down-left", "\u6539\u884C\u3092\u633F\u5165", () => this.cb.onInsert("\n"));
@@ -1669,6 +1734,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.socket = null;
     this.recorder = null;
     this.recording = false;
+    this.starting = false;
+    this.stopping = false;
     // 口述対象として録音開始時に固定するエディタ（背面作業やノート切替の影響を受けない）。
     this.cm = null;
     // アンカーに追記したチャンク列（取り消し・変換戻しの対象特定に使う。アンカー相対）。
@@ -1676,11 +1743,13 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     // 変換戻しの応答が返るまで対象範囲を覚えておく。
     this.pendingReconvert = null;
     this.reconvertModal = null;
+    // 同じ「Aを再変換」を繰り返したとき、直前に処理した箇所より前を探す。
+    this.reconvertTraversal = null;
     // 「ここを言い直し」で覚えた選択範囲。次の発話1回だけがこの範囲を置換する。
     this.pendingRespeak = null;
     // コマンド実行等で発話の流れが切れた直後は、次のチャンクに息継ぎ読点を打たない。
     this.suppressJoiner = true;
-    // 入力キャンセルで削除した確定チャンク。「元に戻す」で再挿入する（口述のみ）。
+    // 入力キャンセルで削除した確定チャンク。「入力復元」で再挿入する（口述のみ）。
     this.canceled = [];
     // 画面下部の操作ツールバー（口述モードの録音中に表示）。
     this.toolbar = null;
@@ -1695,6 +1764,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.menuOpenedAt = 0;
     // ---- 文字起こしモード（自分の声での口述には一切関与しない） ----
     this.mode = "dictation";
+    this.source = "microphone";
+    this.sourceDevice = "";
+    this.autoStopSec = 0;
     // サーバーが音声を保存しているセッションID。復旧の材料。
     this.session = null;
     // 挿入したテキストと、その元になった音声の位置（秒）。再認識の宛先を引くのに使う。
@@ -1756,6 +1828,22 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       }
     });
     this.addCommand({
+      id: "toggle-system-transcribe",
+      name: "PC\u97F3\u58F0\u306E\u6587\u5B57\u8D77\u3053\u3057\u3092\u958B\u59CB/\u505C\u6B62",
+      icon: "monitor-speaker",
+      checkCallback: (checking) => {
+        if (import_obsidian7.Platform.isMobile)
+          return false;
+        if (!checking) {
+          if (this.recording)
+            this.stopRecording();
+          else
+            void this.startRecording("transcribe", "system");
+        }
+        return true;
+      }
+    });
+    this.addCommand({
       id: "cancel-last-input",
       name: "\u76F4\u524D\u306E\u5165\u529B\u3092\u30AD\u30E3\u30F3\u30BB\u30EB\uFF08\u4E00\u6587\u524A\u9664\uFF09",
       icon: "eraser",
@@ -1763,7 +1851,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     });
     this.addCommand({
       id: "restore-canceled-input",
-      name: "\u30AD\u30E3\u30F3\u30BB\u30EB\u3057\u305F\u5165\u529B\u3092\u5143\u306B\u623B\u3059",
+      name: "\u30AD\u30E3\u30F3\u30BB\u30EB\u3057\u305F\u5165\u529B\u3092\u5FA9\u5143",
       icon: "rotate-ccw",
       callback: () => this.restoreCanceled()
     });
@@ -1821,8 +1909,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     else
       void this.startRecording();
   }
-  async startRecording(mode = "dictation") {
-    if (this.recording)
+  async startRecording(mode = "dictation", source = "microphone") {
+    var _a, _b;
+    if (this.recording || this.starting || this.stopping)
       return;
     const cm = this.getActiveCm();
     if (!cm) {
@@ -1834,13 +1923,20 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A\u3067\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u3092\u8FFD\u52A0\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
+    this.starting = true;
+    this.mode = mode;
+    this.source = source;
+    this.sourceDevice = "";
+    this.autoStopSec = 0;
+    this.stopping = false;
     this.setStatus(urls.length > 1 ? "\u63A5\u7D9A\u4E2D\u2026\uFF08\u3064\u306A\u304C\u308B\u65B9\u3092\u9078\u629E\uFF09" : "\u63A5\u7D9A\u4E2D\u2026");
     this.socket = new AsrSocket(urls, {
       onReady: () => {
-        var _a;
-        const url = (_a = this.socket) == null ? void 0 : _a.activeUrl;
+        var _a2;
+        const url = (_a2 = this.socket) == null ? void 0 : _a2.activeUrl;
         const label = url ? labelForUrl(this.settings, url) : "";
-        this.setStatus(label ? `\u5F85\u6A5F\u4E2D\u2026 \u8A71\u3057\u3066\u304F\u3060\u3055\u3044\uFF08${label}\uFF09` : "\u5F85\u6A5F\u4E2D\u2026 \u8A71\u3057\u3066\u304F\u3060\u3055\u3044");
+        const preparing = source === "system" ? "PC\u97F3\u58F0\u3092\u6E96\u5099\u4E2D\u2026" : "\u5F85\u6A5F\u4E2D\u2026 \u8A71\u3057\u3066\u304F\u3060\u3055\u3044";
+        this.setStatus(label ? `${preparing}\uFF08${label}\uFF09` : preparing);
       },
       onPartial: () => {
         this.transcribing = true;
@@ -1853,10 +1949,18 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         this.transcribing = false;
         this.handleChunk(text, msg);
       },
+      onLevel: (level) => this.showLevel(level),
+      onStopped: (reason) => this.handleServerStopped(reason),
       onReconvert: (msg) => this.handleReconvert(msg),
-      onError: (m) => new import_obsidian7.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`),
+      onError: (m, fatal) => {
+        if (!this.recording)
+          return;
+        new import_obsidian7.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`);
+        if (fatal && this.source === "system")
+          this.stopRecording();
+      },
       onClose: () => {
-        if (this.recording) {
+        if (this.recording || this.stopping) {
           new import_obsidian7.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u63A5\u7D9A\u304C\u5207\u308C\u307E\u3057\u305F\u3002");
           void this.teardownSession();
           this.setStatus("\u505C\u6B62\u4E2D");
@@ -1871,37 +1975,53 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         `VoxCraft: \u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093\uFF08${tried}\uFF09\u3002\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u308B\u304B\u3001\u63A5\u7D9A\u5148\u306E\u8A2D\u5B9A\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
       );
       this.socket = null;
+      this.starting = false;
       this.setStatus("\u505C\u6B62\u4E2D");
       return;
     }
-    this.mode = mode;
-    this.socket.sendStart(
-      this.settings.stripJaAlnumSpace,
-      this.settings.symbolDictation,
-      mode
-    );
-    this.recorder = new MicRecorder(
-      (pcm) => {
-        var _a;
-        return (_a = this.socket) == null ? void 0 : _a.sendAudio(pcm);
-      },
-      (level) => this.showLevel(level),
-      // 文字起こしは自分の声ではなく会場や再生音を拾う。ブラウザの前処理は
-      // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
-      mode === "transcribe" ? RAW_MIC : DICTATION_MIC
-    );
-    this.recorder.onStalled = () => this.reportStall();
-    this.recorder.onGap = (sec) => this.reportGap(sec);
     try {
-      await this.recorder.start();
+      const started = await this.socket.sendStart(
+        this.settings.stripJaAlnumSpace,
+        this.settings.symbolDictation,
+        mode,
+        source
+      );
+      this.sourceDevice = (_a = started.device) != null ? _a : "";
+      this.autoStopSec = (_b = started.autoStopSec) != null ? _b : 0;
     } catch (e) {
-      new import_obsidian7.Notice("VoxCraft: \u30DE\u30A4\u30AF\u306B\u30A2\u30AF\u30BB\u30B9\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+      new import_obsidian7.Notice(
+        `VoxCraft: ${source === "system" ? "PC\u97F3\u58F0" : "\u30DE\u30A4\u30AF"}\u3092\u958B\u59CB\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\uFF08${e instanceof Error ? e.message : e}\uFF09`
+      );
       await this.teardownSession();
       this.setStatus("\u505C\u6B62\u4E2D");
       return;
     }
+    if (source === "microphone") {
+      this.recorder = new MicRecorder(
+        (pcm) => {
+          var _a2;
+          return (_a2 = this.socket) == null ? void 0 : _a2.sendAudio(pcm);
+        },
+        (level) => this.showLevel(level),
+        // 文字起こしは自分の声ではなく会場や再生音を拾う。ブラウザの前処理は
+        // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
+        mode === "transcribe" ? RAW_MIC : DICTATION_MIC
+      );
+      this.recorder.onStalled = () => this.reportStall();
+      this.recorder.onGap = (sec) => this.reportGap(sec);
+      try {
+        await this.recorder.start();
+      } catch (e) {
+        new import_obsidian7.Notice("VoxCraft: \u30DE\u30A4\u30AF\u306B\u30A2\u30AF\u30BB\u30B9\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+        this.socket.sendStop();
+        await this.teardownSession();
+        this.setStatus("\u505C\u6B62\u4E2D");
+        return;
+      }
+    }
     this.cm = cm;
     this.chunks = [];
+    this.reconvertTraversal = null;
     this.canceled = [];
     this.pendingReconvert = null;
     this.pendingRespeak = null;
@@ -1915,8 +2035,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         void this.acquireWakeLock();
     }
     this.recording = true;
+    this.starting = false;
     this.ribbonEl.addClass("voxcraft-recording");
-    this.setStatus(mode === "transcribe" ? "\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D" : "\u25CF \u9332\u97F3\u4E2D");
+    this.setStatus(this.idleStatus());
     if (mode === "dictation")
       this.showToolbar();
     else
@@ -1924,10 +2045,11 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.refreshKeyboardSuppression(true);
   }
   stopRecording() {
-    var _a, _b, _c;
+    var _a;
     if (!this.recording)
       return;
     this.recording = false;
+    this.stopping = true;
     void this.wakeLock.release();
     this.ribbonEl.removeClass("voxcraft-recording");
     (_a = this.toolbar) == null ? void 0 : _a.setRecording(false);
@@ -1937,22 +2059,52 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       this.hideToolbar();
     this.refreshKeyboardSuppression();
     this.setStatus("\u505C\u6B62\u51E6\u7406\u4E2D\u2026");
-    (_b = this.socket) == null ? void 0 : _b.sendStop();
-    void ((_c = this.recorder) == null ? void 0 : _c.stop().then(() => {
-      this.recorder = null;
-    }));
-    window.setTimeout(() => {
-      var _a2;
-      (_a2 = this.socket) == null ? void 0 : _a2.close();
-      this.socket = null;
-      this.clearDictationAnchor();
-      this.pendingRespeak = null;
-      this.setStatus("\u505C\u6B62\u4E2D");
-    }, 1500);
+    void this.requestStop();
+  }
+  async requestStop() {
+    var _a, _b;
+    await ((_a = this.recorder) == null ? void 0 : _a.stop());
+    this.recorder = null;
+    if ((_b = this.socket) == null ? void 0 : _b.connected)
+      this.socket.sendStop();
+    else
+      this.finishStop();
+  }
+  finishStop() {
+    var _a;
+    if (!this.stopping)
+      return;
+    this.stopping = false;
+    this.transcribing = false;
+    (_a = this.socket) == null ? void 0 : _a.close();
+    this.socket = null;
+    this.clearDictationAnchor();
+    this.pendingRespeak = null;
+    this.setStatus("\u505C\u6B62\u4E2D");
+  }
+  handleServerStopped(reason) {
+    var _a;
+    if (reason === "silence" && this.recording) {
+      this.recording = false;
+      this.stopping = true;
+      this.transcribing = false;
+      void this.wakeLock.release();
+      this.ribbonEl.removeClass("voxcraft-recording");
+      (_a = this.toolbar) == null ? void 0 : _a.setRecording(false);
+      this.hideToolbar();
+      this.refreshKeyboardSuppression();
+      const minutes = Math.max(1, Math.round(this.autoStopSec / 60));
+      new import_obsidian7.Notice(
+        `VoxCraft: PC\u97F3\u58F0\u304C${minutes}\u5206\u9593\u7121\u97F3\u3060\u3063\u305F\u305F\u3081\u3001\u6587\u5B57\u8D77\u3053\u3057\u3092\u81EA\u52D5\u505C\u6B62\u3057\u307E\u3057\u305F\u3002`
+      );
+    }
+    this.finishStop();
   }
   async teardownSession() {
     var _a, _b, _c;
     this.recording = false;
+    this.starting = false;
+    this.stopping = false;
     await this.wakeLock.release();
     (_a = this.ribbonEl) == null ? void 0 : _a.removeClass("voxcraft-recording");
     this.hideToolbar();
@@ -2096,8 +2248,11 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       case "stop":
         this.stopRecording();
         return true;
-      case "undo":
-        this.undoLast();
+      case "cancelInput":
+        this.cancelLast();
+        return true;
+      case "restoreInput":
+        this.restoreCanceled();
         return true;
       case "newline":
         this.insertText("\n");
@@ -2162,6 +2317,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     }
     const at = Math.min(anchor, cm.state.doc.length);
     const follow = cm.state.selection.main.head === anchor;
+    this.reconvertTraversal = null;
     cm.dispatch({
       changes: { from: at, to: at, insert: text },
       selection: follow ? { anchor: at + text.length } : void 0,
@@ -2172,20 +2328,18 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       this.chunks.shift();
   }
   // 直前チャンク（アンカー直前の text.length 文字）を削除する。
-  // 音声「取り消し」（silent）とツールバー/コマンドの「入力キャンセル」の共通実装。
+  // 音声・ツールバー・コマンドパレットの「入力キャンセル」の共通実装。
   // 削除した文は canceled に積み、「元に戻す」で再挿入できる。文字起こしでは動かない
   // （動画側の本文を勝手に消さない）。
-  cancelLast(opts = {}) {
+  cancelLast() {
     if (this.mode === "transcribe" && this.recording) {
-      if (!opts.silent)
-        new import_obsidian7.Notice("VoxCraft: \u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\u306F\u6587\u5B57\u8D77\u3053\u3057\u3067\u306F\u4F7F\u3048\u307E\u305B\u3093\u3002");
+      new import_obsidian7.Notice("VoxCraft: \u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\u306F\u6587\u5B57\u8D77\u3053\u3057\u3067\u306F\u4F7F\u3048\u307E\u305B\u3093\u3002");
       return;
     }
     const cm = this.cm;
     const last = this.chunks[this.chunks.length - 1];
     if (!cm || !cm.dom.isConnected || last === void 0) {
-      if (!opts.silent)
-        new import_obsidian7.Notice("VoxCraft: \u30AD\u30E3\u30F3\u30BB\u30EB\u3067\u304D\u308B\u5165\u529B\u304C\u3042\u308A\u307E\u305B\u3093\uFF08\u97F3\u58F0\u5165\u529B\u4E2D\u306B\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\uFF09\u3002");
+      new import_obsidian7.Notice("VoxCraft: \u30AD\u30E3\u30F3\u30BB\u30EB\u3067\u304D\u308B\u5165\u529B\u304C\u3042\u308A\u307E\u305B\u3093\uFF08\u97F3\u58F0\u5165\u529B\u4E2D\u306B\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\uFF09\u3002");
       return;
     }
     const anchor = getAnchor(cm);
@@ -2203,20 +2357,15 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     if (this.canceled.length > 50)
       this.canceled.shift();
     this.suppressJoiner = true;
-    if (!opts.silent) {
-      const t = last.trim();
-      const preview = t.length > 20 ? t.slice(0, 20) + "\u2026" : t;
-      new import_obsidian7.Notice(`VoxCraft: \u30AD\u30E3\u30F3\u30BB\u30EB\u3057\u307E\u3057\u305F \u2014\u300C${preview}\u300D\uFF08\u300C\u5143\u306B\u623B\u3059\u300D\u3067\u5FA9\u6D3B\uFF09`);
-    }
+    const t = last.trim();
+    const preview = t.length > 20 ? t.slice(0, 20) + "\u2026" : t;
+    new import_obsidian7.Notice(`VoxCraft: \u30AD\u30E3\u30F3\u30BB\u30EB\u3057\u307E\u3057\u305F \u2014\u300C${preview}\u300D\uFF08\u300C\u5165\u529B\u5FA9\u5143\u300D\u3067\u5FA9\u6D3B\uFF09`);
   }
-  undoLast() {
-    this.cancelLast({ silent: true });
-  }
-  // 「元に戻す」: 入力キャンセルで消した文を、アンカー位置に再挿入する。
+  // 「入力復元」/「元に戻す」: 入力キャンセルで消した文をアンカー位置に再挿入する。
   restoreCanceled() {
     const text = this.canceled[this.canceled.length - 1];
     if (text === void 0) {
-      new import_obsidian7.Notice("VoxCraft: \u5143\u306B\u623B\u305B\u308B\u5165\u529B\u304C\u3042\u308A\u307E\u305B\u3093\u3002");
+      new import_obsidian7.Notice("VoxCraft: \u5FA9\u5143\u3067\u304D\u308B\u5165\u529B\u304C\u3042\u308A\u307E\u305B\u3093\u3002");
       return;
     }
     const cm = this.cm;
@@ -2227,6 +2376,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.canceled.pop();
     this.insertText(text);
     this.suppressJoiner = true;
+    const t = text.trim();
+    const preview = t.length > 20 ? t.slice(0, 20) + "\u2026" : t;
+    new import_obsidian7.Notice(`VoxCraft: \u5FA9\u5143\u3057\u307E\u3057\u305F \u2014\u300C${preview}\u300D`);
   }
   // ---- 画面下部の操作ツールバー（口述専用） ----
   showToolbar() {
@@ -2325,12 +2477,16 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
   idleStatus() {
     if (!this.recording)
       return "\u505C\u6B62\u4E2D";
+    if (this.source === "system") {
+      return this.sourceDevice ? `\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D\uFF08${this.sourceDevice}\uFF09` : "\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D";
+    }
     return this.mode === "transcribe" ? "\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D" : "\u25CF \u9332\u97F3\u4E2D";
   }
   // 「Aを再変換」: 誤変換でも読みは正しいことを利用する。
   // A の読みから得た変換候補（誤変換の表記もここに現れやすい）で文書を探し、
   // 見つかった箇所を候補モーダルで置き換える。
   async reconvertByTarget(target) {
+    var _a, _b;
     const cm = this.cm && this.cm.dom.isConnected ? this.cm : this.getActiveCm();
     if (!cm)
       return;
@@ -2354,18 +2510,50 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       return;
     }
     const surfaces = buildSurfaces(target, payload.segments);
-    const hit = this.findLastSurface(cm, surfaces);
+    const targetKey = target.normalize("NFKC").replace(/\s+/gu, "");
+    const previous = this.reconvertTraversal;
+    const traversal = previous && previous.targetKey === targetKey && previous.cm === cm && previous.doc === cm.state.doc ? previous : null;
+    const before = (_a = traversal == null ? void 0 : traversal.before) != null ? _a : cm.state.doc.length;
+    const hit = this.findLastSurface(cm, surfaces, before);
     if (!hit) {
-      new import_obsidian7.Notice(
-        `VoxCraft: \u300C${target}\u300D\u306B\u76F8\u5F53\u3059\u308B\u7B87\u6240\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002\u8A72\u5F53\u7B87\u6240\u3092\u9078\u629E\u3057\u3066\u300C\u9078\u629E\u7BC4\u56F2\u3092\u518D\u5909\u63DB\u300D\u3092\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\u3002`
-      );
+      if (traversal == null ? void 0 : traversal.processed) {
+        new import_obsidian7.Notice(
+          `VoxCraft: \u300C${target}\u300D\u306F\u4EE5\u524D\u306E\u4E00\u81F4\u3092${traversal.processed}\u7B87\u6240\u78BA\u8A8D\u3057\u307E\u3057\u305F\u3002\u3053\u308C\u3088\u308A\u524D\u306E\u4E00\u81F4\u306F\u3042\u308A\u307E\u305B\u3093\u3002`
+        );
+        this.reconvertTraversal = null;
+      } else {
+        new import_obsidian7.Notice(
+          `VoxCraft: \u300C${target}\u300D\u306B\u76F8\u5F53\u3059\u308B\u7B87\u6240\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002\u8A72\u5F53\u7B87\u6240\u3092\u9078\u629E\u3057\u3066\u300C\u9078\u629E\u7BC4\u56F2\u3092\u518D\u5909\u63DB\u300D\u3092\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\u3002`
+        );
+      }
       return;
     }
-    this.openReconvertModalFor(hit, cm.state.doc.sliceString(hit.from, hit.to), payload, cm);
+    const occurrence = ((_b = traversal == null ? void 0 : traversal.processed) != null ? _b : 0) + 1;
+    const advance = (range) => {
+      this.reconvertTraversal = {
+        targetKey,
+        cm,
+        before: range.from,
+        processed: occurrence,
+        doc: cm.state.doc
+      };
+    };
+    this.openReconvertModalFor(
+      hit,
+      cm.state.doc.sliceString(hit.from, hit.to),
+      payload,
+      cm,
+      {
+        locationLabel: `\u4E00\u81F4\u7B87\u6240: \u76F4\u8FD1\u304B\u3089${occurrence}\u4EF6\u76EE`,
+        onApplied: advance,
+        onSkip: () => advance(hit)
+      }
+    );
   }
   // 表記候補を「直近の口述領域 → ノート全文」の順で後方検索する。
-  findLastSurface(cm, surfaces) {
+  findLastSurface(cm, surfaces, before = cm.state.doc.length) {
     const doc = cm.state.doc.toString();
+    const searchEnd = Math.max(0, Math.min(before, doc.length));
     const searchIn = (winStart2, winEnd2, skipEcho) => {
       const win = doc.slice(winStart2, winEnd2);
       let best = null;
@@ -2388,16 +2576,16 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     };
     const anchor = getAnchor(cm);
     const winStart = anchor === null ? null : Math.max(0, Math.min(anchor, doc.length) - this.chunks.reduce((n, c) => n + c.length, 0));
-    const winEnd = anchor === null ? null : Math.min(anchor, doc.length);
+    const winEnd = anchor === null ? null : Math.min(anchor, doc.length, searchEnd);
     if (winStart !== null && winEnd !== null) {
       const hit2 = searchIn(winStart, winEnd, true);
       if (hit2)
         return hit2;
     }
-    const hit = searchIn(0, doc.length, true);
+    const hit = searchIn(0, searchEnd, true);
     if (hit)
       return hit;
-    return searchIn(0, doc.length, false);
+    return searchIn(0, searchEnd, false);
   }
   // 選択範囲の再変換: タッチ/マウスで選んだ誤変換を候補から直す。
   // REST 経由なので録音していなくても使える（外来語・英字ミスの確実な逃げ道）。
@@ -2416,6 +2604,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("VoxCraft: \u9078\u629E\u304C\u9577\u3059\u304E\u307E\u3059\uFF08200\u6587\u5B57\u307E\u3067\uFF09\u3002");
       return;
     }
+    this.reconvertTraversal = null;
     const url = this.activeUrl();
     if (!url) {
       new import_obsidian7.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002");
@@ -2439,7 +2628,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.openReconvertModalFor({ from: sel.from, to: sel.to }, text, payload, cm);
   }
   // 新規経路共通: 候補モーダルを開き、確定時に検証付きで置換する。
-  openReconvertModalFor(range, originalText, payload, cm) {
+  openReconvertModalFor(range, originalText, payload, cm, context = {}) {
     const segments = payload.segments || [];
     if (segments.length === 0) {
       new import_obsidian7.Notice("VoxCraft: \u5909\u63DB\u5019\u88DC\u304C\u5F97\u3089\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
@@ -2448,10 +2637,22 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     const modal = new ReconvertModal(
       this.app,
       segments,
-      (chosen) => this.applyRangedReplace(range, originalText, chosen.join(""), cm),
+      (chosen) => {
+        var _a;
+        const applied = this.applyRangedReplace(
+          range,
+          originalText,
+          chosen.join(""),
+          cm
+        );
+        if (applied)
+          (_a = context.onApplied) == null ? void 0 : _a.call(context, applied);
+      },
       {
         originalText,
-        onRegister: (f, t) => void this.registerReplacement(f, t)
+        onRegister: (f, t) => void this.registerReplacement(f, t),
+        locationLabel: context.locationLabel,
+        onSkip: context.onSkip
       }
     );
     this.adoptModal(modal);
@@ -2482,8 +2683,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
   // 文書が変わって位置がズレても、表記の再検索で追従し、失敗時は本文を壊さない。
   applyRangedReplace(range, originalText, newText, cmIn) {
     const cm = cmIn.dom.isConnected ? cmIn : this.getActiveCm();
-    if (!cm || newText === originalText)
-      return;
+    if (!cm)
+      return null;
     const doc = cm.state.doc;
     let to = Math.min(range.to, doc.length);
     let from = Math.min(range.from, to);
@@ -2491,12 +2692,15 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       const idx = doc.toString().lastIndexOf(originalText);
       if (idx < 0) {
         new import_obsidian7.Notice("VoxCraft: \u5BFE\u8C61\u304C\u7DE8\u96C6\u3055\u308C\u305F\u305F\u3081\u7F6E\u63DB\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
-        return;
+        return null;
       }
       from = idx;
       to = idx + originalText.length;
     }
-    cm.dispatch({ changes: { from, to, insert: newText } });
+    if (newText !== originalText) {
+      cm.dispatch({ changes: { from, to, insert: newText } });
+    }
+    return { from, to: from + newText.length };
   }
   // 「確定して辞書に登録」: 元表記→確定表記をサーバーの置換辞書へ追加する。
   // 以後は認識直後の後処理で自動修正される（保存は即時反映・再起動不要）。
@@ -2749,7 +2953,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     const segs = 10;
     const filled = Math.max(0, Math.min(segs, Math.round(level * 40)));
     const bar = "\u2588".repeat(filled) + "\u2591".repeat(segs - filled);
-    this.setStatus(this.pendingRespeak ? `\u8A00\u3044\u76F4\u3057\u5F85\u3061 ${bar}` : `\u25CF \u9332\u97F3\u4E2D ${bar}`);
+    this.setStatus(this.pendingRespeak ? `\u8A00\u3044\u76F4\u3057\u5F85\u3061 ${bar}` : `${this.idleStatus()} ${bar}`);
   }
   setStatus(text) {
     this.statusEl.setText(`\u{1F399} VoxCraft: ${text}`);
