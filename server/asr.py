@@ -156,14 +156,14 @@ class AsrOptions:
     def refinement() -> "AsrOptions":
         """PC音声の速報を30秒前後の文脈で認識し直す補正パス。"""
         return AsrOptions(
-            # 元の連続音声を渡すため、長い無音だけ内蔵VADで除く。
-            vad_filter=True,
+            # 補正内でVADを重ねると、速報にはあった短い発話まで落ちるため使わない。
+            vad_filter=False,
             no_speech_threshold=0.99,
             logprob_threshold=-5.0,
-            beam_size=max(config.beam_size, 5),
+            beam_size=max(config.beam_size, 8),
             block_hallucinations=False,
-            # 30秒窓をまたぐ文章の接続を保つ。今回の実音声では反復暴走なしを確認済み。
-            condition_on_previous=True,
+            # 実音声で短い述語を落としたため、前のWhisper窓へ依存させない。
+            condition_on_previous=False,
             initial_prompt=None,
             block_boilerplate=True,
         )
