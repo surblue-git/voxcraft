@@ -3,6 +3,80 @@ interface ParagraphMarker {
     separator: string;
 }
 
+export type RefinementRejectionReason =
+    | "too-short"
+    | "leading-content-lost"
+    | "trailing-content-lost"
+    | "content-diverged";
+
+export interface RefinementSafety {
+    safe: boolean;
+    reason?: RefinementRejectionReason;
+}
+
+function normalizeForComparison(text: string): string {
+    return text
+        .normalize("NFKC")
+        .replace(/[\s、。！？!?・：:；;,.「」『』（）()\[\]…]/g, "");
+}
+
+function lcsLength(left: string, right: string): number {
+    if (!left || !right) return 0;
+    let previous = new Uint16Array(right.length + 1);
+    let current = new Uint16Array(right.length + 1);
+    for (let i = 1; i <= left.length; i += 1) {
+        for (let j = 1; j <= right.length; j += 1) {
+            current[j] = left[i - 1] === right[j - 1]
+                ? previous[j - 1] + 1
+                : Math.max(previous[j], current[j - 1]);
+        }
+        [previous, current] = [current, previous];
+        current.fill(0);
+    }
+    return previous[right.length];
+}
+
+function coverage(reference: string, candidate: string): number {
+    return reference.length === 0 ? 1 : lcsLength(reference, candidate) / reference.length;
+}
+
+/**
+ * 補正稿が速報稿の大部分を捨てていないかを判定する。
+ * 表記・句読点・局所的な言い換えは許容し、大きな欠落だけを止める。
+ */
+export function assessRefinementSafety(
+    provisional: string,
+    refined: string,
+): RefinementSafety {
+    // 30秒区間を想定しているが、異常に長い入力でも比較コストを制限する。
+    const before = normalizeForComparison(provisional).slice(0, 1200);
+    const after = normalizeForComparison(refined).slice(0, 1200);
+
+    if (before.length === 0) return { safe: true };
+    if (after.length / before.length < 0.78) {
+        return { safe: false, reason: "too-short" };
+    }
+    if (before.length < 24) return { safe: true };
+
+    const edgeLength = Math.min(48, Math.max(16, Math.floor(before.length * 0.25)));
+    const leadingBefore = before.slice(0, edgeLength);
+    const leadingAfter = after.slice(0, Math.min(after.length, edgeLength * 2));
+    if (coverage(leadingBefore, leadingAfter) < 0.4) {
+        return { safe: false, reason: "leading-content-lost" };
+    }
+
+    const trailingBefore = before.slice(-edgeLength);
+    const trailingAfter = after.slice(-Math.min(after.length, edgeLength * 2));
+    if (coverage(trailingBefore, trailingAfter) < 0.4) {
+        return { safe: false, reason: "trailing-content-lost" };
+    }
+
+    if (coverage(before, after) < 0.45) {
+        return { safe: false, reason: "content-diverged" };
+    }
+    return { safe: true };
+}
+
 function withoutLineBreaks(text: string): string {
     return text.replace(/[\r\n]+/g, "");
 }

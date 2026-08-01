@@ -23,7 +23,7 @@ import {
     spanRangeFor,
 } from "./recover";
 import { RecordingsModal } from "./recordings";
-import { preserveParagraphBreaks } from "./refinement";
+import { assessRefinementSafety, preserveParagraphBreaks } from "./refinement";
 import { AsrMode, AsrSocket, AsrSource, ServerMessage } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
 import { keyboardExtension, isKeyboardSuppressed, setKeyboardSuppressed } from "./keyboard";
@@ -145,6 +145,7 @@ export default class VoxCraftPlugin extends Plugin {
     // PC音声の遅延補正。古い応答と、手編集を検出した際の通知連打を防ぐ。
     private lastRefinementRevision = 0;
     private refinementEditWarningShown = false;
+    private refinementCoverageWarningShown = false;
 
     async onload(): Promise<void> {
         await this.loadSettings();
@@ -316,6 +317,7 @@ export default class VoxCraftPlugin extends Plugin {
             this.session = null;
             this.lastRefinementRevision = 0;
             this.refinementEditWarningShown = false;
+            this.refinementCoverageWarningShown = false;
         }
         this.stopping = false;
         this.setStatus(urls.length > 1 ? "接続中…（つながる方を選択）" : "接続中…");
@@ -717,6 +719,20 @@ export default class VoxCraftPlugin extends Plugin {
         const oldText = cm.state.doc.sliceString(from, to);
         const expected = this.spans.slice(first, last + 1).map((span) => span.text).join("");
         if (oldText !== expected) return;
+
+        const safety = assessRefinementSafety(expected, text);
+        if (!safety.safe) {
+            if (!this.refinementCoverageWarningShown) {
+                this.refinementCoverageWarningShown = true;
+                new Notice("VoxCraft: 補正稿に大きな欠落を検出したため、速報稿を保持しました。");
+            }
+            console.warn("[VoxCraft] Incomplete refinement rejected", {
+                reason: safety.reason,
+                start,
+                end,
+            });
+            return;
+        }
 
         // 速報側の ParagraphBreaker が入れた空行を、補正後の最寄りの文末へ戻す。
         // これをしないと、30秒単位の補正が来るたびに段落がベタ打ちへ戻ってしまう。
