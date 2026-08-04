@@ -40,7 +40,7 @@ import {
 } from "./recover";
 import { RecordingsModal } from "./recordings";
 import { assessRefinementSafety, preserveParagraphBreaks } from "./refinement";
-import { AsrMode, AsrSocket, AsrSource, isSystemSource, ServerMessage } from "./ws";
+import { AsrMode, AsrSocket, AsrSource, isSystemSource, ServerMessage, WsHandlers } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
 import { keyboardExtension, isKeyboardSuppressed, setKeyboardSuppressed } from "./keyboard";
 import { DictationToolbar } from "./toolbar";
@@ -58,6 +58,10 @@ function isSecondaryClick(evt: MouseEvent): boolean {
 // （実際に「スミシンを再変」が「住信を再変」になった）、後方検索から除外する。
 function isCommandEcho(text: string, at: number): boolean {
     return /^を(?:再変|修正|変換|言い直|訂正)/.test(text.slice(at, at + 5));
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 // 「Aを再変換」で文書中を探すための表記一覧を作る。
@@ -115,6 +119,8 @@ export default class VoxCraftPlugin extends Plugin {
     private recording = false;
     private starting = false;
     private stopping = false;
+    // 文字起こし中にWebSocketが予期せず切れたときの自動再接続（モード分離: 口述には無関係）。
+    private reconnecting = false;
     private statusEl: HTMLElement;
     private ribbonEl: HTMLElement;
 
@@ -380,42 +386,7 @@ export default class VoxCraftPlugin extends Plugin {
         }
         this.stopping = false;
         this.setStatus(urls.length > 1 ? "接続中…（つながる方を選択）" : "接続中…");
-        this.socket = new AsrSocket(urls, {
-            onReady: () => {
-                const url = this.socket?.activeUrl;
-                const label = url ? labelForUrl(this.settings, url) : "";
-                const preparing = source === "system" ? "PC音声を準備中…" : "待機中… 話してください";
-                this.setStatus(label ? `${preparing}（${label}）` : preparing);
-            },
-            onPartial: () => {
-                this.transcribing = true;
-                this.setStatus("認識中…");
-            },
-            onSession: (id) => {
-                this.session = id;
-            },
-            onChunk: (text, msg) => {
-                this.transcribing = false;
-                this.handleChunk(text, msg);
-            },
-            onRefinement: (text, msg) => this.handleTranscribeRefinement(text, msg),
-            onLevel: (level) => this.showLevel(level),
-            onStopped: (reason) => this.handleServerStopped(reason),
-            onReconvert: (msg) => this.handleReconvert(msg),
-            onError: (m, fatal) => {
-                // 開始前の fatal は sendStart() の catch で一度だけ表示する。
-                if (!this.recording) return;
-                new Notice(`VoxCraft サーバーエラー: ${m}`);
-                if (fatal && isSystemSource(this.source)) this.stopRecording();
-            },
-            onClose: () => {
-                if (this.recording || this.stopping) {
-                    new Notice("VoxCraft: サーバー接続が切れました。");
-                    void this.teardownSession();
-                    this.setStatus("停止中");
-                }
-            },
-        });
+        this.socket = new AsrSocket(urls, this.buildSocketHandlers());
 
         try {
             await this.socket.connect();
@@ -613,6 +584,121 @@ export default class VoxCraftPlugin extends Plugin {
             );
         }
         this.finishStop();
+    }
+
+    // AsrSocket のハンドラは初回接続・再接続のどちらでも同じものを使う
+    // （違うのは接続先と start/resume のどちらを送るかだけ）。
+    private buildSocketHandlers(): WsHandlers {
+        return {
+            onReady: () => {
+                const url = this.socket?.activeUrl;
+                const label = url ? labelForUrl(this.settings, url) : "";
+                const preparing = this.source === "system" ? "PC音声を準備中…" : "待機中… 話してください";
+                this.setStatus(label ? `${preparing}（${label}）` : preparing);
+            },
+            onPartial: () => {
+                this.transcribing = true;
+                this.setStatus("認識中…");
+            },
+            onSession: (id) => {
+                this.session = id;
+            },
+            onChunk: (text, msg) => {
+                this.transcribing = false;
+                this.handleChunk(text, msg);
+            },
+            onRefinement: (text, msg) => this.handleTranscribeRefinement(text, msg),
+            onLevel: (level) => this.showLevel(level),
+            onStopped: (reason) => this.handleServerStopped(reason),
+            onReconvert: (msg) => this.handleReconvert(msg),
+            onError: (m, fatal) => {
+                // 開始前の fatal は sendStart()/sendResume() の catch で一度だけ表示する。
+                if (!this.recording) return;
+                new Notice(`VoxCraft サーバーエラー: ${m}`);
+                if (fatal && isSystemSource(this.source)) this.stopRecording();
+            },
+            onClose: () => this.handleSocketClose(),
+        };
+    }
+
+    // 接続が切れたときの分岐点。文字起こし中（セッションを持っている＝復旧可能）だけ
+    // 自動再接続を試み、それ以外（口述・停止処理中・セッション開始前）は従来どおり
+    // 即座に録音を終了する。口述の挙動には一切触れない。
+    private handleSocketClose(): void {
+        if (!this.recording && !this.stopping) return;
+        if (!this.stopping && this.recording && this.mode === "transcribe" && this.session) {
+            void this.reconnectTranscribe();
+            return;
+        }
+        new Notice("VoxCraft: サーバー接続が切れました。");
+        void this.teardownSession();
+        this.setStatus("停止中");
+    }
+
+    // モバイル回線の瞬断等でWebSocketが切れた直後、マイクは止めずに再接続だけ試みる。
+    // 再接続できたら同じセッションID宛に resume を送り、サーバー側の同じ録音ファイルへ
+    // 続きを積んでもらう（復旧コマンドが引き続き使えるように session を変えない）。
+    private async reconnectTranscribe(): Promise<void> {
+        if (this.reconnecting) return;
+        this.reconnecting = true;
+
+        this.socket = null;
+        const session = this.session;
+        const source = this.source;
+        const stripSpace = this.settings.stripJaAlnumSpace;
+        const symbols = this.settings.symbolDictation;
+        const device = this.sourceDevice || undefined;
+        const disconnectedAt = Date.now();
+        const delaysMs = [1000, 2000, 4000, 8000, 15000];
+        const maxTotalMs = 3 * 60 * 1000; // 3分間は再接続を試み続ける
+        this.setStatus("⚠ 接続が切れました。再接続中…");
+
+        let attempt = 0;
+        while (session && this.recording && !this.stopping && Date.now() - disconnectedAt < maxTotalMs) {
+            await sleep(delaysMs[Math.min(attempt, delaysMs.length - 1)]);
+            attempt += 1;
+            if (!this.recording || this.stopping) break;
+
+            const urls = resolveUrls(this.settings);
+            const socket = new AsrSocket(urls, this.buildSocketHandlers());
+            try {
+                await socket.connect();
+                const dictionarySetId = this.activeDictionarySetId || "default";
+                const started = await socket.sendResume(
+                    session, stripSpace, symbols, source, device, dictionarySetId
+                );
+                if (!this.recording || this.stopping) {
+                    // 再接続の最中にユーザーが停止操作をしていた。この接続は使わない。
+                    socket.close();
+                    break;
+                }
+                this.socket = socket;
+                this.sourceDevice = started.device ?? this.sourceDevice;
+                this.autoStopSec = started.autoStopSec ?? this.autoStopSec;
+                this.activeDictionarySetId = started.dictionarySetId;
+                this.activeDictionarySetName = started.dictionarySetName;
+                this.activeDictionaryRevision = started.dictionaryRevision;
+                this.activeDictionaryWritableProfile = started.dictionaryWritableProfile;
+                this.activeDictionaryProfileRevisions = started.dictionaryProfileRevisions;
+                this.reconnecting = false;
+                const gapSec = Math.max(1, Math.round((Date.now() - disconnectedAt) / 1000));
+                new Notice(
+                    `VoxCraft: サーバーに再接続しました（約${gapSec}秒の空白。` +
+                    "その間の音声は録音されていません）。"
+                );
+                this.setStatus(this.idleStatus());
+                return;
+            } catch {
+                socket.close();
+            }
+        }
+
+        this.reconnecting = false;
+        if (this.recording && !this.stopping) {
+            new Notice("VoxCraft: サーバーへ再接続できませんでした。録音を停止します。");
+            void this.teardownSession();
+            this.setStatus("停止中");
+        }
     }
 
     private async teardownSession(): Promise<void> {

@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import traceback
+from dataclasses import dataclass
 
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -370,6 +371,38 @@ def _build_chunker(mode: str, source: str = "microphone") -> VadChunker:
         vad_threshold=config.vad_threshold,
         speech_pad_sec=max(config.speech_pad_sec, 0.5),
     )
+
+
+@dataclass
+class _PendingSession:
+    """接続が予期せず切れた文字起こしセッション。再開されるまで音声ファイルを保持する。"""
+    session: SessionAudio
+    expiry: asyncio.Task
+
+
+# モバイル回線の瞬断などで WebSocket が切れても、同じセッションIDでの再接続を
+# 一定時間だけ受け付ける（session_id → 保持中のセッション）。口述は session を
+# 持たないためここには入らない。
+_PENDING_SESSIONS: dict[str, _PendingSession] = {}
+_RESUME_GRACE_SEC = 90.0
+
+
+def _hold_session_for_resume(session: SessionAudio) -> None:
+    """finish_input を経ずに切断された録音を、再接続に備えて一定時間だけ保持する。"""
+    session_id = session.session_id
+
+    async def _expire() -> None:
+        try:
+            await asyncio.sleep(_RESUME_GRACE_SEC)
+        except asyncio.CancelledError:
+            return
+        pending = _PENDING_SESSIONS.pop(session_id, None)
+        if pending is not None:
+            pending.session.close()
+            print(f"[VoxCraft] 再接続待ちのセッションを終了: {session_id}")
+
+    _PENDING_SESSIONS[session_id] = _PendingSession(session, asyncio.create_task(_expire()))
+    print(f"[VoxCraft] 接続切断: セッション{session_id}を{_RESUME_GRACE_SEC:.0f}秒だけ再開可能に保持")
 
 
 @app.websocket("/ws")
@@ -876,6 +909,198 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 return
             await asyncio.sleep(min(5.0, max(0.1, remaining)))
 
+    async def apply_start(cmd: dict, *, resume_session: SessionAudio | None = None) -> None:
+        """{"type": "start"} と {"type": "resume"} で共用するセッション初期化。
+
+        resume_session が渡されたときは、既存の SessionAudio（同じWAVファイル）を
+        そのまま使い続ける ＝ 新規セッションを作らない。それ以外はすべて通常の
+        start と同じ初期化を行う（切断前後で認識器の内部状態を厳密に引き継ぐ
+        必要はない。受信音声は途切れなくWAVへ積まれているので、復旧コマンドで
+        取りこぼしを埋められる）。
+        """
+        nonlocal dictionary_snapshot, session, mode, source, chunker, joiner, breaker
+        nonlocal opts, punctuate, silence_tracker, auto_stop_task, strip_space, symbols
+        nonlocal input_finished, previous_transcript_text, pending_contextual_chunk
+        nonlocal refinement_delivered_end, audio_ring, last_source_chunk_end
+
+        requested_dictionary_set = cmd.get("dictionarySetId", "default")
+        if not isinstance(requested_dictionary_set, str) or not requested_dictionary_set:
+            await ws.send_text(json.dumps({
+                "type": "error",
+                "message": "dictionarySetId が不正です。",
+                "fatal": True,
+            }))
+            return
+        try:
+            resolved_dictionary = get_dictionary_snapshot(requested_dictionary_set)
+        except (DictionarySchemaError, OSError) as exc:
+            await ws.send_text(json.dumps({
+                "type": "error",
+                "message": f"辞書セットを解決できません: {exc}",
+                "fatal": True,
+            }))
+            return
+        # この代入以後、ファイルが変更されてもキュー済みジョブは
+        # resolved_dictionary 自体を保持するためセッション内で混在しない。
+        dictionary_snapshot = resolved_dictionary
+        created_session = False
+        input_finished = False
+        previous_transcript_text = ""
+        pending_contextual_chunk = None
+        refinement_planner.reset()
+        refinement_delivered_end = 0
+        silence_tracker = None
+        audio_ring = AudioRingBuffer(
+            max(1, int(max(
+                config.retry_buffer_sec,
+                # 認識待ちが重なっても、補正対象の音声を失わない余裕を持つ。
+                config.system_refine_window_sec * 4,
+            ) * config.sample_rate))
+        )
+        last_source_chunk_end = 0
+        strip_space = bool(cmd.get("stripSpace", config.strip_ja_alnum_space))
+        symbols = bool(cmd.get("symbols", config.enable_symbol_dictation))
+        mode = "transcribe" if cmd.get("mode") == "transcribe" else "dictation"
+        if resume_session is not None:
+            # 再開は文字起こしセッションにしか存在しない。
+            mode = "transcribe"
+        requested_source = cmd.get("source", "microphone")
+        source = (
+            requested_source
+            if requested_source in SYSTEM_SOURCES
+            else "microphone"
+        )
+        if source in SYSTEM_SOURCES and mode != "transcribe":
+            await ws.send_text(json.dumps({
+                "type": "error",
+                "message": "PC音声入力は文字起こしモードでのみ使用できます。",
+                "fatal": True,
+            }))
+            return
+        chunker = _build_chunker(mode, source)
+        if mode == "transcribe":
+            opts = AsrOptions.transcription()
+            system_mode = source in SYSTEM_SOURCES
+            joiner = ChunkJoiner(
+                sample_rate=config.sample_rate,
+                min_sec=(
+                    config.system_join_sec if system_mode
+                    else config.transcribe_join_sec
+                ),
+                max_hold_sec=(
+                    config.system_join_hold_sec if system_mode
+                    else config.transcribe_join_hold_sec
+                ),
+                break_sec=(
+                    config.system_join_break_sec if system_mode
+                    else config.transcribe_join_break_sec
+                ),
+            )
+            breaker = ParagraphBreaker(
+                min_chars=config.paragraph_chars,
+                pause_sec=config.paragraph_pause_sec,
+                max_chars=config.paragraph_max_chars,
+                hard_chars=config.paragraph_hard_chars,
+            )
+            # 初回チャンクを待たせないよう、高品質モデルのロードを
+            # 先に走らせておく（音声が届くまでの間に間に合う）。
+            hq = hq_transcriber()
+            if not hq.ready:
+                asyncio.get_running_loop().run_in_executor(
+                    None, hq.ensure_loaded
+                )
+            if resume_session is not None:
+                # 同じWAVファイルへ引き続き追記する。新規セッションは作らない。
+                session = resume_session
+                print(f"[VoxCraft] 文字起こしモード: 録音を再開 {session.path}")
+            elif session is None:
+                # 復旧の素材として、このセッションの音声を丸ごと保存する。
+                session = SessionAudio(config.sample_rate)
+                created_session = True
+                print(f"[VoxCraft] 文字起こしモード: 録音を保存 {session.path}")
+                await ws.send_text(json.dumps({
+                    "type": "session", "session": session.session_id,
+                }))
+        else:
+            opts = AsrOptions.dictation()
+            joiner = None
+            breaker = None
+        punctuate = config.enable_auto_punctuation
+
+        source_info: dict = {}
+        if source == "system":
+            try:
+                source_info = await start_system_audio()
+            except (SystemAudioError, OSError) as exc:
+                if session is not None:
+                    if created_session:
+                        failed_session = session.session_id
+                        session.close()
+                        session = None
+                        try:
+                            delete_session(failed_session)
+                        except (ValueError, FileNotFoundError, OSError):
+                            pass
+                    elif resume_session is not None:
+                        # 再開の途中で失敗。録音済みの音声は消さず、確定するだけに留める。
+                        session.close()
+                        session = None
+                await ws.send_text(json.dumps({
+                    "type": "error", "message": str(exc), "fatal": True,
+                }))
+                return
+            except Exception as exc:  # デバイス固有の PortAudio エラーも表示する
+                if session is not None:
+                    if created_session:
+                        failed_session = session.session_id
+                        session.close()
+                        session = None
+                        try:
+                            delete_session(failed_session)
+                        except (ValueError, FileNotFoundError, OSError):
+                            pass
+                    elif resume_session is not None:
+                        session.close()
+                        session = None
+                await ws.send_text(json.dumps({
+                    "type": "error",
+                    "message": f"PC音声入力を開始できません: {exc}",
+                    "fatal": True,
+                }))
+                return
+        elif source == "system-client":
+            # 音声はクライアントがバイナリで送ってくる。こちらは開くものが
+            # 無いので、表示用のデバイス名を受け取って返すだけ。
+            # null / 非文字列でも落ちないようにし、長さも切る（そのまま
+            # ログとステータス表示に出るだけの値なので短くて構わない）。
+            client_device = str(cmd.get("device") or "").strip()[:120]
+            if client_device:
+                source_info["device"] = client_device
+            print(
+                f"[VoxCraft] PC音声入力(クライアント側): "
+                f"{client_device or 'デバイス名なし'}"
+            )
+
+        if source in SYSTEM_SOURCES and config.transcribe_auto_stop_sec > 0:
+            silence_tracker = SilenceTracker(
+                config.transcribe_auto_stop_sec,
+                config.transcribe_audible_rms,
+                asyncio.get_running_loop().time(),
+            )
+            auto_stop_task = asyncio.create_task(watch_system_silence())
+            source_info["autoStopSec"] = config.transcribe_auto_stop_sec
+        await ws.send_text(json.dumps({
+            "type": "started",
+            "source": source,
+            **source_info,
+            **dictionary_snapshot.metadata(),
+        }))
+        print(
+            f"[VoxCraft] 辞書セット固定: {dictionary_snapshot.set_id} "
+            f"revision={dictionary_snapshot.revision} "
+            f"profiles={','.join(dictionary_snapshot.profile_ids)}"
+        )
+
     try:
         while True:
             msg = await ws.receive()
@@ -898,167 +1123,27 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 ctype = cmd.get("type")
 
                 if ctype == "start":
-                    requested_dictionary_set = cmd.get("dictionarySetId", "default")
-                    if not isinstance(requested_dictionary_set, str) or not requested_dictionary_set:
-                        await ws.send_text(json.dumps({
-                            "type": "error",
-                            "message": "dictionarySetId が不正です。",
-                            "fatal": True,
-                        }))
-                        continue
-                    try:
-                        resolved_dictionary = get_dictionary_snapshot(requested_dictionary_set)
-                    except (DictionarySchemaError, OSError) as exc:
-                        await ws.send_text(json.dumps({
-                            "type": "error",
-                            "message": f"辞書セットを解決できません: {exc}",
-                            "fatal": True,
-                        }))
-                        continue
-                    # この代入以後、ファイルが変更されてもキュー済みジョブは
-                    # resolved_dictionary 自体を保持するためセッション内で混在しない。
-                    dictionary_snapshot = resolved_dictionary
-                    created_session = False
-                    input_finished = False
-                    previous_transcript_text = ""
-                    pending_contextual_chunk = None
-                    refinement_planner.reset()
-                    refinement_delivered_end = 0
-                    silence_tracker = None
-                    audio_ring = AudioRingBuffer(
-                        max(1, int(max(
-                            config.retry_buffer_sec,
-                            # 認識待ちが重なっても、補正対象の音声を失わない余裕を持つ。
-                            config.system_refine_window_sec * 4,
-                        ) * config.sample_rate))
-                    )
-                    last_source_chunk_end = 0
-                    strip_space = bool(cmd.get("stripSpace", config.strip_ja_alnum_space))
-                    symbols = bool(cmd.get("symbols", config.enable_symbol_dictation))
-                    mode = "transcribe" if cmd.get("mode") == "transcribe" else "dictation"
-                    requested_source = cmd.get("source", "microphone")
-                    source = (
-                        requested_source
-                        if requested_source in SYSTEM_SOURCES
-                        else "microphone"
-                    )
-                    if source in SYSTEM_SOURCES and mode != "transcribe":
-                        await ws.send_text(json.dumps({
-                            "type": "error",
-                            "message": "PC音声入力は文字起こしモードでのみ使用できます。",
-                            "fatal": True,
-                        }))
-                        continue
-                    chunker = _build_chunker(mode, source)
-                    if mode == "transcribe":
-                        opts = AsrOptions.transcription()
-                        system_mode = source in SYSTEM_SOURCES
-                        joiner = ChunkJoiner(
-                            sample_rate=config.sample_rate,
-                            min_sec=(
-                                config.system_join_sec if system_mode
-                                else config.transcribe_join_sec
-                            ),
-                            max_hold_sec=(
-                                config.system_join_hold_sec if system_mode
-                                else config.transcribe_join_hold_sec
-                            ),
-                            break_sec=(
-                                config.system_join_break_sec if system_mode
-                                else config.transcribe_join_break_sec
-                            ),
-                        )
-                        breaker = ParagraphBreaker(
-                            min_chars=config.paragraph_chars,
-                            pause_sec=config.paragraph_pause_sec,
-                            max_chars=config.paragraph_max_chars,
-                            hard_chars=config.paragraph_hard_chars,
-                        )
-                        # 初回チャンクを待たせないよう、高品質モデルのロードを
-                        # 先に走らせておく（音声が届くまでの間に間に合う）。
-                        hq = hq_transcriber()
-                        if not hq.ready:
-                            asyncio.get_running_loop().run_in_executor(
-                                None, hq.ensure_loaded
-                            )
-                        # 復旧の素材として、このセッションの音声を丸ごと保存する。
-                        if session is None:
-                            session = SessionAudio(config.sample_rate)
-                            created_session = True
-                            print(f"[VoxCraft] 文字起こしモード: 録音を保存 {session.path}")
-                            await ws.send_text(json.dumps({
-                                "type": "session", "session": session.session_id,
-                            }))
-                    else:
-                        opts = AsrOptions.dictation()
-                        joiner = None
-                        breaker = None
-                    punctuate = config.enable_auto_punctuation
+                    await apply_start(cmd)
 
-                    source_info: dict = {}
-                    if source == "system":
-                        try:
-                            source_info = await start_system_audio()
-                        except (SystemAudioError, OSError) as exc:
-                            if created_session and session is not None:
-                                failed_session = session.session_id
-                                session.close()
-                                session = None
-                                try:
-                                    delete_session(failed_session)
-                                except (ValueError, FileNotFoundError, OSError):
-                                    pass
-                            await ws.send_text(json.dumps({
-                                "type": "error", "message": str(exc), "fatal": True,
-                            }))
-                            continue
-                        except Exception as exc:  # デバイス固有の PortAudio エラーも表示する
-                            if created_session and session is not None:
-                                failed_session = session.session_id
-                                session.close()
-                                session = None
-                                try:
-                                    delete_session(failed_session)
-                                except (ValueError, FileNotFoundError, OSError):
-                                    pass
-                            await ws.send_text(json.dumps({
-                                "type": "error",
-                                "message": f"PC音声入力を開始できません: {exc}",
-                                "fatal": True,
-                            }))
-                            continue
-                    elif source == "system-client":
-                        # 音声はクライアントがバイナリで送ってくる。こちらは開くものが
-                        # 無いので、表示用のデバイス名を受け取って返すだけ。
-                        # null / 非文字列でも落ちないようにし、長さも切る（そのまま
-                        # ログとステータス表示に出るだけの値なので短くて構わない）。
-                        client_device = str(cmd.get("device") or "").strip()[:120]
-                        if client_device:
-                            source_info["device"] = client_device
-                        print(
-                            f"[VoxCraft] PC音声入力(クライアント側): "
-                            f"{client_device or 'デバイス名なし'}"
-                        )
-
-                    if source in SYSTEM_SOURCES and config.transcribe_auto_stop_sec > 0:
-                        silence_tracker = SilenceTracker(
-                            config.transcribe_auto_stop_sec,
-                            config.transcribe_audible_rms,
-                            asyncio.get_running_loop().time(),
-                        )
-                        auto_stop_task = asyncio.create_task(watch_system_silence())
-                        source_info["autoStopSec"] = config.transcribe_auto_stop_sec
-                    await ws.send_text(json.dumps({
-                        "type": "started",
-                        "source": source,
-                        **source_info,
-                        **dictionary_snapshot.metadata(),
-                    }))
-                    print(
-                        f"[VoxCraft] 辞書セット固定: {dictionary_snapshot.set_id} "
-                        f"revision={dictionary_snapshot.revision} "
-                        f"profiles={','.join(dictionary_snapshot.profile_ids)}"
-                    )
+                elif ctype == "resume":
+                    # モバイル回線の瞬断などで切れた直後の再接続。同じセッションIDの
+                    # 音声ファイルへ引き続き追記し、テキストの続きとして扱う。
+                    session_id = cmd.get("session")
+                    if not isinstance(session_id, str) or not session_id:
+                        await ws.send_text(json.dumps({
+                            "type": "error", "message": "session が不正です。", "fatal": True,
+                        }))
+                        continue
+                    pending = _PENDING_SESSIONS.pop(session_id, None)
+                    if pending is None:
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "message": "この録音は再開できません（時間切れ、または既に再開済みです）。",
+                            "fatal": True,
+                        }))
+                        continue
+                    pending.expiry.cancel()
+                    await apply_start(cmd, resume_session=pending.session)
 
                 elif ctype == "stop":
                     await finish_input("manual")
@@ -1106,9 +1191,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
         except Exception as exc:  # 終了処理は録音保存を妨げない
             print(f"[VoxCraft] PC音声入力の終了に失敗: {type(exc).__name__}: {exc}")
         worker_task.cancel()
-        # 録音は必ず閉じる（異常終了しても、そこまでの音声は再認識に使える）。
         if session is not None:
-            session.close()
+            if mode == "transcribe" and not input_finished:
+                # stop を経ずに切れた＝ネットワーク瞬断の可能性。すぐには確定せず、
+                # 同じセッションIDでの再接続を一定時間だけ待つ。
+                _hold_session_for_resume(session)
+            else:
+                # 録音は必ず閉じる（異常終了しても、そこまでの音声は再認識に使える）。
+                session.close()
 
 
 def main() -> None:

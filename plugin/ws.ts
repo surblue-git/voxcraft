@@ -281,6 +281,33 @@ export class AsrSocket {
         });
     }
 
+    // モバイル回線の瞬断などで切れた直後の再接続用。start と違い、既存の
+    // セッションID（＝サーバー側の同じ録音ファイル）へそのまま続きを積む。
+    // サーバーは切断から一定時間だけ同じセッションを保持している。
+    sendResume(
+        session: string,
+        stripSpace: boolean,
+        symbols: boolean,
+        source: AsrSource = "microphone",
+        device?: string,
+        dictionarySetId = "default"
+    ): Promise<StartResult> {
+        if (!this.connected) return Promise.reject(new Error("サーバーに接続されていません"));
+        this.rejectStart("別の開始要求に置き換えられました");
+        return new Promise((resolve, reject) => {
+            const timer = window.setTimeout(() => {
+                if (!this.pendingStart) return;
+                this.pendingStart = null;
+                reject(new Error("録音の再開がタイムアウトしました"));
+            }, 15000);
+            this.pendingStart = { resolve, reject, timer };
+            this.send({
+                type: "resume", session, stripSpace, symbols,
+                mode: "transcribe", source, device, dictionarySetId,
+            });
+        });
+    }
+
     sendStop(): void {
         this.send({ type: "stop" });
     }
