@@ -27,6 +27,7 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian7 = require("obsidian");
+var import_state3 = require("@codemirror/state");
 
 // audio.ts
 var STALL_MS = 3e3;
@@ -512,6 +513,12 @@ function parseProbeCommand(rawText, reading, prefix = "") {
   if (near && near.confident && ARGUMENT_FREE.has(near.cmd.kind))
     return near.cmd;
   return null;
+}
+function needsConversion(original, spoken) {
+  if (!spoken || spoken.length > 8)
+    return false;
+  const kanaOnly = /^[ぁ-ゖァ-ヶー]+$/u;
+  return !kanaOnly.test(original) && kanaOnly.test(spoken);
 }
 var ARGUMENT_FREE = /* @__PURE__ */ new Set([
   "stop",
@@ -1965,6 +1972,11 @@ var AsrSocket = class {
   sendTune(fast) {
     this.send({ type: "tune", fast });
   }
+  // 言い直し待ちの間だけ、文脈のない単語1つを取りやすい設定へ切り替える。
+  // false で口述の既定値へ戻す。
+  sendTuneWord(word) {
+    this.send({ type: "tune", word });
+  }
   send(obj) {
     if (this.connected)
       this.ws.send(JSON.stringify(obj));
@@ -2100,7 +2112,18 @@ var DictationToolbar = class {
     bar.addEventListener("pointerdown", (e) => e.preventDefault());
     this.micBtn = this.iconBtn(bar, "mic", "\u97F3\u58F0\u5165\u529B\u306E\u30AA\u30F3/\u30AA\u30D5", () => this.cb.onMicToggle());
     this.micBtn.addClass("voxcraft-tb-mic");
-    this.iconBtn(bar, "delete", "\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\uFF08\u76F4\u524D\u306E\u4E00\u6587\u3092\u524A\u9664\uFF0F\u97F3\u58F0\u300C\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\u300D\uFF09", () => this.cb.onCancel());
+    this.iconBtn(
+      bar,
+      "eraser",
+      "\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\uFF08\u76F4\u524D\u306E\u4E00\u6587\u3092\u307E\u308B\u3054\u3068\u524A\u9664\uFF0F\u97F3\u58F0\u300C\u5165\u529B\u30AD\u30E3\u30F3\u30BB\u30EB\u300D\uFF09",
+      () => this.cb.onCancel()
+    );
+    this.iconBtn(
+      bar,
+      "delete",
+      "\u30D0\u30C3\u30AF\u30B9\u30DA\u30FC\u30B9\uFF081\u6587\u5B57\u524A\u9664\u3002\u9078\u629E\u4E2D\u306F\u305D\u306E\u7BC4\u56F2\u3092\u524A\u9664\uFF09",
+      () => this.cb.onBackspace()
+    );
     this.iconBtn(bar, "undo-2", "\u5165\u529B\u5FA9\u5143\uFF08\u30AD\u30E3\u30F3\u30BB\u30EB\u3057\u305F\u6587\u3092\u518D\u633F\u5165\uFF0F\u97F3\u58F0\u300C\u5165\u529B\u5FA9\u5143\u300D\uFF09", () => this.cb.onRestore());
     this.textBtn(bar, "\u3001", "\u8AAD\u70B9\u3092\u633F\u5165", () => this.cb.onInsert("\u3001"));
     this.textBtn(bar, "\u3002", "\u53E5\u70B9\u3092\u633F\u5165", () => this.cb.onInsert("\u3002"));
@@ -2321,6 +2344,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     // 同じ「Aを再変換」を繰り返したとき、直前に処理した箇所より前を探す。
     this.reconvertTraversal = null;
     // 「ここを言い直し」で覚えた選択範囲。次の発話1回だけがこの範囲を置換する。
+    // 直接代入せず setPendingRespeak() を通すこと（サーバーの認識設定と対で動く）。
     this.pendingRespeak = null;
     // コマンド先読み（probe）で処理済みのチャンク番号。同じ番号の chunk は捨てる。
     // 先読みが外れた場合はここに入らないので、本文は従来どおり流れる。
@@ -2636,7 +2660,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.reconvertTraversal = null;
     this.canceled = [];
     this.pendingReconvert = null;
-    this.pendingRespeak = null;
+    this.setPendingRespeak(null);
     this.suppressJoiner = true;
     setAnchor(cm, cm.state.selection.main.head);
     if (mode === "transcribe") {
@@ -2718,7 +2742,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     (_b = this.socket) == null ? void 0 : _b.close();
     this.socket = null;
     this.clearDictationAnchor();
-    this.pendingRespeak = null;
+    this.setPendingRespeak(null);
     this.setStatus("\u505C\u6B62\u4E2D");
   }
   handleServerStopped(reason) {
@@ -2871,7 +2895,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     (_c = this.socket) == null ? void 0 : _c.close();
     this.socket = null;
     this.clearDictationAnchor();
-    this.pendingRespeak = null;
+    this.setPendingRespeak(null);
     this.consumedSeqs = [];
   }
   clearDictationAnchor() {
@@ -3214,7 +3238,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
           return true;
         }
         if (this.pendingRespeak) {
-          this.pendingRespeak = null;
+          this.setPendingRespeak(null);
           this.setStatus(this.idleStatus());
           new import_obsidian7.Notice("VoxCraft: \u8A00\u3044\u76F4\u3057\u3092\u89E3\u9664\u3057\u307E\u3057\u305F\u3002");
           return true;
@@ -3291,6 +3315,58 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     const preview = t.length > 20 ? t.slice(0, 20) + "\u2026" : t;
     new import_obsidian7.Notice(`VoxCraft: \u30AD\u30E3\u30F3\u30BB\u30EB\u3057\u307E\u3057\u305F \u2014\u300C${preview}\u300D\uFF08\u300C\u5165\u529B\u5FA9\u5143\u300D\u3067\u5FA9\u6D3B\uFF09`);
   }
+  // ツールバーの ⌫。選択範囲があればそれを、無ければカーソル直前の1文字を消す。
+  //
+  // モバイルで口述中はソフトキーボードを抑制しているため、これが無いと
+  // 「入力キャンセル（一文まるごと）」以外に文字を消す手段が無くなる。
+  // アンカーは anchor.ts の StateField が文書変更に追従するので触らなくてよい。
+  backspace() {
+    const cm = this.cm && this.cm.dom.isConnected ? this.cm : this.getActiveCm();
+    if (!cm) {
+      new import_obsidian7.Notice("VoxCraft: \u30CE\u30FC\u30C8\u3092\u7DE8\u96C6\u30E2\u30FC\u30C9\u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
+      return;
+    }
+    const sel = cm.state.selection.main;
+    let from = sel.from;
+    const to = sel.to;
+    if (sel.empty) {
+      if (sel.head === 0)
+        return;
+      const line = cm.state.doc.lineAt(sel.head);
+      const col = sel.head - line.from;
+      from = col === 0 ? sel.head - 1 : line.from + (0, import_state3.findClusterBreak)(line.text, col, false);
+    }
+    if (from >= to)
+      return;
+    this.trimChunkRecord(cm, from, to);
+    cm.dispatch({
+      changes: { from, to, insert: "" },
+      selection: { anchor: from },
+      scrollIntoView: true
+    });
+  }
+  // 手で消した範囲を、取り消し用のチャンク記録側にも反映する。
+  //
+  // これをしないと chunks の末尾が実本文とズレ、次の「入力キャンセル」が
+  // 「直前の入力が編集されているため取り消せません」で止まる。
+  trimChunkRecord(cm, from, to) {
+    const last = this.chunks[this.chunks.length - 1];
+    const anchor = getAnchor(cm);
+    if (last === void 0 || anchor === null)
+      return;
+    const chunkStart = anchor - last.length;
+    if (from >= chunkStart && to <= anchor) {
+      const head = last.slice(0, from - chunkStart);
+      const tail = last.slice(to - chunkStart);
+      const next = head + tail;
+      if (next)
+        this.chunks[this.chunks.length - 1] = next;
+      else
+        this.chunks.pop();
+      return;
+    }
+    this.chunks = [];
+  }
   // 「入力復元」/「元に戻す」: 入力キャンセルで消した文をアンカー位置に再挿入する。
   restoreCanceled() {
     const text = this.canceled[this.canceled.length - 1];
@@ -3326,6 +3402,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
             }
           },
           onCancel: () => this.cancelLast(),
+          onBackspace: () => this.backspace(),
           onRestore: () => this.restoreCanceled(),
           onInsert: (text) => this.insertFromToolbar(text),
           // 「言い直し」は録音中のみ（次の発話が置換になる）。startRespeak が
@@ -3662,6 +3739,23 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     }
   }
   // ---- 言い直し（読み自体が壊れた完全誤認識の修正） ----
+  // 言い直し待ちの出入り。サーバー側の認識設定もここで対にして切り替える。
+  //
+  // 言い直しの発話は「文脈のない単語1つ」になりがちで、口述用の initial_prompt
+  // （文章向け）がそれを壊す。2026-08-05 実測（合成音声・kotoba）:
+  //     「きよ」  prompt有→'キオ'  prompt無→'キヨ'
+  //     「きよう」prompt有→'気を'  prompt無→'起用'
+  // 文脈のある発話は prompt の有無で変わらないので、待っている間だけ外す。
+  setPendingRespeak(value) {
+    var _a;
+    const was = this.pendingRespeak !== null;
+    this.pendingRespeak = value;
+    const now = value !== null;
+    if (was === now)
+      return;
+    if (this.recording && this.mode === "dictation")
+      (_a = this.socket) == null ? void 0 : _a.sendTuneWord(now);
+  }
   // 口述対象のエディタに選択範囲があるか（言い直しコマンドの成立条件）。
   hasSelection() {
     const cm = this.cm;
@@ -3681,11 +3775,11 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("VoxCraft: \u8A00\u3044\u76F4\u3057\u305F\u3044\u7BC4\u56F2\u3092\u9078\u629E\u3057\u3066\u304B\u3089\u300C\u3053\u3053\u3092\u8A00\u3044\u76F4\u3057\u300D\u3068\u8A00\u3063\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
-    this.pendingRespeak = {
+    this.setPendingRespeak({
       from: sel.from,
       to: sel.to,
       text: cm.state.doc.sliceString(sel.from, sel.to)
-    };
+    });
     this.setStatus("\u8A00\u3044\u76F4\u3057\u5F85\u3061 \u2014 \u6B21\u306E\u767A\u8A71\u3067\u7F6E\u63DB");
   }
   // 「Xを言い直し」: 直す場所を、選択ではなく声で指す。
@@ -3726,17 +3820,14 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       return;
     }
     cm.dispatch({ selection: { anchor: hit.from, head: hit.to }, scrollIntoView: true });
-    this.pendingRespeak = {
-      from: hit.from,
-      to: hit.to,
-      text: cm.state.doc.sliceString(hit.from, hit.to)
-    };
-    this.setStatus(`\u8A00\u3044\u76F4\u3057\u5F85\u3061 \u2014\u300C${this.pendingRespeak.text}\u300D\u3092\u6B21\u306E\u767A\u8A71\u3067\u7F6E\u63DB`);
+    const found = cm.state.doc.sliceString(hit.from, hit.to);
+    this.setPendingRespeak({ from: hit.from, to: hit.to, text: found });
+    this.setStatus(`\u8A00\u3044\u76F4\u3057\u5F85\u3061 \u2014\u300C${found}\u300D\u3092\u6B21\u306E\u767A\u8A71\u3067\u7F6E\u63DB`);
   }
   // 言い直しの発話を、覚えていた範囲に検証付きで適用する。
   applyRespeak(text) {
     const pr = this.pendingRespeak;
-    this.pendingRespeak = null;
+    this.setPendingRespeak(null);
     this.setStatus(this.idleStatus());
     const cm = this.cm;
     if (!pr || !cm || !cm.dom.isConnected) {
@@ -3757,6 +3848,26 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       to = idx + pr.text.length;
     }
     cm.dispatch({ changes: { from, to, insert: text } });
+    if (needsConversion(pr.text, text)) {
+      void this.offerConversion({ from, to: from + text.length }, text, cm);
+    }
+  }
+  // 言い直しで入ったかな語を、そのまま変換候補モーダルに載せる。
+  // ここまで来たら本文は既に置き換わっているので、候補を選ばなくても損はしない。
+  async offerConversion(range, text, cm) {
+    const url = this.activeUrl();
+    if (!url)
+      return;
+    this.setStatus("\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u4E2D\u2026");
+    try {
+      const payload = await fetchReconvert(url, text, this.appliedDictionarySetId(url));
+      this.setStatus(this.idleStatus());
+      if (!payload.online)
+        return;
+      this.openReconvertModalFor(range, text, payload, cm);
+    } catch (e) {
+      this.setStatus(this.idleStatus());
+    }
   }
   // ---- 復旧（音声からの再認識） ----
   // 選択したテキストの元になった音声区間を、精度優先でもう一度認識し直す。

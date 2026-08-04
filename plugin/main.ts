@@ -1,5 +1,5 @@
 import { Editor, MarkdownView, Menu, Notice, Platform, Plugin } from "obsidian";
-import { Text } from "@codemirror/state";
+import { findClusterBreak, Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
 import {
@@ -12,6 +12,7 @@ import {
 import {
     looksLikeRespeak,
     matchByReading,
+    needsConversion,
     parseCommand,
     parseModalCommand,
     parseProbeCommand,
@@ -141,6 +142,7 @@ export default class VoxCraftPlugin extends Plugin {
     // 同じ「Aを再変換」を繰り返したとき、直前に処理した箇所より前を探す。
     private reconvertTraversal: ReconvertTraversal | null = null;
     // 「ここを言い直し」で覚えた選択範囲。次の発話1回だけがこの範囲を置換する。
+    // 直接代入せず setPendingRespeak() を通すこと（サーバーの認識設定と対で動く）。
     private pendingRespeak: { from: number; to: number; text: string } | null = null;
     // コマンド先読み（probe）で処理済みのチャンク番号。同じ番号の chunk は捨てる。
     // 先読みが外れた場合はここに入らないので、本文は従来どおり流れる。
@@ -483,7 +485,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.reconvertTraversal = null;
         this.canceled = [];
         this.pendingReconvert = null;
-        this.pendingRespeak = null;
+        this.setPendingRespeak(null);
         this.suppressJoiner = true; // 最初のチャンクには息継ぎ読点を打たない
         setAnchor(cm, cm.state.selection.main.head);
 
@@ -572,7 +574,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.socket?.close();
         this.socket = null;
         this.clearDictationAnchor();
-        this.pendingRespeak = null;
+        this.setPendingRespeak(null);
         this.setStatus("停止中");
     }
 
@@ -725,7 +727,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.socket?.close();
         this.socket = null;
         this.clearDictationAnchor();
-        this.pendingRespeak = null;
+        this.setPendingRespeak(null);
         // チャンク番号はセッションごとに1から振り直される。持ち越すと次の録音で
         // 無関係なチャンクを「処理済み」として捨ててしまう。
         this.consumedSeqs = [];
@@ -1119,7 +1121,7 @@ export default class VoxCraftPlugin extends Plugin {
                     return true;
                 }
                 if (this.pendingRespeak) {
-                    this.pendingRespeak = null;
+                    this.setPendingRespeak(null);
                     this.setStatus(this.idleStatus());
                     new Notice("VoxCraft: 言い直しを解除しました。");
                     return true;
@@ -1214,6 +1216,62 @@ export default class VoxCraftPlugin extends Plugin {
         new Notice(`VoxCraft: キャンセルしました —「${preview}」（「入力復元」で復活）`);
     }
 
+    // ツールバーの ⌫。選択範囲があればそれを、無ければカーソル直前の1文字を消す。
+    //
+    // モバイルで口述中はソフトキーボードを抑制しているため、これが無いと
+    // 「入力キャンセル（一文まるごと）」以外に文字を消す手段が無くなる。
+    // アンカーは anchor.ts の StateField が文書変更に追従するので触らなくてよい。
+    private backspace(): void {
+        const cm = this.cm && this.cm.dom.isConnected ? this.cm : this.getActiveCm();
+        if (!cm) {
+            new Notice("VoxCraft: ノートを編集モードで開いてください。");
+            return;
+        }
+        const sel = cm.state.selection.main;
+        let from = sel.from;
+        const to = sel.to;
+        if (sel.empty) {
+            if (sel.head === 0) return;
+            // 結合文字・サロゲートペア（絵文字など）を半分だけ消さない。
+            const line = cm.state.doc.lineAt(sel.head);
+            const col = sel.head - line.from;
+            from = col === 0
+                ? sel.head - 1  // 行頭なら改行そのものを消す
+                : line.from + findClusterBreak(line.text, col, false);
+        }
+        if (from >= to) return;
+
+        this.trimChunkRecord(cm, from, to);
+        cm.dispatch({
+            changes: { from, to, insert: "" },
+            selection: { anchor: from },
+            scrollIntoView: true,
+        });
+    }
+
+    // 手で消した範囲を、取り消し用のチャンク記録側にも反映する。
+    //
+    // これをしないと chunks の末尾が実本文とズレ、次の「入力キャンセル」が
+    // 「直前の入力が編集されているため取り消せません」で止まる。
+    private trimChunkRecord(cm: EditorView, from: number, to: number): void {
+        const last = this.chunks[this.chunks.length - 1];
+        const anchor = getAnchor(cm);
+        if (last === undefined || anchor === null) return;
+        const chunkStart = anchor - last.length;
+        // 直前チャンクの内側だけを消したなら、その分を記録からも削る。
+        if (from >= chunkStart && to <= anchor) {
+            const head = last.slice(0, from - chunkStart);
+            const tail = last.slice(to - chunkStart);
+            const next = head + tail;
+            if (next) this.chunks[this.chunks.length - 1] = next;
+            else this.chunks.pop();
+            return;
+        }
+        // チャンクの外にはみ出す削除は、対応を追えない。取り消し履歴を畳んで、
+        // 誤った範囲を消しにいくより「キャンセルできない」と言う側に倒す。
+        this.chunks = [];
+    }
+
     // 「入力復元」/「元に戻す」: 入力キャンセルで消した文をアンカー位置に再挿入する。
     private restoreCanceled(): void {
         const text = this.canceled[this.canceled.length - 1];
@@ -1250,6 +1308,7 @@ export default class VoxCraftPlugin extends Plugin {
                         }
                     },
                     onCancel: () => this.cancelLast(),
+                    onBackspace: () => this.backspace(),
                     onRestore: () => this.restoreCanceled(),
                     onInsert: (text) => this.insertFromToolbar(text),
                     // 「言い直し」は録音中のみ（次の発話が置換になる）。startRespeak が
@@ -1636,6 +1695,24 @@ export default class VoxCraftPlugin extends Plugin {
 
     // ---- 言い直し（読み自体が壊れた完全誤認識の修正） ----
 
+    // 言い直し待ちの出入り。サーバー側の認識設定もここで対にして切り替える。
+    //
+    // 言い直しの発話は「文脈のない単語1つ」になりがちで、口述用の initial_prompt
+    // （文章向け）がそれを壊す。2026-08-05 実測（合成音声・kotoba）:
+    //     「きよ」  prompt有→'キオ'  prompt無→'キヨ'
+    //     「きよう」prompt有→'気を'  prompt無→'起用'
+    // 文脈のある発話は prompt の有無で変わらないので、待っている間だけ外す。
+    private setPendingRespeak(
+        value: { from: number; to: number; text: string } | null
+    ): void {
+        const was = this.pendingRespeak !== null;
+        this.pendingRespeak = value;
+        const now = value !== null;
+        if (was === now) return;
+        // 録音していないときは送る先が無い（開始時に既定値から始まるので問題ない）。
+        if (this.recording && this.mode === "dictation") this.socket?.sendTuneWord(now);
+    }
+
     // 口述対象のエディタに選択範囲があるか（言い直しコマンドの成立条件）。
     private hasSelection(): boolean {
         const cm = this.cm;
@@ -1655,11 +1732,11 @@ export default class VoxCraftPlugin extends Plugin {
             new Notice("VoxCraft: 言い直したい範囲を選択してから「ここを言い直し」と言ってください。");
             return;
         }
-        this.pendingRespeak = {
+        this.setPendingRespeak({
             from: sel.from,
             to: sel.to,
             text: cm.state.doc.sliceString(sel.from, sel.to),
-        };
+        });
         this.setStatus("言い直し待ち — 次の発話で置換");
     }
 
@@ -1705,18 +1782,15 @@ export default class VoxCraftPlugin extends Plugin {
         }
 
         cm.dispatch({ selection: { anchor: hit.from, head: hit.to }, scrollIntoView: true });
-        this.pendingRespeak = {
-            from: hit.from,
-            to: hit.to,
-            text: cm.state.doc.sliceString(hit.from, hit.to),
-        };
-        this.setStatus(`言い直し待ち —「${this.pendingRespeak.text}」を次の発話で置換`);
+        const found = cm.state.doc.sliceString(hit.from, hit.to);
+        this.setPendingRespeak({ from: hit.from, to: hit.to, text: found });
+        this.setStatus(`言い直し待ち —「${found}」を次の発話で置換`);
     }
 
     // 言い直しの発話を、覚えていた範囲に検証付きで適用する。
     private applyRespeak(text: string): void {
         const pr = this.pendingRespeak;
-        this.pendingRespeak = null;
+        this.setPendingRespeak(null);
         this.setStatus(this.idleStatus());
         const cm = this.cm;
         if (!pr || !cm || !cm.dom.isConnected) {
@@ -1738,6 +1812,32 @@ export default class VoxCraftPlugin extends Plugin {
         }
         cm.dispatch({ changes: { from, to, insert: text } });
         // アンカー相対の取り消し整合を壊さないため chunks には積まない（戻すなら Ctrl+Z）。
+
+        // 漢字だった箇所を言い直したのに、かなだけが返ってきた ＝ 変換が要る。
+        // 「起用」を「きよ」と言い直して「キヨ」が入る、で止まらせない。
+        if (needsConversion(pr.text, text)) {
+            void this.offerConversion({ from, to: from + text.length }, text, cm);
+        }
+    }
+
+    // 言い直しで入ったかな語を、そのまま変換候補モーダルに載せる。
+    // ここまで来たら本文は既に置き換わっているので、候補を選ばなくても損はしない。
+    private async offerConversion(
+        range: { from: number; to: number },
+        text: string,
+        cm: EditorView
+    ): Promise<void> {
+        const url = this.activeUrl();
+        if (!url) return;
+        this.setStatus("変換候補を取得中…");
+        try {
+            const payload = await fetchReconvert(url, text, this.appliedDictionarySetId(url));
+            this.setStatus(this.idleStatus());
+            if (!payload.online) return;
+            this.openReconvertModalFor(range, text, payload, cm);
+        } catch {
+            this.setStatus(this.idleStatus());
+        }
     }
 
     // ---- 復旧（音声からの再認識） ----

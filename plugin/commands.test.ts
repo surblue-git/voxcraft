@@ -1,4 +1,10 @@
-import { matchByReading, parseCommand, parseProbeCommand, readingKey } from "./commands";
+import {
+    matchByReading,
+    needsConversion,
+    parseCommand,
+    parseProbeCommand,
+    readingKey,
+} from "./commands";
 
 let failures = 0;
 
@@ -94,6 +100,21 @@ check("probe: Aを再変換は採らない", parseProbeCommand("スミシンを�
 const nearOnly = fuzzy("入力復旧", "ニュウリョクフッキュウ");
 check("惜しい外れ: 確信は付かない", nearOnly !== null && !nearOnly.confident, JSON.stringify(nearOnly));
 check("probe: 惜しい外れは採らない", parseProbeCommand("入力復旧", "ニュウリョクフッキュウ") === null);
+
+// ---- 言い直し結果に変換が要るかの判定 ----
+// 実際に起きた流れ: 「起用」を選んで言い直し →「きよ」と発話 →「キヨ」が入る。
+// ここで候補を出さないと、もう一度「再変換」と言う羽目になる。
+check("要変換: 漢字→カタカナ", needsConversion("起用", "キヨ"));
+check("要変換: 漢字→ひらがな", needsConversion("起用", "きよ"));
+check("要変換: 漢字かな混じり→かな", needsConversion("言い直し", "いいなおし"));
+// 元がかなだけなら、かなで返るのが正しい。
+check("不要: かな→かな", !needsConversion("ですます", "でした"));
+// 変換済みで返ってきたなら候補は要らない。
+check("不要: 漢字→漢字", !needsConversion("起用", "寄与"));
+check("不要: 漢字→漢字かな混じり", !needsConversion("起用", "寄与した"));
+// 長い言い直しは文なので、単語の変換候補にはかけない。
+check("不要: 長すぎるかな", !needsConversion("起用", "きょうはいいてんきですね"));
+check("不要: 空", !needsConversion("起用", ""));
 
 if (failures > 0) {
     console.error(`\n${failures} 件失敗`);

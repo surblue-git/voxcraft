@@ -368,6 +368,22 @@ export function parseProbeCommand(
     return null;
 }
 
+/**
+ * 言い直しの結果に、まだ変換が要るか。
+ *
+ * 「漢字を含む語を言い直したのに、返ってきたのはかなだけ」＝ 読みは取れたが変換が
+ * されていない状態。文脈のない単語を Whisper が漢字に起こすことはあまり無く
+ * （実測「きよ」→「キヨ」）、ここで止めると結局もう一度「再変換」と言う羽目になる。
+ * 元がかなだけの箇所（「ですます」等）は、かなで返るのが正しいので対象外。
+ */
+export function needsConversion(original: string, spoken: string): boolean {
+    // 言い直しの対象は基本的に語1つ。これを超えるかな列は文なので、
+    // 変換候補モーダルを出しても選びようがない（「きょうはいいてんきですね」等）。
+    if (!spoken || spoken.length > 8) return false;
+    const kanaOnly = /^[ぁ-ゖァ-ヶー]+$/u;
+    return !kanaOnly.test(original) && kanaOnly.test(spoken);
+}
+
 const ARGUMENT_FREE = new Set<string>([
     "stop", "cancelInput", "restoreInput", "newline",
     "reconvert", "reconvertSelection", "respeak", "confirm", "cancel", "pick",

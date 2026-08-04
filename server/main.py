@@ -12,6 +12,7 @@
         {"type": "stop"}                     # 残り音声をflushして確定
         {"type": "reconvert", "text": "..."} # 再変換候補を要求
         {"type": "tune", "fast": true}       # 候補選択中だけ応答速度優先に切替（false で復帰）
+        {"type": "tune", "word": true}       # 言い直し待ちの間だけ単語向けに切替（同上）
 
   サーバー → クライアント（すべて JSON テキストフレーム）
     - {"type": "ready"}                                # 接続確立
@@ -1250,13 +1251,23 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     }))
 
                 elif ctype == "tune":
-                    # 候補モーダルを開いている間だけ「短い発話に速く応える」側へ寄せる。
-                    # 口述本体の既定値は触らず、モーダルを閉じたら必ず元に戻す。
+                    # 一時的な寄せ替え。口述本体の既定値は触らず、用が済んだら必ず戻す。
+                    #   fast=true … 候補モーダル中。短い発話に速く応える側へ。
+                    #   word=true … 言い直し待ち。文脈のない単語1つを正しく取る側へ。
+                    # どちらも解除は同じメッセージのフラグを下ろすこと。
                     if mode == "dictation":
                         if bool(cmd.get("fast", False)):
                             chunker.set_silence_sec(min(config.silence_sec, 0.25))
                             chunker.set_min_speech_sec(0.15)
                             opts = AsrOptions.command()
+                            punctuate = False
+                        elif bool(cmd.get("word", False)):
+                            # 区切りは口述のまま。単語だけを短く言うので、
+                            # ノイズ扱いで落とされないよう最小発話長だけ緩める。
+                            chunker.set_silence_sec(config.silence_sec)
+                            chunker.set_min_speech_sec(min(config.min_speech_sec, 0.15))
+                            opts = AsrOptions.word()
+                            # 単語に句点を付けない（「寄与。」を本文へ入れないため）。
                             punctuate = False
                         else:
                             chunker.set_silence_sec(config.silence_sec)

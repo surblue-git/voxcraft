@@ -328,6 +328,12 @@ export class AsrSocket {
         this.send({ type: "tune", fast });
     }
 
+    // 言い直し待ちの間だけ、文脈のない単語1つを取りやすい設定へ切り替える。
+    // false で口述の既定値へ戻す。
+    sendTuneWord(word: boolean): void {
+        this.send({ type: "tune", word });
+    }
+
     private send(obj: unknown): void {
         if (this.connected) this.ws!.send(JSON.stringify(obj));
     }

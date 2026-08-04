@@ -18,6 +18,7 @@ import { setIcon } from "obsidian";
 export interface ToolbarCallbacks {
     onMicToggle: () => void;
     onCancel: () => void;
+    onBackspace: () => void;
     onRestore: () => void;
     onInsert: (text: string) => void;
     onRespeak: () => void;
@@ -47,7 +48,16 @@ export class DictationToolbar {
 
         this.micBtn = this.iconBtn(bar, "mic", "音声入力のオン/オフ", () => this.cb.onMicToggle());
         this.micBtn.addClass("voxcraft-tb-mic");
-        this.iconBtn(bar, "delete", "入力キャンセル（直前の一文を削除／音声「入力キャンセル」）", () => this.cb.onCancel());
+        // 削除系は2つ並ぶ。取り違えると消える量が違うので、アイコンを明確に分ける。
+        //   eraser (消しゴム)  = 一文まるごと（入力キャンセル）
+        //   delete (⌫)        = 1文字だけ（バックスペース）
+        // 「⌫」の見た目そのものである delete を1文字側に譲り、文単位の方を eraser にした。
+        this.iconBtn(bar, "eraser", "入力キャンセル（直前の一文をまるごと削除／音声「入力キャンセル」）", () =>
+            this.cb.onCancel()
+        );
+        this.iconBtn(bar, "delete", "バックスペース（1文字削除。選択中はその範囲を削除）", () =>
+            this.cb.onBackspace()
+        );
         this.iconBtn(bar, "undo-2", "入力復元（キャンセルした文を再挿入／音声「入力復元」）", () => this.cb.onRestore());
         this.textBtn(bar, "、", "読点を挿入", () => this.cb.onInsert("、"));
         this.textBtn(bar, "。", "句点を挿入", () => this.cb.onInsert("。"));

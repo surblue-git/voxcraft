@@ -139,6 +139,32 @@ class AsrOptions:
         )
 
     @staticmethod
+    def word() -> "AsrOptions":
+        """言い直しの発話（文脈のない単語1つ）。
+
+        initial_prompt を外すのが要点。「以下は日本語の口述です。句読点を…」という
+        文章向けのプロンプトは、単独の語を文の一部として解こうとして壊す。
+        2026-08-05 実測（kotoba, 合成音声）:
+            「きよ」  prompt有→'キオ'   prompt無→'キヨ'
+            「きよう」prompt有→'気を'   prompt無→'起用'
+        文脈のある発話（「業績に寄与しました」）は prompt の有無で結果が変わらない
+        ので、言い直し中だけ外せば副作用がない。
+        [[voxcraft-transcribe-model-split]] の turbo が壊れる件と同系統の罠。
+
+        短い語が「吐息の幻覚」として捨てられると置換できないため、破棄側も緩める。
+        """
+        return AsrOptions(
+            vad_filter=config.vad_filter,
+            no_speech_threshold=max(config.no_speech_threshold, 0.9),
+            logprob_threshold=min(config.logprob_threshold, -2.0),
+            beam_size=max(config.beam_size, 5),
+            # 「はい」「うん」等も、言い直しの置換語としては正当な発話になりうる。
+            block_hallucinations=False,
+            condition_on_previous=False,
+            initial_prompt=None,
+        )
+
+    @staticmethod
     def probe() -> "AsrOptions":
         """音声コマンドの先読み（小さいモデルでの短い1回）。
 
