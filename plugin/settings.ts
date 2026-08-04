@@ -1,7 +1,7 @@
 import { App, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import type VoxCraftPlugin from "./main";
 import { AudioInputDevice, listAudioInputs } from "./audio";
-import { DictModal, fetchHealth, httpBase } from "./dict";
+import { DictModal, fetchDictionaryCatalog, fetchHealth, httpBase } from "./dict";
 
 export interface VoxEndpoint {
     label: string; // 表示名（例:「自宅LAN」「Tailscale」）
@@ -13,6 +13,7 @@ export const AUTO = "auto"; // selection が "auto" なら候補すべてへ同�
 export interface VoxCraftSettings {
     endpoints: VoxEndpoint[]; // 接続先候補（上から順に試すが、自動時は同時接続レース）
     selection: string;        // "auto" | エンドポイントの url（固定接続）
+    dictionarySetByEndpoint: Record<string, string>; // 接続先URLごとの辞書セットID
     stripJaAlnumSpace: boolean; // 日本語と英数字の間の半角スペース除去
     symbolDictation: boolean;   // 「まる」等の記号読み上げ
     enableCommands: boolean;    // 音声コマンドを有効化
@@ -29,6 +30,7 @@ export interface VoxCraftSettings {
 export const DEFAULT_SETTINGS: VoxCraftSettings = {
     endpoints: [{ label: "このPC", url: "ws://localhost:8760/ws" }],
     selection: AUTO,
+    dictionarySetByEndpoint: {},
     stripJaAlnumSpace: true,
     symbolDictation: true,
     enableCommands: true,
@@ -50,6 +52,9 @@ export function migrateSettings(s: VoxCraftSettings): VoxCraftSettings {
         s.endpoints = [...DEFAULT_SETTINGS.endpoints];
     }
     if (!s.selection) s.selection = AUTO;
+    if (!s.dictionarySetByEndpoint || typeof s.dictionarySetByEndpoint !== "object") {
+        s.dictionarySetByEndpoint = {};
+    }
     if (s.insertAt !== "cursor") s.insertAt = "anchor";
     if (typeof s.pauseComma !== "boolean") s.pauseComma = true;
     if (typeof s.showToolbar !== "boolean") s.showToolbar = true;
@@ -215,6 +220,11 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                             if (this.plugin.settings.selection === prev) {
                                 this.plugin.settings.selection = v.trim();
                             }
+                            if (prev && prev !== v.trim() && this.plugin.settings.dictionarySetByEndpoint[prev]) {
+                                this.plugin.settings.dictionarySetByEndpoint[v.trim()] =
+                                    this.plugin.settings.dictionarySetByEndpoint[prev];
+                                delete this.plugin.settings.dictionarySetByEndpoint[prev];
+                            }
                             await this.plugin.saveSettings();
                         });
                     t.inputEl.style.minWidth = "22em";
@@ -229,6 +239,7 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                             if (this.plugin.settings.selection === removed) {
                                 this.plugin.settings.selection = AUTO;
                             }
+                            delete this.plugin.settings.dictionarySetByEndpoint[removed];
                             await this.plugin.saveSettings();
                             this.display();
                         })
@@ -295,10 +306,46 @@ export class VoxCraftSettingTab extends PluginSettingTab {
         containerEl.createEl("h3", { text: "ユーザー辞書" });
         containerEl.createEl("p", {
             text:
-                "誤変換を望む表記に置き換える。サーバー上の userdict.json をここから編集でき、" +
+                "誤変換を望む表記に置き換える。現在はサーバー上の共通辞書をここから編集でき、" +
                 "保存すると再起動なしで反映される（Androidからも編集可）。",
             cls: "setting-item-description",
         });
+
+        containerEl.createEl("p", {
+            text: "辞書セットは接続先ごとに保存され、録音・再変換・音声からの復旧へ共通して適用されます。",
+            cls: "setting-item-description",
+        });
+        for (const endpoint of this.plugin.settings.endpoints) {
+            const url = endpoint.url.trim();
+            if (!url) continue;
+            const setting = new Setting(containerEl)
+                .setName(`使用する辞書 — ${endpoint.label || url}`)
+                .setDesc("サーバーから辞書一覧を読み込み中…");
+            setting.addDropdown((dropdown) => {
+                dropdown.addOption("", "読み込み中…");
+                dropdown.setValue("");
+                dropdown.selectEl.disabled = true;
+                void fetchDictionaryCatalog(url).then((catalog) => {
+                    const sets = catalog.sets.filter((item) => item.valid);
+                    dropdown.selectEl.empty();
+                    for (const item of sets) dropdown.addOption(item.id, item.name);
+                    const selected = this.plugin.dictionarySetIdFor(url);
+                    dropdown.setValue(sets.some((item) => item.id === selected) ? selected : sets[0]?.id ?? "");
+                    dropdown.selectEl.disabled = sets.length === 0;
+                    const chosen = sets.find((item) => item.id === dropdown.getValue());
+                    setting.setDesc(chosen
+                        ? `${chosen.description || chosen.name} / 構成: ${chosen.profiles.join(" + ")} / 登録先: ${chosen.writableProfile || chosen.profiles[chosen.profiles.length - 1]}`
+                        : "利用できる辞書セットがありません。");
+                    dropdown.onChange(async (setId) => {
+                        await this.plugin.setDictionarySetFor(url, setId);
+                        this.display();
+                    });
+                }).catch((error) => {
+                    dropdown.selectEl.disabled = true;
+                    setting.setDesc(`辞書一覧を取得できません: ${error instanceof Error ? error.message : error}`);
+                });
+            });
+        }
 
         new Setting(containerEl)
             .setName("辞書を編集")

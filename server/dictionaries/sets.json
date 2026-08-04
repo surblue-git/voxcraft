@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "sets": [
+    {
+      "id": "default",
+      "name": "共通",
+      "description": "共通辞書のみを使用する既定セット",
+      "profiles": [
+        "common"
+      ],
+      "writableProfile": "common"
+    }
+  ]
+}

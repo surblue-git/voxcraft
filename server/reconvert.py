@@ -39,15 +39,22 @@ class _Reading:
         except Exception:
             self._tokenizer = None
 
-    def to_hiragana(self, text: str) -> str:
+    def to_hiragana(
+        self,
+        text: str,
+        reverse_replacements: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
+    ) -> str:
         """テキスト全体の読み（ひらがな）を返す。
 
         ユーザー辞書の表記→読みを最優先で適用し、残りを Sudachi でひらがな化する。
         """
-        from userdict import get_reverse_replacements
+        if reverse_replacements is None:
+            from userdict import get_reverse_replacements
+
+            reverse_replacements = get_reverse_replacements()
 
         # 1. ユーザー辞書の逆引き（表記 → 読み）を適用
-        for surface, hira in get_reverse_replacements():
+        for surface, hira in reverse_replacements:
             if surface and surface in text:
                 text = text.replace(surface, hira)
 
@@ -97,7 +104,10 @@ def _google_transliterate(hiragana: str) -> list[Segment]:
     return segments
 
 
-def reconvert(text: str) -> dict:
+def reconvert(
+    text: str,
+    reverse_replacements: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
+) -> dict:
     """テキストの再変換候補を返す。
 
     戻り値: {
@@ -106,7 +116,7 @@ def reconvert(text: str) -> dict:
         "online": bool,   # Google CGI が使えたか
     }
     """
-    hira = _reading.to_hiragana(text)
+    hira = _reading.to_hiragana(text, reverse_replacements)
     result = {"reading": hira, "segments": [], "online": False}
 
     if not config.use_google_cgi or not hira:

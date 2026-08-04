@@ -1,24 +1,41 @@
-"""ユーザー辞書（読み→表記の置換 ＋ 記号語の登録）。
+"""ユーザー辞書の互換ファサード。
 
-2種類を1ファイル(userdict.json)で管理する:
+正規データは dictionaries/profiles/*.json で管理する。既存サーバー・プラグインが
+利用する関数と /dict API はこのモジュールで維持し、旧 userdict.json は初回だけ
+common プロファイルへ非破壊移行する。
+
+主な辞書機能:
 - replacements: 語の置換（例 ウィンドウズ→Windows、じょうぷらほう→情プラ法）。本文中どこでも置換。
 - symbols: 「単独で言った記号語」を記号に変換（例 当点→、、海業→改行）。
   Whisper は単独の記号語を同音異義漢字にしがち（てん→点/当店、かいぎょう→開業/海業）。
   観測した綴りをここに登録すれば記号になる。単独チャンク時のみ効くので誤爆しない。
 
-どちらも手編集で保存すると自動反映（再起動不要）。JSONの末尾カンマ・//コメントは寛容に読む。
+新しい辞書ファイルも保存すると自動反映（再起動不要）。JSONの末尾カンマ・
+//コメントは寛容に読む。
 """
 from __future__ import annotations
 
-import json
 import os
-import re
 import threading
+from pathlib import Path
+
+from dictionary_registry import (
+    DictionarySnapshot,
+    DictionaryRegistry,
+    DictionarySchemaError,
+    build_hotword_prompt,
+    load_json_relaxed,
+    validate_profile,
+)
 
 # 既定の辞書ファイル。VOXCRAFT_USERDICT で場所を上書き可能。
 _PATH = os.environ.get("VOXCRAFT_USERDICT") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "userdict.json"
 )
+_DICTIONARIES_DIR = os.environ.get("VOXCRAFT_DICTIONARIES_DIR") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "dictionaries"
+)
+_REGISTRY = DictionaryRegistry(Path(_DICTIONARIES_DIR), Path(_PATH))
 
 # 記号セクションで「改行」を表す別名（値がこれなら "\n" に変換）。
 _NEWLINE_ALIASES = {"改行", "かいぎょう", "newline", "\\n", "\n"}
@@ -67,30 +84,17 @@ _cache: dict = {
     "error": None,
 }
 
-_TRAILING_COMMA = re.compile(r",(\s*[}\]])")
-_LINE_COMMENT = re.compile(r"(?m)//.*$")
-# 値の閉じ引用符の直後（改行を挟んで次のキーの引用符が続く）にカンマが無いケース。
-_MISSING_COMMA = re.compile(r'"(?=\s*\r?\n\s*")')
-
 
 def _ensure_file() -> None:
-    if not os.path.exists(_PATH):
-        try:
-            with open(_PATH, "w", encoding="utf-8") as f:
-                json.dump(_DEFAULTS, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+    _REGISTRY.ensure_initialized(_DEFAULTS)
 
 
 def _parse(raw: str) -> dict:
-    """厳密→寛容（コメント/カンマ抜け/末尾カンマを補正）の順にパースを試みる。"""
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        cleaned = _LINE_COMMENT.sub("", raw)
-        cleaned = _MISSING_COMMA.sub('",', cleaned)   # カンマ抜けを補う
-        cleaned = _TRAILING_COMMA.sub(r"\1", cleaned)  # 末尾カンマを除く
-        return json.loads(cleaned)  # まだ失敗するなら例外を上へ
+    """後方互換: 旧辞書と同じ寛容JSONパーサー。"""
+    parsed = load_json_relaxed(raw)
+    if not isinstance(parsed, dict):
+        raise DictionarySchemaError("辞書のルートはオブジェクトである必要があります")
+    return parsed
 
 
 def _items_from(reps: dict) -> list[tuple[str, str]]:
@@ -126,15 +130,13 @@ def _hallucinations_from(halls: list) -> set[str]:
 
 
 def _reload() -> None:
-    """ファイルを読み直して items / symbols / hotwords / hallucinations を再構築する。"""
-    with open(_PATH, encoding="utf-8") as f:
-        data = _parse(f.read())
-    items = _items_from(data.get("replacements", {}) or {})
-    symbols = _symbols_from(data.get("symbols", {}) or {})
-    custom_hotwords = data.get("hotwords", [])
-    hallucinations = _hallucinations_from(data.get("hallucinations", []))
-    hotwords = _build_hotwords(custom_hotwords, items)
-    reverse_items = _reverse_items_from(items)
+    """既定辞書セットを読み、既存ランタイム用キャッシュへコンパイルする。"""
+    compiled = _REGISTRY.compile_set("default")
+    items = list(compiled.replacements)
+    symbols = _symbols_from(compiled.symbols)
+    hallucinations = set(compiled.hallucinations)
+    hotwords = compiled.hotword_prompt
+    reverse_items = list(compiled.reverse_replacements)
 
     _cache["items"] = items
     _cache["symbols"] = symbols
@@ -155,53 +157,27 @@ def _build_hotwords(
     安全域に収める（実測: 約120字超で全チャンク脱落。initial_prompt 分の余裕も見て
     既定 90字上限）。先頭（＝重要語）から詰めて上限で打ち切る。
     """
-    vals, seen = [], set()
-    if isinstance(custom_hotwords, list):
-        for w in custom_hotwords:
-            if isinstance(w, str) and w and w not in seen:
-                seen.add(w)
-                vals.append(w)
-
-    for k, v in items:
-        for w in (v, k):
-            if w and w not in seen and len(w) >= 2:
-                seen.add(w)
-                vals.append(w)
-            if len(vals) >= limit:
-                break
-        if len(vals) >= limit:
-            break
-
-    # 総文字数の安全上限で打ち切る。
-    kept: list[str] = []
-    total = 0
-    for w in vals:
-        add = (1 if kept else 0) + len(w)  # スペース区切り分
-        if total + add > max_chars:
-            break
-        kept.append(w)
-        total += add
-    return " ".join(kept)
+    return build_hotword_prompt(tuple(custom_hotwords or ()), tuple(items), limit=limit, max_chars=max_chars)
 
 
 def _refresh() -> None:
-    """mtime が変わっていれば読み直す。失敗時は直前の内容を保持して警告。"""
-    _ensure_file()
+    """辞書群が変わっていれば読み直す。失敗時は直前の内容を保持する。"""
     try:
-        mtime = os.path.getmtime(_PATH)
-    except OSError:
-        mtime = None
+        signature = _REGISTRY.signature(_DEFAULTS)
+    except (OSError, DictionarySchemaError) as exc:
+        signature = (("registry-error", 0, 0),)
+        _cache["error"] = f"{type(exc).__name__}: {exc}"
     with _lock:
-        if _cache["items"] is None or _cache["mtime"] != mtime:
+        if _cache["items"] is None or _cache["mtime"] != signature:
             try:
                 _reload()
                 _cache["error"] = None
-            except (OSError, json.JSONDecodeError, AttributeError) as exc:
+            except (OSError, DictionarySchemaError, AttributeError, TypeError) as exc:
                 msg = f"{type(exc).__name__}: {exc}"
                 _cache["error"] = msg
                 print(
-                    f"[VoxCraft] userdict.json を読めません（{msg}）。"
-                    f"直前の辞書を使用します。カンマ等を確認してください: {_PATH}"
+                    f"[VoxCraft] 辞書セットを読めません（{msg}）。"
+                    f"直前の辞書を使用します。辞書ファイルを確認してください: {_DICTIONARIES_DIR}"
                 )
                 if _cache["items"] is None:
                     _cache["items"] = _items_from(_DEFAULTS["replacements"])
@@ -211,7 +187,7 @@ def _refresh() -> None:
                     )
                     _cache["hallucinations"] = set()
                     _cache["reverse_items"] = _reverse_items_from(_cache["items"])
-            _cache["mtime"] = mtime
+            _cache["mtime"] = signature
 
 
 def get_replacements() -> list[tuple[str, str]]:
@@ -250,6 +226,12 @@ def get_error() -> str | None:
     return _cache["error"]
 
 
+def get_dictionary_snapshot(set_id: str = "default") -> DictionarySnapshot:
+    """指定セットを検証・コンパイルし、以後ファイル変更の影響を受けない形で返す。"""
+    _ensure_file()
+    return _REGISTRY.compile_set(set_id)
+
+
 # --- 編集API（プラグインのUIから読み書きする） -------------------------------
 #
 # サーバーは 0.0.0.0 で待ち受け、認証を持たない。書き込みを受ける以上、
@@ -265,23 +247,21 @@ class DictValidationError(ValueError):
 
 
 def read_raw() -> dict:
-    """UI表示用に replacements / symbols をそのまま返す（記号は原文表記のまま）。"""
-    _ensure_file()
+    """既存UI用に common を従来の replacements / symbols 形式で返す。"""
     try:
-        with open(_PATH, encoding="utf-8") as f:
-            data = _parse(f.read())
+        _ensure_file()
+        result = _REGISTRY.profile_projection("common")
     except Exception:  # noqa: BLE001 - 壊れていても UI は開けるようにする
-        data = {}
-    reps = data.get("replacements") or {}
-    syms = data.get("symbols") or {}
-    return {
-        "replacements": {k: v for k, v in reps.items()
-                         if isinstance(k, str) and isinstance(v, str)},
-        "symbols": {k: v for k, v in syms.items()
-                    if isinstance(k, str) and isinstance(v, str)},
-        "path": _PATH,
-        "error": get_error(),
-    }
+        _refresh()
+        result = {
+            "replacements": dict(_cache["items"] or []),
+            "symbols": dict(_cache["symbols"] or {}),
+            "path": str(_REGISTRY.profile_path("common")),
+            "legacyPath": _PATH,
+            "profileId": "common",
+        }
+    result["error"] = get_error()
+    return result
 
 
 def _validate_map(obj, name: str) -> dict[str, str]:
@@ -311,36 +291,60 @@ def _validate_map(obj, name: str) -> dict[str, str]:
 
 
 def write_raw(replacements, symbols) -> dict:
-    """UIから受け取った辞書を検証して保存する。他のキー（hotwords等）は保持する。"""
+    """既存UIから common を更新する。拡張フィールドと無効項目は保持する。"""
     reps = _validate_map(replacements, "replacements")
     syms = _validate_map(symbols, "symbols")
 
     _ensure_file()
-    try:
-        with open(_PATH, encoding="utf-8") as f:
-            data = _parse(f.read())
-        if not isinstance(data, dict):
-            data = {}
-    except Exception:  # noqa: BLE001 - 壊れていたら既定から作り直す
-        data = dict(_DEFAULTS)
-
-    data["replacements"] = reps
-    data["symbols"] = syms
-
-    # 一時ファイル経由で置き換え、書き込み途中の破損を避ける。
-    # 途中で失敗しても本体は無傷のまま。書きかけの一時ファイルは残さない。
-    tmp = _PATH + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, _PATH)
-    except Exception:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
+    _REGISTRY.update_profile_maps("common", reps, syms)
 
     with _lock:
         _cache["mtime"] = None  # 次の参照で確実に読み直す
     return {"replacements": len(reps), "symbols": len(syms)}
+
+
+def dictionary_catalog() -> dict:
+    """管理UI向けの辞書プロファイル・セット一覧（本文は含めない）。"""
+    _ensure_file()
+    return _REGISTRY.catalog()
+
+
+def read_profile(profile_id: str) -> dict:
+    """検証済みの辞書プロファイル本文を返す。"""
+    _ensure_file()
+    return _REGISTRY.load_profile(profile_id)
+
+
+def validate_profile_raw(data) -> dict:
+    """保存せずに新形式の辞書を検証する。"""
+    diagnostics = validate_profile(data)
+    return {
+        "valid": not any(item.severity == "error" for item in diagnostics),
+        "diagnostics": [item.as_dict() for item in diagnostics],
+    }
+
+
+def add_profile_entry(
+    profile_id: str,
+    observed: str,
+    output: str,
+    *,
+    expected_revision: str | None = None,
+    hotword: bool = False,
+    priority: int = 0,
+    note: str = "",
+) -> dict:
+    """Add one replacement to a profile using optimistic concurrency."""
+    _ensure_file()
+    result = _REGISTRY.add_entry(
+        profile_id,
+        observed,
+        output,
+        expected_revision=expected_revision,
+        hotword=hotword,
+        priority=priority,
+        note=note,
+    )
+    with _lock:
+        _cache["mtime"] = None
+    return result

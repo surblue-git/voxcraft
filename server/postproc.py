@@ -10,6 +10,14 @@
 from __future__ import annotations
 
 import re
+from typing import Mapping, Protocol, Sequence
+
+
+class ReplacementApplier(Protocol):
+    def apply(self, text: str) -> str: ...
+
+
+ReplacementRules = Sequence[tuple[str, str]] | ReplacementApplier
 
 # 日本語（ひらがな・カタカナ・漢字・全角記号など）の文字クラス。
 _JA = (
@@ -80,7 +88,7 @@ def strip_ja_alnum_space(text: str) -> str:
     return _JA_ALNUM_SPACE.sub("", text)
 
 
-def apply_symbol_dictation(text: str, extra: dict[str, str] | None = None) -> str:
+def apply_symbol_dictation(text: str, extra: Mapping[str, str] | None = None) -> str:
     """句読点・記号の読み上げを記号へ変換する（誤爆を避けるため限定的に）。
 
     方針:
@@ -115,12 +123,15 @@ def apply_symbol_dictation(text: str, extra: dict[str, str] | None = None) -> st
     return t
 
 
-def apply_user_dict(text: str, replacements: list[tuple[str, str]]) -> str:
+def apply_user_dict(text: str, replacements: ReplacementRules) -> str:
     """ユーザー辞書で置換する（例: ウィンドウズ→Windows）。
 
-    replacements は (読み, 表記) のリスト。長いキーを先に適用する前提
-    （呼び出し側で長さ降順にソート済みであること）。
+    Phase 1B の ReplacementPlan なら最長一致・単一走査で適用する。
+    後方互換として従来の (読み, 表記) リストも受け付ける。
     """
+    apply_once = getattr(replacements, "apply", None)
+    if callable(apply_once):
+        return apply_once(text)
     for key, val in replacements:
         if key and key in text:
             text = text.replace(key, val)
@@ -220,8 +231,8 @@ def postprocess(
     *,
     strip_space: bool = True,
     symbol_dictation: bool = False,
-    replacements: list[tuple[str, str]] | None = None,
-    symbols: dict[str, str] | None = None,
+    replacements: ReplacementRules | None = None,
+    symbols: Mapping[str, str] | None = None,
     auto_punctuate: bool = False,
 ) -> str:
     """確定チャンクに対する後処理をまとめて適用する。"""

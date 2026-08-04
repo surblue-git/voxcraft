@@ -10,7 +10,15 @@ import {
     resolveAudioInput,
 } from "./audio";
 import { looksLikeRespeak, parseCommand, parseModalCommand } from "./commands";
-import { DictModal, fetchDict, fetchReconvert, ReconvertPayload, saveDict } from "./dict";
+import {
+    addDictionaryEntry,
+    DictModal,
+    DictionarySetModal,
+    fetchDictionaryCatalog,
+    fetchReconvert,
+    QuickAddDictionaryModal,
+    ReconvertPayload,
+} from "./dict";
 import { ReconvertModal } from "./suggest";
 import {
     AUTO,
@@ -144,6 +152,11 @@ export default class VoxCraftPlugin extends Plugin {
     private source: AsrSource = "microphone";
     private sourceDevice = "";
     private autoStopSec = 0;
+    private activeDictionarySetId = "";
+    private activeDictionarySetName = "";
+    private activeDictionaryRevision = "";
+    private activeDictionaryWritableProfile = "";
+    private activeDictionaryProfileRevisions: Record<string, string> = {};
     // サーバーが音声を保存しているセッションID。復旧の材料。
     private session: string | null = null;
     // 挿入したテキストと、その元になった音声の位置（秒）。再認識の宛先を引くのに使う。
@@ -289,6 +302,18 @@ export default class VoxCraftPlugin extends Plugin {
             callback: () => this.openEndpointMenu(),
         });
         this.addCommand({
+            id: "select-dictionary-set",
+            name: "辞書セットを選択",
+            icon: "library",
+            callback: () => void this.openDictionarySetModal(),
+        });
+        this.addCommand({
+            id: "add-selection-to-dictionary",
+            name: "選択範囲を辞書に追加",
+            icon: "book-plus",
+            callback: () => void this.openQuickAddModal(),
+        });
+        this.addCommand({
             id: "edit-userdict",
             name: "ユーザー辞書を編集",
             icon: "book-open",
@@ -407,15 +432,28 @@ export default class VoxCraftPlugin extends Plugin {
         }
 
         try {
+            const connectedUrl = this.socket.activeUrl;
+            const dictionarySetId = connectedUrl
+                ? this.dictionarySetIdFor(connectedUrl)
+                : "default";
             const started = await this.socket.sendStart(
                 this.settings.stripJaAlnumSpace,
                 this.settings.symbolDictation,
                 mode,
                 source,
-                clientInput?.label
+                clientInput?.label,
+                dictionarySetId
             );
             this.sourceDevice = started.device ?? "";
             this.autoStopSec = started.autoStopSec ?? 0;
+            this.activeDictionarySetId = started.dictionarySetId;
+            this.activeDictionarySetName = started.dictionarySetName;
+            this.activeDictionaryRevision = started.dictionaryRevision;
+            this.activeDictionaryWritableProfile = started.dictionaryWritableProfile;
+            this.activeDictionaryProfileRevisions = started.dictionaryProfileRevisions;
+            if (started.dictionaryWarningCount > 0) {
+                new Notice(`VoxCraft: 辞書「${started.dictionarySetName}」に警告が${started.dictionaryWarningCount}件あります。`, 8000);
+            }
         } catch (e) {
             new Notice(
                 `VoxCraft: ${isSystemSource(source) ? "PC音声" : "マイク"}を開始できませんでした。` +
@@ -1014,7 +1052,7 @@ export default class VoxCraftPlugin extends Plugin {
                     onRespeak: () => this.startRespeak(),
                     onReconvert: () => void this.reconvertSelection(),
                     onKeyboardToggle: () => this.toggleKeyboard(),
-                    onOpenDict: () => this.openDictModal(),
+                    onOpenDict: () => void this.openQuickAddModal(),
                     onClose: () => {
                         // バーを閉じるとキーボードを出す手段（⌨）も無くなるので、
                         // 抑制も一緒に解除する。
@@ -1097,13 +1135,14 @@ export default class VoxCraftPlugin extends Plugin {
     // 現在の基本ステータス表記（非同期処理から戻すときに使う）。
     private idleStatus(): string {
         if (!this.recording) return "停止中";
+        const dictionary = this.activeDictionarySetName ? ` / 辞書: ${this.activeDictionarySetName}` : "";
         if (isSystemSource(this.source)) {
             const where = this.source === "system-client" ? "この端末" : "サーバー機";
             return this.sourceDevice
-                ? `● PC音声を文字起こし中（${where}: ${this.sourceDevice}）`
-                : `● PC音声を文字起こし中（${where}）`;
+                ? `● PC音声を文字起こし中（${where}: ${this.sourceDevice}）${dictionary}`
+                : `● PC音声を文字起こし中（${where}）${dictionary}`;
         }
-        return this.mode === "transcribe" ? "● 文字起こし中" : "● 録音中";
+        return this.mode === "transcribe" ? `● 文字起こし中${dictionary}` : `● 録音中${dictionary}`;
     }
 
     // 「Aを再変換」: 誤変換でも読みは正しいことを利用する。
@@ -1121,7 +1160,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.setStatus("変換候補を取得中…");
         let payload: ReconvertPayload;
         try {
-            payload = await fetchReconvert(url, target);
+            payload = await fetchReconvert(url, target, this.appliedDictionarySetId(url));
         } catch (e) {
             this.setStatus(this.idleStatus());
             new Notice(`VoxCraft: 変換候補を取得できません（${e instanceof Error ? e.message : e}）`);
@@ -1261,7 +1300,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.setStatus("変換候補を取得中…");
         let payload: ReconvertPayload;
         try {
-            payload = await fetchReconvert(url, text);
+            payload = await fetchReconvert(url, text, this.appliedDictionarySetId(url));
         } catch (e) {
             this.setStatus(this.idleStatus());
             new Notice(`VoxCraft: 変換候補を取得できません（${e instanceof Error ? e.message : e}）`);
@@ -1378,10 +1417,12 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
         try {
-            const d = await fetchDict(url);
-            d.replacements[from] = to;
-            await saveDict(url, d);
-            new Notice(`VoxCraft: 辞書に登録しました — ${from} → ${to}（以後自動修正）`);
+            const result = await this.addReplacementDirect(url, from, to);
+            new Notice(
+                result.created
+                    ? `VoxCraft: 辞書に登録しました — ${from} → ${to}（次回の録音から反映）`
+                    : `VoxCraft: すでに同じ辞書登録があります — ${from} → ${to}`
+            );
         } catch (e) {
             new Notice(`VoxCraft: 辞書に登録できません — ${e instanceof Error ? e.message : e}`, 8000);
         }
@@ -1477,7 +1518,14 @@ export default class VoxCraftPlugin extends Plugin {
 
         this.setStatus("音声から再認識中…");
         try {
-            const result = await recognizeRange(url, this.session, range.start, range.end);
+            const result = await recognizeRange(
+                url,
+                this.session,
+                range.start,
+                range.end,
+                2,
+                this.appliedDictionarySetId(url)
+            );
             this.setStatus(this.recording ? "● 文字起こし中" : "停止中");
             new RecoverModal(this.app, selected, result, (text) => {
                 cm.dispatch({ changes: { from: sel.from, to: sel.to, insert: text } });
@@ -1601,6 +1649,125 @@ export default class VoxCraftPlugin extends Plugin {
         return this.socket?.activeUrl ?? resolveUrls(this.settings)[0] ?? null;
     }
 
+    dictionarySetIdFor(url: string): string {
+        return this.settings.dictionarySetByEndpoint[url.trim()] || "default";
+    }
+
+    async setDictionarySetFor(url: string, setId: string): Promise<void> {
+        const key = url.trim();
+        if (!key || !setId) return;
+        this.settings.dictionarySetByEndpoint[key] = setId;
+        await this.saveSettings();
+        new Notice(
+            `VoxCraft: 辞書セットを「${setId}」にしました` +
+            (this.recording ? "（現在の録音には影響せず、次回から適用）" : "")
+        );
+    }
+
+    private appliedDictionarySetId(url: string): string {
+        if (this.socket?.activeUrl === url && this.activeDictionarySetId) {
+            return this.activeDictionarySetId;
+        }
+        return this.dictionarySetIdFor(url);
+    }
+
+    private async dictionaryTarget(url: string): Promise<{
+        setId: string;
+        setName: string;
+        profileId: string;
+        profileName: string;
+        revision?: string;
+    }> {
+        const catalog = await fetchDictionaryCatalog(url);
+        const setId = this.appliedDictionarySetId(url);
+        const set = catalog.sets.find((item) => item.id === setId && item.valid);
+        if (!set) throw new Error(`辞書セット「${setId}」を利用できません`);
+        const profileId = set.writableProfile || set.profiles[set.profiles.length - 1];
+        const profile = catalog.profiles.find((item) => item.id === profileId);
+        if (!profile?.valid) throw new Error(`登録先辞書「${profileId}」を利用できません`);
+        return {
+            setId,
+            setName: set.name,
+            profileId,
+            profileName: profile.name,
+            revision: set.profileRevisions[profileId],
+        };
+    }
+
+    private async addReplacementDirect(url: string, from: string, to: string) {
+        const observed = from.trim();
+        const output = to.trim();
+        if (observed.length < 2) {
+            throw new Error("1文字のキーは誤置換しやすいため、2文字以上を指定してください");
+        }
+        if (observed.length > 128 || output.length > 256) {
+            throw new Error("登録できる長さを超えています（キー128字・値256字まで）");
+        }
+        const target = await this.dictionaryTarget(url);
+        return addDictionaryEntry(
+            url,
+            target.profileId,
+            observed,
+            output,
+            target.revision
+        );
+    }
+
+    private async openDictionarySetModal(): Promise<void> {
+        const url = this.activeUrl();
+        if (!url) {
+            new Notice("VoxCraft: 接続先が設定されていません");
+            return;
+        }
+        new DictionarySetModal(
+            this.app,
+            url,
+            this.dictionarySetIdFor(url),
+            (setId) => this.setDictionarySetFor(url, setId)
+        ).open();
+    }
+
+    private async openQuickAddModal(): Promise<void> {
+        const cm = this.cm && this.cm.dom.isConnected ? this.cm : this.getActiveCm();
+        if (!cm) {
+            new Notice("VoxCraft: ノートを編集モードで開いてください");
+            return;
+        }
+        const selection = cm.state.selection.main;
+        if (selection.empty) {
+            new Notice("VoxCraft: 誤認識した表記を選択してから辞書追加を実行してください");
+            return;
+        }
+        const observed = cm.state.doc.sliceString(selection.from, selection.to);
+        if (observed.length > 128) {
+            new Notice("VoxCraft: 選択が長すぎます（128文字まで）");
+            return;
+        }
+        const url = this.activeUrl();
+        if (!url) {
+            new Notice("VoxCraft: 接続先が設定されていません");
+            return;
+        }
+        try {
+            const target = await this.dictionaryTarget(url);
+            new QuickAddDictionaryModal(
+                this.app,
+                observed,
+                `${target.setName} › ${target.profileName}`,
+                async (from, to) => {
+                    const result = await this.addReplacementDirect(url, from, to);
+                    new Notice(
+                        result.created
+                            ? `VoxCraft: 辞書に登録しました — ${from} → ${to}（次回の録音から反映）`
+                            : `VoxCraft: すでに同じ登録があります — ${from} → ${to}`
+                    );
+                }
+            ).open();
+        } catch (error) {
+            new Notice(`VoxCraft: 辞書を準備できません — ${error instanceof Error ? error.message : error}`, 8000);
+        }
+    }
+
     private openRecordingsModal(): void {
         const url = this.activeUrl();
         if (!url) {
@@ -1643,6 +1810,17 @@ export default class VoxCraftPlugin extends Plugin {
 
     private setStatus(text: string): void {
         this.statusEl.setText(`🎙 VoxCraft: ${text}`);
+        if (this.recording && this.activeDictionarySetName) {
+            const profiles = Object.keys(this.activeDictionaryProfileRevisions).join(" + ");
+            this.statusEl.setAttribute(
+                "title",
+                `辞書: ${this.activeDictionarySetName} (${this.activeDictionarySetId})\n` +
+                `revision: ${this.activeDictionaryRevision}\n` +
+                `profiles: ${profiles}\n登録先: ${this.activeDictionaryWritableProfile}`
+            );
+        } else {
+            this.statusEl.removeAttribute("title");
+        }
     }
 
     async loadSettings(): Promise<void> {
