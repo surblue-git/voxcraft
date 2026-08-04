@@ -9,7 +9,14 @@ import {
     RAW_MIC,
     resolveAudioInput,
 } from "./audio";
-import { looksLikeRespeak, parseCommand, parseModalCommand } from "./commands";
+import {
+    looksLikeRespeak,
+    matchByReading,
+    parseCommand,
+    parseModalCommand,
+    parseProbeCommand,
+    ReadingMatch,
+} from "./commands";
 import {
     addDictionaryEntry,
     DictModal,
@@ -135,6 +142,9 @@ export default class VoxCraftPlugin extends Plugin {
     private reconvertTraversal: ReconvertTraversal | null = null;
     // 「ここを言い直し」で覚えた選択範囲。次の発話1回だけがこの範囲を置換する。
     private pendingRespeak: { from: number; to: number; text: string } | null = null;
+    // コマンド先読み（probe）で処理済みのチャンク番号。同じ番号の chunk は捨てる。
+    // 先読みが外れた場合はここに入らないので、本文は従来どおり流れる。
+    private consumedSeqs: number[] = [];
     // コマンド実行等で発話の流れが切れた直後は、次のチャンクに息継ぎ読点を打たない。
     private suppressJoiner = true;
     // 入力キャンセルで削除した確定チャンク。「入力復元」で再挿入する（口述のみ）。
@@ -600,6 +610,7 @@ export default class VoxCraftPlugin extends Plugin {
                 this.transcribing = true;
                 this.setStatus("認識中…");
             },
+            onProbe: (text, msg) => this.handleProbe(text, msg),
             onSession: (id) => {
                 this.session = id;
             },
@@ -715,6 +726,9 @@ export default class VoxCraftPlugin extends Plugin {
         this.socket = null;
         this.clearDictationAnchor();
         this.pendingRespeak = null;
+        // チャンク番号はセッションごとに1から振り直される。持ち越すと次の録音で
+        // 無関係なチャンクを「処理済み」として捨ててしまう。
+        this.consumedSeqs = [];
     }
 
     private clearDictationAnchor(): void {
@@ -761,10 +775,57 @@ export default class VoxCraftPlugin extends Plugin {
 
     // ---- 確定チャンクの処理 ----
 
+    // 小さいモデルによるコマンド先読み。本命の認識より1秒ほど早く着く。
+    //
+    // 認識時間は音声の長さにも beam 幅にもほとんど比例しない（Whisper が常に
+    // 30秒ぶんのメル窓をエンコードするため）ので、コマンドを速くする唯一の道が
+    // 「小さいモデルで先に一度読む」になる。実測 base で125ms、本命の kotoba は
+    // 1.15秒。ここで拾えたぶんだけ、キャンセルや言い直しが1秒早く効く。
+    //
+    // 速報は本文には絶対に使わない。確信のある固定句だけを実行し、処理した
+    // チャンク番号を覚えて、あとから届く本命チャンクを捨てる。
+    // 外れたときは何もしない ＝ 本文は従来どおり本命の認識結果が入る。
+    private handleProbe(text: string, msg: ServerMessage): void {
+        if (this.mode !== "dictation" || !this.recording) return;
+        if (typeof msg.seq !== "number" || !text.trim()) return;
+        // 言い直し待ちの発話は「置き換える本文」そのもの。速報の緩い判定で
+        // コマンドに横取りさせない（解除したいときは本命の認識結果で効く）。
+        if (this.pendingRespeak) return;
+        const reading = msg.reading || "";
+
+        // 候補モーダル中は発話が本文に入らないので、緩い判定をそのまま使える。
+        const cmd = this.reconvertModal
+            ? parseModalCommand(text)
+            : this.settings.enableCommands
+                ? parseProbeCommand(
+                    text,
+                    this.settings.commandFuzzy ? reading : "",
+                    this.settings.commandPrefix
+                )
+                : null;
+        if (!cmd) return;
+        // runCommand が false を返すのは「その状況では成立しない」場合（選択が無い
+        // 「言い直し」など）。本命チャンクに委ねるため、消費済みにはしない。
+        if (!this.runCommand(cmd)) return;
+
+        this.suppressJoiner = true;
+        this.consumedSeqs.push(msg.seq);
+        if (this.consumedSeqs.length > 20) this.consumedSeqs.shift();
+    }
+
     private handleChunk(text: string, msg?: ServerMessage): void {
         if (this.mode === "transcribe") {
             this.handleTranscribeChunk(text, msg);
             return;
+        }
+        // 先読みでコマンドとして処理済みのチャンク。本文には入れない。
+        if (typeof msg?.seq === "number") {
+            const at = this.consumedSeqs.indexOf(msg.seq);
+            if (at >= 0) {
+                this.consumedSeqs.splice(at, 1);
+                this.suppressJoiner = true;
+                return;
+            }
         }
         // 候補モーダルが開いている間は、発話を本文へ入れずにモーダル操作として扱う。
         // 「3番」が「サンバー」と認識されて本文に混ざった実例への対処。
@@ -783,6 +844,9 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
         // 以下は従来どおりの口述処理（音声コマンドの判定を含む）。
+        // 表記が外れただけの命令を読みで拾えたら、そのまま実行する。拾いきれない
+        // 「惜しい外れ」は本文に入れたうえで、あとで実行を提案する（勝手に消さない）。
+        let nearMiss: ReadingMatch | null = null;
         if (this.settings.enableCommands) {
             const cmd = parseCommand(text, this.settings.commandPrefix);
             // 「確定」「キャンセル」は対象（モーダル等）が無ければ本文として挿入する。
@@ -796,6 +860,19 @@ export default class VoxCraftPlugin extends Plugin {
                 this.suppressJoiner = true;
                 return;
             }
+            if (!cmd && this.settings.commandFuzzy) {
+                const near = matchByReading(
+                    text,
+                    msg?.reading || "",
+                    this.settings.commandPrefix
+                );
+                if (near?.confident && this.runCommand(near.cmd)) {
+                    this.suppressJoiner = true;
+                    new Notice(`VoxCraft: 「${text}」を「${near.phrase}」として実行しました。`);
+                    return;
+                }
+                if (near) nearMiss = near;
+            }
         }
         // 「ここを言い直し」の直後の発話は、アンカーではなく覚えた範囲を置換する。
         if (this.pendingRespeak) {
@@ -804,6 +881,37 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
         this.insertText(this.withPauseComma(text, msg));
+        if (nearMiss) this.offerNearMiss(text, nearMiss);
+    }
+
+    // 命令のつもりが本文として入ってしまった発話に、1タップの逃げ道を出す。
+    //
+    // 誤認識でコマンドが外れたときの本当の負担は「入った文字を手で消す」ことなので、
+    // 挿入は従来どおり行ったうえで、押せば取り消して実行する通知を添える。
+    // 押さなければただの通知として消える ＝ 本文は絶対に失われない。
+    private offerNearMiss(text: string, near: ReadingMatch): void {
+        const notice = new Notice("", 8000);
+        notice.messageEl.setText(`VoxCraft: 「${text}」`);
+        notice.messageEl.createEl("br");
+        const button = notice.messageEl.createEl("button", {
+            text: `「${near.phrase}」として実行`,
+            cls: "voxcraft-notice-action",
+        });
+        button.addEventListener("click", () => {
+            notice.hide();
+            // 入れてしまった命令文を先に取り除いてからコマンドを実行する。順序が逆だと
+            // 「入力キャンセル」が命令文ではなく1つ前の発話を消してしまう。
+            // 命令文は「入力復元」の対象にしない（復元したいのは本文だけ）。
+            const dropped = this.dropLastChunk();
+            if ("error" in dropped) {
+                new Notice(`VoxCraft: ${dropped.error}`);
+                return;
+            }
+            this.suppressJoiner = true;
+            if (!this.runCommand(near.cmd)) {
+                new Notice(`VoxCraft: 「${near.phrase}」は今の状態では実行できません。`);
+            }
+        });
     }
 
     // 息継ぎ読点: 直前の発話から短い間（息継ぎ）で続いたチャンクを「、」でつなぐ。
@@ -995,6 +1103,9 @@ export default class VoxCraftPlugin extends Plugin {
                 if (!this.hasSelection()) return false;
                 this.startRespeak();
                 return true;
+            case "respeakTarget":
+                void this.respeakByTarget(cmd.target);
+                return true;
             case "confirm":
                 // 候補モーダルが開いているときだけ意味を持つ。無ければ本文へ。
                 if (this.reconvertModal) {
@@ -1063,28 +1174,37 @@ export default class VoxCraftPlugin extends Plugin {
     // 音声・ツールバー・コマンドパレットの「入力キャンセル」の共通実装。
     // 削除した文は canceled に積み、「元に戻す」で再挿入できる。文字起こしでは動かない
     // （動画側の本文を勝手に消さない）。
+    // 直前チャンクを本文から取り除き、その文字列を返す（取れなければ null）。
+    // 通知は出さない。呼び出し側が用途に応じたメッセージを出す。
+    private dropLastChunk(): { text: string } | { error: string } {
+        const cm = this.cm;
+        const last = this.chunks[this.chunks.length - 1];
+        if (!cm || !cm.dom.isConnected || last === undefined) {
+            return { error: "キャンセルできる入力がありません（音声入力中に使ってください）。" };
+        }
+        const anchor = getAnchor(cm);
+        if (anchor === null) return { error: "挿入位置を見失いました。" };
+
+        const from = Math.max(0, anchor - last.length);
+        if (cm.state.doc.sliceString(from, anchor) !== last) {
+            return { error: "直前の入力が編集されているため取り消せません。" };
+        }
+        this.chunks.pop();
+        cm.dispatch({ changes: { from, to: anchor, insert: "" } });
+        return { text: last };
+    }
+
     private cancelLast(): void {
         if (this.mode === "transcribe" && this.recording) {
             new Notice("VoxCraft: 入力キャンセルは文字起こしでは使えません。");
             return;
         }
-        const cm = this.cm;
-        const last = this.chunks[this.chunks.length - 1];
-        if (!cm || !cm.dom.isConnected || last === undefined) {
-            new Notice("VoxCraft: キャンセルできる入力がありません（音声入力中に使ってください）。");
+        const dropped = this.dropLastChunk();
+        if ("error" in dropped) {
+            new Notice(`VoxCraft: ${dropped.error}`);
             return;
         }
-        const anchor = getAnchor(cm);
-        if (anchor === null) return;
-
-        const from = Math.max(0, anchor - last.length);
-        const current = cm.state.doc.sliceString(from, anchor);
-        if (current !== last) {
-            new Notice("VoxCraft: 直前の入力が編集されているため取り消せません。");
-            return;
-        }
-        this.chunks.pop();
-        cm.dispatch({ changes: { from, to: anchor, insert: "" } });
+        const last = dropped.text;
         this.canceled.push(last);
         if (this.canceled.length > 50) this.canceled.shift();
         // ボタン操作で発話の流れは切れているので、次のチャンクに息継ぎ読点を打たない。
@@ -1541,6 +1661,56 @@ export default class VoxCraftPlugin extends Plugin {
             text: cm.state.doc.sliceString(sel.from, sel.to),
         };
         this.setStatus("言い直し待ち — 次の発話で置換");
+    }
+
+    // 「Xを言い直し」: 直す場所を、選択ではなく声で指す。
+    //
+    // 手が塞がっているとき（歩きながら・書きながら）に範囲選択を挟むのが一番の
+    // 手間なので、言った語を本文から探して選び、そのまま置換待ちにする。
+    // まず発話どおりの表記で探し、外れたら「Aを再変換」と同じ読み由来の表記候補で
+    // もう一度探す（直したいのはたいてい誤変換された表記＝発話とは違う字面）。
+    private async respeakByTarget(target: string): Promise<void> {
+        const cm = this.cm;
+        if (!cm || !cm.dom.isConnected) {
+            new Notice("VoxCraft: 録音中に使ってください。");
+            return;
+        }
+
+        let hit = this.findLastSurface(cm, [target]);
+        if (!hit) {
+            const url = this.activeUrl();
+            if (url) {
+                this.setStatus("言い直す場所を探しています…");
+                try {
+                    const payload = await fetchReconvert(
+                        url,
+                        target,
+                        this.appliedDictionarySetId(url)
+                    );
+                    if (payload.online) {
+                        hit = this.findLastSurface(cm, buildSurfaces(target, payload.segments));
+                    }
+                } catch {
+                    /* 探せなければ下の案内に落ちる */
+                }
+                this.setStatus(this.idleStatus());
+            }
+        }
+        if (!hit) {
+            new Notice(
+                `VoxCraft: 「${target}」が本文に見つかりません。` +
+                "直したい範囲を選んで「ここを言い直し」と言ってください。"
+            );
+            return;
+        }
+
+        cm.dispatch({ selection: { anchor: hit.from, head: hit.to }, scrollIntoView: true });
+        this.pendingRespeak = {
+            from: hit.from,
+            to: hit.to,
+            text: cm.state.doc.sliceString(hit.from, hit.to),
+        };
+        this.setStatus(`言い直し待ち —「${this.pendingRespeak.text}」を次の発話で置換`);
     }
 
     // 言い直しの発話を、覚えていた範囲に検証付きで適用する。

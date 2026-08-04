@@ -79,6 +79,27 @@ def _is_starter(pos0: str) -> bool:
     return pos0 in _STARTER_POS
 
 
+def to_reading(text: str) -> str | None:
+    """テキストの読み（カタカナ）を返す。sudachi 未導入なら None。
+
+    音声コマンドの照合に使う。誤認識されても「音」はおおむね残るので、
+    表記の完全一致より当たりやすい（例:「乳酸キャンセル」→ニュウサンキャンセル、
+    「入力キャンセル」→ニュウリョクキャンセル ＝ 読みなら2文字違い）。
+    未知語は読みが取れないので表層をそのまま使う（かな書きの誤認識はこれで拾える）。
+    """
+    t = text.strip()
+    if not t:
+        return None
+    tok = _get_tokenizer()
+    if tok is None:
+        return None
+    try:
+        morphs = tok.tokenize(t, _mode)
+    except Exception:  # noqa: BLE001 — 読みは補助情報。取れなくても本文は返す。
+        return None
+    return "".join(m.reading_form() or m.surface() for m in morphs)
+
+
 def add_punctuation(text: str) -> str:
     """テキストに「。」「、」を自動挿入して返す（sudachi 未導入ならそのまま）。"""
     t = text.strip()

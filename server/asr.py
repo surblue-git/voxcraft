@@ -139,6 +139,24 @@ class AsrOptions:
         )
 
     @staticmethod
+    def probe() -> "AsrOptions":
+        """音声コマンドの先読み（小さいモデルでの短い1回）。
+
+        本文には一切使わない。「コマンドかどうか」を決めるためだけの結果なので、
+        速度に全振りし、短い発話が幻覚扱いで消えないよう破棄側は緩める。
+        initial_prompt は渡さない（口述用の文章プロンプトは短い命令語に不利）。
+        """
+        return AsrOptions(
+            vad_filter=False,      # 自前 VadChunker で切った後なので不要（実測13ms）
+            no_speech_threshold=0.95,
+            logprob_threshold=-3.0,
+            beam_size=1,
+            block_hallucinations=False,
+            condition_on_previous=False,
+            initial_prompt=None,
+        )
+
+    @staticmethod
     def recovery() -> "AsrOptions":
         """録音済み音声からの再認識（復旧）。速度を捨てて精度に全振りする。"""
         return AsrOptions(
@@ -396,3 +414,18 @@ _hq_transcriber: Transcriber | None = (
 def hq_transcriber() -> Transcriber:
     """文字起こし・復旧用のモデルを返す（未設定なら口述と同じものを使う）。"""
     return _hq_transcriber or transcriber
+
+
+# 音声コマンドの先読み専用モデル（既定 base ≒ 125ms）。本文には使わない。
+# 口述と同じモデルが指定されたら二重ロードを避けて使い回す。
+_probe_transcriber: Transcriber | None = (
+    Transcriber(config.command_probe_model)
+    if config.command_probe_model
+    and resolve_model_name(config.command_probe_model) != resolve_model_name(config.model)
+    else None
+)
+
+
+def probe_transcriber() -> Transcriber:
+    """コマンド先読み用のモデルを返す（未設定なら口述と同じものを使う）。"""
+    return _probe_transcriber or transcriber

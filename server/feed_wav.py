@@ -82,7 +82,8 @@ async def run(args: argparse.Namespace) -> int:
     print(f"# モード={args.mode} 送出={'最速' if args.fast else '実時間'}")
 
     body: list[str] = []          # ノートに入るはずの本文
-    stats = {"chunk": 0, "empty": 0, "dropped": 0, "gap": 0}
+    stats = {"chunk": 0, "empty": 0, "dropped": 0, "gap": 0, "probe": 0}
+    t0 = time.perf_counter()
     session_id: str | None = None
     last_end = 0.0
     started = time.monotonic()
@@ -97,6 +98,13 @@ async def run(args: argparse.Namespace) -> int:
                 if kind == "session":
                     session_id = msg.get("session")
                     print(f"# サーバー側の録音セッション: {session_id}")
+                elif kind == "probe":
+                    # コマンド先読み。本文には入らないが、何秒早く着いたかを見たいので出す。
+                    stats["probe"] += 1
+                    print(
+                        f"  ~ 先読み[{msg.get('seq')}] {msg.get('text')!r} "
+                        f"読み={msg.get('reading')!r} (+{time.perf_counter() - t0:.2f}s)"
+                    )
                 elif kind == "chunk":
                     text = msg.get("text") or ""
                     start, end = msg.get("start"), msg.get("end")
@@ -111,7 +119,10 @@ async def run(args: argparse.Namespace) -> int:
                         body.append(text)
                         head = text.replace("\n\n", " ⏎⏎ ")
                         pause = msg.get("pause")
-                        print(f"  [{start}-{end} pause={pause}] {head}")
+                        print(
+                            f"  [{start}-{end} pause={pause}] "
+                            f"(+{time.perf_counter() - t0:.2f}s) {head}"
+                        )
                     else:
                         stats["empty"] += 1
                     if msg.get("dropped"):

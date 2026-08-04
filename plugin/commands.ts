@@ -16,35 +16,79 @@ export type VoiceCommand =
     | { kind: "reconvertTarget"; target: string }        // 「Aを再変換」（読みで探して候補提示）
     | { kind: "reconvertSelection" }                     // 「これを再変換」（選択範囲）
     | { kind: "respeak" }                                // 「ここを言い直し」（次の発話で選択範囲を置換）
+    | { kind: "respeakTarget"; target: string }          // 「Aを言い直し」（探して選び、次の発話で置換）
     | { kind: "confirm" }                                // 「確定」（候補モーダルの確定）
     | { kind: "cancel" }                                 // 「キャンセル」（モーダル/言い直しの解除）
     | null;
 
-const STOP = ["入力終了", "音声入力終了", "終了", "ストップ"];
+// 起動語は「表記」と「読み」を対にして持つ。
+//
+// 表記だけだと、音が合っていても認識の当て字が違うだけでコマンドが不成立になり、
+// 命令がそのまま本文に落ちる（実例:「入力キャンセル」→「にゅりょくキャンセル」）。
+// 読みを併記しておくと、サーバーが送ってくるチャンクの読みと編集距離で照合できる。
+// 読みはすべてひらがな・長音符なしで書く（readingKey と同じ正規化に合わせる）。
+interface CommandWord {
+    word: string;
+    reading: string;
+}
+
+const words = (...list: [string, string][]): CommandWord[] =>
+    list.map(([word, reading]) => ({ word, reading }));
+
+const STOP_WORDS = words(
+    ["入力終了", "にゅうりょくしゅうりょう"],
+    ["音声入力終了", "おんせいにゅうりょくしゅうりょう"],
+    ["終了", "しゅうりょう"],
+    ["ストップ", "すとっぷ"],
+);
 // 「取り消し」は一般語として単独で口述したい場合にも発火するため使わない。
 // ツールバーと同じ名称にそろえ、発話全体が専用語のときだけ処理する。
-const INPUT_CANCEL = ["入力キャンセル", "直前入力をキャンセル", "今の入力をキャンセル"];
-const INPUT_RESTORE = ["入力復元", "入力を復元", "キャンセルを戻す"];
-const NEWLINE = ["改行", "次の行"];
-const RECONVERT = ["変換戻し", "変換し直し", "変換やり直し", "再変換"];
+const INPUT_CANCEL_WORDS = words(
+    ["入力キャンセル", "にゅうりょくきゃんせる"],
+    ["直前入力をキャンセル", "ちょくぜんにゅうりょくをきゃんせる"],
+    ["今の入力をキャンセル", "いまのにゅうりょくをきゃんせる"],
+);
+const INPUT_RESTORE_WORDS = words(
+    ["入力復元", "にゅうりょくふくげん"],
+    ["入力を復元", "にゅうりょくをふくげん"],
+    ["キャンセルを戻す", "きゃんせるをもどす"],
+);
+const NEWLINE_WORDS = words(["改行", "かいぎょう"], ["次の行", "つぎのぎょう"]);
+const RECONVERT_WORDS = words(
+    ["変換戻し", "へんかんもどし"],
+    ["変換し直し", "へんかんしなおし"],
+    ["変換やり直し", "へんかんやりなおし"],
+    ["再変換", "さいへんかん"],
+);
 // 言い直しの起動語。「言い直し」は誤認識されやすい（実測で「入れてほしい」
 // 「言い出ほしい」「合意で惜しい」に化ける）ため、認識しやすい短い語も足す。
 // どれも「選択範囲があるときだけ」コマンドになるので、本文を壊さない
 // （main.ts 側で選択が空なら本文として挿入する）。
-const RESPEAK = [
-    "言い直し", "言い直して", "言い直す",
-    "ここを言い直し", "ここを言い直して",
-    "これを言い直し", "これを言い直して",
-    "訂正", "ここを訂正", "これを訂正", "訂正して",
-    "言い換え", "ここを言い換え", "差し替え", "ここを差し替え",
-];
+const RESPEAK_WORDS = words(
+    ["言い直し", "いいなおし"], ["言い直して", "いいなおして"], ["言い直す", "いいなおす"],
+    ["ここを言い直し", "ここをいいなおし"], ["ここを言い直して", "ここをいいなおして"],
+    ["これを言い直し", "これをいいなおし"], ["これを言い直して", "これをいいなおして"],
+    ["訂正", "ていせい"], ["ここを訂正", "ここをていせい"],
+    ["これを訂正", "これをていせい"], ["訂正して", "ていせいして"],
+    ["言い換え", "いいかえ"], ["ここを言い換え", "ここをいいかえ"],
+    ["差し替え", "さしかえ"], ["ここを差し替え", "ここをさしかえ"],
+);
+
+const STOP = STOP_WORDS.map((w) => w.word);
+const INPUT_CANCEL = INPUT_CANCEL_WORDS.map((w) => w.word);
+const INPUT_RESTORE = INPUT_RESTORE_WORDS.map((w) => w.word);
+const NEWLINE = NEWLINE_WORDS.map((w) => w.word);
+const RECONVERT = RECONVERT_WORDS.map((w) => w.word);
+const RESPEAK = RESPEAK_WORDS.map((w) => w.word);
 // 上のリストから漏れた言い直し起動語を拾う保険。誤爆の代償を小さくするため
 // 「選択範囲がある」「短い発話」の両方を満たすときだけ main.ts が採用する。
 const RESPEAK_LOOSE_RE = /^(?:ここ|これ|この)を?(?:言い|いい|訂正|ていせい|差し替|言い換)/;
 // 「確定」「キャンセル」は候補モーダル等が開いているときだけ意味を持つ。
 // main.ts 側で「処理できなければ本文として挿入」に倒すので、通常口述を壊さない。
-const CONFIRM = ["確定", "決定"];
-const CANCEL = ["キャンセル", "やめる"];
+const CONFIRM_WORDS = words(["確定", "かくてい"], ["決定", "けってい"]);
+const CANCEL_WORDS = words(["キャンセル", "きゃんせる"], ["やめる", "やめる"]);
+const CONFIRM = CONFIRM_WORDS.map((w) => w.word);
+const CANCEL = CANCEL_WORDS.map((w) => w.word);
 
 // 「XをYに修正/変換/直して」
 const REPLACE_RE = /^(.+?)を(.+?)に(?:修正|変換|直して|してください|変えて)$/;
@@ -59,6 +103,15 @@ const REPLACE_RE = /^(.+?)を(.+?)に(?:修正|変換|直して|してくださ�
 //        なる実例があったため（切れたまま本文に混ざると、次の検索を汚す）
 const RECONVERT_TARGET_RE =
     /^(.+?)を(?:再変換?|変換し直し|変換しなおし|もう一度変換)(?:て|して)?$/;
+// 「Xを言い直し」— 選択せずに、直す場所を声で指す。
+//   これが無いと「スミシンを言い直し」がコマンドとして成立せず、命令文がそのまま
+//   本文に落ちる（従来は「ここを」「これを」の固定句しか受け付けていなかった）。
+//   衝突しない根拠:
+//     「AをBに修正/変換」→ 末尾が一致しない（REPLACE_RE が処理）
+//     「Aを再変換」      → RECONVERT_TARGET_RE を先に判定する
+//     「ここを言い直し」  → RESPEAK の完全一致が先に拾う（従来どおりの選択範囲置換）
+const RESPEAK_TARGET_RE =
+    /^(.+?)を(?:言い直し|言い直す|いいなおし|訂正|ていせい|言い換え|いいかえ|差し替え|さしかえ)(?:て|して)?$/;
 // target がこれらなら「選択範囲の再変換」として扱う。
 const SELECTION_WORDS = new Set(["これ", "ここ", "選択範囲", "選択部分"]);
 // 「3番」「三番」「候補3」
@@ -164,6 +217,14 @@ export function parseCommand(rawText: string, prefix = ""): VoiceCommand {
         if (target) return { kind: "reconvertTarget", target };
     }
 
+    const st = text.match(RESPEAK_TARGET_RE);
+    if (st) {
+        const target = st[1].trim();
+        // 「ここを」「これを」は選択範囲の言い直し（従来の挙動）。
+        if (SELECTION_WORDS.has(target)) return { kind: "respeak" };
+        if (target) return { kind: "respeakTarget", target };
+    }
+
     const rep = text.match(REPLACE_RE);
     if (rep) {
         const from = rep[1].trim();
@@ -173,3 +234,141 @@ export function parseCommand(rawText: string, prefix = ""): VoiceCommand {
 
     return null;
 }
+
+// ---- 読みでのあいまい照合 ----
+//
+// 表記の完全一致だけだと、音は合っているのに当て字が違うだけでコマンドが不成立になり、
+// 命令文が本文に落ちる。サーバーが sudachi で付けた読みと、起動語の読みを
+// 編集距離で比べれば、この取りこぼしの大半が救える。
+//   「にゅりょくキャンセル」→ にゅりょくきゃんせる vs にゅうりょくきゃんせる = 距離1
+//   「乳酸キャンセル」      → にゅうさんきゃんせる                          = 距離2
+//   「サンバー」            → さんば（長音を落とす）vs さんばん             = 距離1
+// 逆に「言い直し」→「入れてほしい」のような音ごと崩れた誤認識は距離が開くので
+// 救えない。そこは従来どおり RESPEAK_LOOSE_RE と選択範囲の条件で拾う。
+
+// 比較用のキー。ひらがなだけを残し、長音符と句読点・記号を落とす。
+// 句読点を落とすのは、自動句読点がかな書きの誤認識の語中に「。」を差し込む実例が
+// あるため（実測: にゅうりょくキャンセル → 「にゅうりょ。くキャンセル」）。
+export function readingKey(text: string): string {
+    return text
+        .normalize("NFKC")
+        .replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60))
+        .replace(/[^ぁ-ゖ]/gu, "");
+}
+
+function levenshtein(a: string, b: string): number {
+    if (a === b) return 0;
+    if (!a.length || !b.length) return a.length || b.length;
+    let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= a.length; i += 1) {
+        const cur = [i];
+        for (let j = 1; j <= b.length; j += 1) {
+            cur[j] = Math.min(
+                prev[j] + 1,
+                cur[j - 1] + 1,
+                prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+            );
+        }
+        prev = cur;
+    }
+    return prev[b.length];
+}
+
+// 語の長さに応じた許容距離。短い語ほど厳しくする。
+// 「確定（かくてい）」と「関係（かんけい）」のような、2音違うだけの一般語が
+// いくらでもある短い語で緩めると、本文が勝手にコマンドとして消えるため。
+// 逆に「にゅうりょくきゃんせる」級の長い句は、そこまで似た一般語が無い。
+function strictTolerance(len: number): number {
+    // 7音以下は1音違いまで。この長さの語は一般語と当たりやすく、実測でも
+    // 「修行（しゅぎょう）」が「終了（しゅうりょう）」と2音差だった。
+    return len <= 7 ? 1 : Math.round(len * 0.25);
+}
+
+// 「惜しい外れ」として確認を出す上限。8文字未満では出さない（一般語と衝突して
+// 通知だけが増える。実測: 「修行（しゅぎょう）」が「終了（しゅうりょう）」に2音差）。
+function nearTolerance(len: number): number {
+    return len < 8 ? strictTolerance(len) : strictTolerance(len) + 1;
+}
+
+export interface ReadingMatch {
+    cmd: NonNullable<VoiceCommand>;
+    phrase: string;   // 一致した起動語（通知に出す）
+    distance: number;
+    // true ならそのまま実行してよい。false は「惜しい外れ」で、本文に入れたうえで
+    // 実行するかどうかをユーザーに聞く（勝手に本文を消さない）。
+    confident: boolean;
+}
+
+const READING_TABLE: { words: CommandWord[]; cmd: NonNullable<VoiceCommand> }[] = [
+    { words: STOP_WORDS, cmd: { kind: "stop" } },
+    { words: INPUT_CANCEL_WORDS, cmd: { kind: "cancelInput" } },
+    { words: INPUT_RESTORE_WORDS, cmd: { kind: "restoreInput" } },
+    { words: NEWLINE_WORDS, cmd: { kind: "newline" } },
+    { words: RECONVERT_WORDS, cmd: { kind: "reconvert" } },
+    { words: RESPEAK_WORDS, cmd: { kind: "respeak" } },
+    { words: CONFIRM_WORDS, cmd: { kind: "confirm" } },
+    { words: CANCEL_WORDS, cmd: { kind: "cancel" } },
+];
+
+/**
+ * 発話の読みを起動語の読みと突き合わせ、最も近いものを返す。
+ *
+ * reading はサーバーが付けたカタカナの読み。空なら（sudachi 未導入の環境など）
+ * 照合しない ＝ 従来の完全一致だけが効く。prefix 指定時も照合しない
+ * （接頭語ぶんの読みを差し引く判断が曖昧になるため、確実な完全一致に任せる）。
+ */
+export function matchByReading(
+    rawText: string,
+    reading: string,
+    prefix = ""
+): ReadingMatch | null {
+    if (prefix || !reading) return null;
+    const key = readingKey(reading) || readingKey(rawText);
+    // 起動語はどれも短い。長い発話は本文なので相手にしない。
+    if (!key || key.length > 24) return null;
+
+    let best: ReadingMatch | null = null;
+    for (const row of READING_TABLE) {
+        for (const w of row.words) {
+            const target = readingKey(w.reading);
+            if (!target) continue;
+            // 距離0（表記は違うが読みは同じ＝同音の誤変換）もここで拾う。
+            // parseCommand が見ているのは表記なので、そちらは素通りしている。
+            const d = levenshtein(key, target);
+            if (d > nearTolerance(target.length)) continue;
+            if (best && d >= best.distance) continue;
+            best = {
+                cmd: row.cmd,
+                phrase: w.word,
+                distance: d,
+                confident: d <= strictTolerance(target.length),
+            };
+        }
+    }
+    return best;
+}
+
+/**
+ * コマンド先読み（小さいモデルの速報）専用の判定。
+ *
+ * 速報は本文用の認識より精度が低いので、引数のない固定句だけを、
+ * それも厳しい側の距離でしか受け付けない。「AをBに修正」のように
+ * 引数の表記が要るものは、必ず本命の認識結果を待つ。
+ */
+export function parseProbeCommand(
+    rawText: string,
+    reading: string,
+    prefix = ""
+): NonNullable<VoiceCommand> | null {
+    const exact = parseCommand(rawText, prefix);
+    if (exact && ARGUMENT_FREE.has(exact.kind)) return exact;
+    if (exact) return null; // 引数つきは速報で判断しない
+    const near = matchByReading(rawText, reading, prefix);
+    if (near && near.confident && ARGUMENT_FREE.has(near.cmd.kind)) return near.cmd;
+    return null;
+}
+
+const ARGUMENT_FREE = new Set<string>([
+    "stop", "cancelInput", "restoreInput", "newline",
+    "reconvert", "reconvertSelection", "respeak", "confirm", "cancel", "pick",
+]);

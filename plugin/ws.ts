@@ -36,8 +36,10 @@ export interface DictionaryDiagnostic {
 
 export interface ServerMessage {
     type: "ready" | "started" | "chunk" | "refinement" | "stopped" |
-        "reconvert" | "error" | "partial" | "session" | "level";
+        "reconvert" | "error" | "partial" | "session" | "level" | "probe";
     text?: string;
+    // 口述チャンクの通し番号。probe（コマンド先読み）と chunk が同じ番号で対応する。
+    seq?: number;
     reason?: string;
     reading?: string;
     segments?: { reading: string; candidates: string[] }[];
@@ -72,6 +74,8 @@ export interface ServerMessage {
 export interface WsHandlers {
     onReady?: () => void;
     onPartial?: () => void; // 発話検出→認識開始の合図
+    // 小さいモデルによるコマンド先読み。本文には使わない（精度が本命に劣る）。
+    onProbe?: (text: string, msg: ServerMessage) => void;
     onChunk?: (text: string, msg: ServerMessage) => void;
     onRefinement?: (text: string, msg: ServerMessage) => void;
     onSession?: (id: string) => void;
@@ -229,6 +233,9 @@ export class AsrSocket {
             }
             case "partial":
                 this.handlers.onPartial?.();
+                break;
+            case "probe":
+                this.handlers.onProbe?.(msg.text || "", msg);
                 break;
             case "chunk":
                 this.handlers.onChunk?.(msg.text || "", msg);

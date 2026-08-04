@@ -121,3 +121,12 @@ body.is-mobile .voxcraft-toolbar {
 .voxcraft-toolbar .voxcraft-tb-mic.is-recording svg {
     animation: voxcraft-pulse 1.2s ease-in-out infinite;
 }
+/* 通知の中の実行ボタン（「惜しい外れ」の1タップ復旧）。
+   モバイルの親指で押せる高さを確保する。 */
+.voxcraft-notice-action {
+    margin-top: 8px;
+    padding: 6px 12px;
+    min-height: 32px;
+    font-size: 0.9em;
+    cursor: pointer;
+}

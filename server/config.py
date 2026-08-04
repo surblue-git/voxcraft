@@ -128,6 +128,23 @@ class Config:
     # 文末すら来ないまま伸びた場合に、文の途中でも改行する字数。0 で上の2倍。
     paragraph_hard_chars: int = int(_env("VOXCRAFT_PARA_HARD", "0"))
 
+    # --- 音声コマンドの先読み（口述専用） ---
+    # 認識時間は音声の長さにも beam 幅にもほぼ比例しない（Whisper は常に30秒ぶんの
+    # メル窓をエンコードするため）。実測（GTX 1660 SUPER / int8_float16、1.5秒の音声）:
+    #   kotoba(large encoder) beam=5 1155ms / beam=1 1120ms / vad_filter off 1148ms
+    #   small 330ms / base 125ms
+    # つまり本文の精度を落とさずコマンドだけ速くするには、小さいモデルで先に
+    # 「コマンドかどうか」だけ判定するのが唯一効く手になる。
+    # 短いチャンクだけ base で先読みし、結果を probe として即送る。本文の認識経路は
+    # 従来のまま動くので、先読みが外れても 125ms 遅れるだけで挙動は変わらない。
+    command_probe: bool = _env("VOXCRAFT_COMMAND_PROBE", "1") == "1"
+    command_probe_model: str = _env("VOXCRAFT_COMMAND_PROBE_MODEL", "base")
+    # これより長いチャンクは先読みしない（コマンドはすべて短い発話のため）。
+    # VADは前後の無音を含めて切り出すので、実際の発話より1〜1.5秒長くなる
+    # （実測: 1.9秒の「地域を言い直し」がチャンクとしては3.5秒）。
+    # 命令を言い落とすくらいなら、長めの本文チャンクに125ms払う方がまし。
+    command_probe_max_sec: float = float(_env("VOXCRAFT_COMMAND_PROBE_MAX_SEC", "4.0"))
+
     # --- 高速化・GPU最適化 ---
     # CTranslate2 の FlashAttention 有効化（RTX 30xx/40xx 等で速度向上）。
     flash_attention: bool = _env("VOXCRAFT_FLASH_ATTENTION", "0") == "1"

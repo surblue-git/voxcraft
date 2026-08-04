@@ -1,7 +1,7 @@
 {
   "id": "voxcraft",
   "name": "VoxCraft 音声入力",
-  "version": "0.10.0-beta.3",
+  "version": "0.10.0-beta.4",
   "minAppVersion": "1.4.0",
   "description": "自宅PCのWhisperで日本語長文を音声入力。沈黙で切れない待機、句読点対応、勝手な半角スペースなし、変換戻し対応。",
   "author": "VoxCraft",

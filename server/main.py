@@ -18,7 +18,11 @@
     - {"type": "started", "source": "system", "device": "...",
        "dictionarySetId": "default", "dictionaryRevision": "..."}
     - {"type": "partial", "reason": "silence|max_len"} # チャンク認識開始の合図（任意）
-    - {"type": "chunk", "text": "確定テキスト"}          # 確定チャンク
+    - {"type": "probe", "seq": 7, "text": "入力キャンセル", "reading": "ニュウリョク…"}
+      # 口述の短いチャンクだけ、小さいモデルで先に読んだ速報（125ms前後）。
+      # クライアントがコマンドと判定したら即実行し、同じ seq の chunk を捨てる。
+      # 本文としては絶対に使わない（精度がkotobaに劣るため）。
+    - {"type": "chunk", "text": "確定テキスト", "seq": 7, "reading": "…"} # 確定チャンク
     - {"type": "refinement", "text": "補正後", "start": 0, "end": 30,
        "revision": 1}                                    # PC音声の範囲補正
     - {"type": "reconvert", "reading": "...", "segments": [...], "online": bool}
@@ -39,7 +43,7 @@ from dataclasses import dataclass
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
-from asr import AsrOptions, hq_transcriber, transcriber
+from asr import AsrOptions, hq_transcriber, probe_transcriber, transcriber
 from config import config
 from dictionary_registry import (
     DictionaryRevisionConflict,
@@ -55,6 +59,7 @@ from recording import (
     load_slice,
 )
 from punctuate import available as punctuation_available
+from punctuate import to_reading
 from reconvert import reconvert
 from refinement import RefinementPlanner, RefinementRange
 from system_audio import SystemAudioError, WasapiLoopbackCapture
@@ -105,6 +110,10 @@ def health() -> dict:
         "transcribeModel": config.transcribe_model or config.model,
         "transcribeReady": hq_transcriber().ready,
         "beamSize": config.beam_size,
+        # コマンド先読み用モデル（口述の短いチャンクのみ。遅延ロード）。
+        "commandProbe": config.command_probe,
+        "commandProbeModel": config.command_probe_model,
+        "commandProbeReady": probe_transcriber().ready,
         "autoPunctuation": config.enable_auto_punctuation and punctuation_available(),
         "silenceSec": config.silence_sec,
         "systemAudioAutoStopSec": config.transcribe_auto_stop_sec,
@@ -274,6 +283,20 @@ async def _transcribe_chunk(
         if hq:
             target.ensure_loaded()
         return target.transcribe(audio, hotwords, opts, dictionary.hallucinations)
+
+    return await asyncio.to_thread(_run)
+
+
+async def _probe_chunk(audio: np.ndarray, dictionary: DictionarySnapshot):
+    """小さいモデルで「コマンドかどうか」だけを先に読む（口述の短いチャンク専用）。
+
+    本文には使わないので辞書置換も句読点も掛けない。素の認識結果と読みだけ返す。
+    """
+    target = probe_transcriber()
+
+    def _run():
+        target.ensure_loaded()
+        return target.transcribe(audio, None, AsrOptions.probe(), dictionary.hallucinations)
 
     return await asyncio.to_thread(_run)
 
@@ -463,6 +486,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
     finish_lock = asyncio.Lock()
     previous_transcript_text = ""
     pending_contextual_chunk: dict | None = None
+    # 口述チャンクの通し番号。probe（先読み）と chunk（本命）を同じ番号で結び、
+    # クライアントが「先読みでコマンドとして処理済み」の chunk を捨てられるようにする。
+    chunk_seq = 0
     refinement_planner = RefinementPlanner(
         config.sample_rate,
         config.system_refine_window_sec,
@@ -529,6 +555,14 @@ async def ws_endpoint(ws: WebSocket) -> None:
         if breaker is not None and not recovery:
             text = breaker.feed(text, pause) + text
         msg: dict = {"type": "chunk", "text": text}
+        if prepared.get("seq") is not None:
+            msg["seq"] = prepared["seq"]
+        # 読みは口述のコマンド照合にしか使わない。誤変換されても音は残るので、
+        # 表記の完全一致より当たる（「乳酸キャンセル」でもコマンドとして通る）。
+        if mode == "dictation" and text:
+            reading = to_reading(text)
+            if reading:
+                msg["reading"] = reading
         if recovery:
             msg["recovered"] = True
         if pause is not None:
@@ -574,11 +608,36 @@ async def ws_endpoint(ws: WebSocket) -> None:
         evidence: SpeechEvidence | None = None,
         dictionary: DictionarySnapshot | None = None,
     ) -> None:
-        nonlocal pending_contextual_chunk
+        nonlocal pending_contextual_chunk, chunk_seq
         if dictionary is None:
             raise RuntimeError("辞書スナップショットがありません")
         # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
         await ws.send_text(json.dumps({"type": "partial", "reason": reason}))
+        chunk_seq += 1
+        seq = chunk_seq
+
+        # コマンドの先読み。口述の短いチャンクだけ、本命の認識より先に
+        # 小さいモデルで一度読んで送る（実測 base で125ms前後）。
+        # ここで送るのは判断材料だけで、採用するかはクライアントが決める。
+        # 外れた場合の代償は本文が 125ms 遅れることだけ（結果は捨てる）。
+        if (
+            config.command_probe
+            and mode == "dictation"
+            and not recovery
+            and audio.size <= config.command_probe_max_sec * config.sample_rate
+        ):
+            try:
+                probe = await _probe_chunk(audio, dictionary)
+                if probe.text:
+                    await ws.send_text(json.dumps({
+                        "type": "probe",
+                        "seq": seq,
+                        "text": probe.text,
+                        "reading": to_reading(probe.text) or "",
+                    }))
+            except Exception as exc:  # noqa: BLE001 — 先読みは補助。落ちても本文は流す。
+                print(f"[VoxCraft] コマンド先読みに失敗（無視して続行）: {exc}")
+
         # mode は下のコマンド処理で書き換わる。ここは常に現在のモードを見る。
         chunk_opts = AsrOptions.recovery() if recovery else opts
         result = await _transcribe_chunk(
@@ -614,7 +673,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         prepared = {
             "text": text, "result": result, "reason": reason,
             "start": start, "end": end, "pause": pause,
-            "recovery": recovery, "evidence": evidence,
+            "recovery": recovery, "evidence": evidence, "seq": seq,
         }
         await resolve_pending_context(text or None)
         artifact = standalone_contextual_artifact(text)

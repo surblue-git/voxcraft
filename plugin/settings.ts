@@ -17,6 +17,7 @@ export interface VoxCraftSettings {
     stripJaAlnumSpace: boolean; // 日本語と英数字の間の半角スペース除去
     symbolDictation: boolean;   // 「まる」等の記号読み上げ
     enableCommands: boolean;    // 音声コマンドを有効化
+    commandFuzzy: boolean;      // 表記が外れても読みが合えばコマンドとして扱う
     commandPrefix: string;      // 空なら常時判定、非空なら「この語で始まる発話」のみ
     autoReconvertLast: boolean; // 「変換戻し」時、直前チャンクを対象にする
     insertAt: "anchor" | "cursor"; // 口述の挿入位置。anchor=固定アンカー（既定）/ cursor=カーソル追従
@@ -34,6 +35,7 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     stripJaAlnumSpace: true,
     symbolDictation: true,
     enableCommands: true,
+    commandFuzzy: true,
     commandPrefix: "",
     autoReconvertLast: true,
     insertAt: "anchor",
@@ -464,6 +466,20 @@ export class VoxCraftSettingTab extends PluginSettingTab {
             .addToggle((t) =>
                 t.setValue(this.plugin.settings.enableCommands).onChange(async (v) => {
                     this.plugin.settings.enableCommands = v;
+                    await this.plugin.saveSettings();
+                })
+            );
+
+        new Setting(containerEl)
+            .setName("読みでコマンドを拾う")
+            .setDesc(
+                "表記が違っても音が合っていればコマンドとして扱う" +
+                "（例:「にゅりょくキャンセル」→「入力キャンセル」）。" +
+                "判断が微妙なものは本文に入れたうえで、実行ボタン付きの通知を出す。"
+            )
+            .addToggle((t) =>
+                t.setValue(this.plugin.settings.commandFuzzy).onChange(async (v) => {
+                    this.plugin.settings.commandFuzzy = v;
                     await this.plugin.saveSettings();
                 })
             );
