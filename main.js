@@ -457,22 +457,26 @@ async function fetchReconvert(wsUrl, text, dictionarySetId = "default") {
   }
   return res.json;
 }
-async function fetchDict(wsUrl) {
-  const res = await (0, import_obsidian.requestUrl)({ url: `${httpBase(wsUrl)}/dict`, method: "GET" });
+async function fetchProfileDict(wsUrl, profileId = "common") {
+  const res = await (0, import_obsidian.requestUrl)({
+    url: `${httpBase(wsUrl)}/dictionaries/${encodeURIComponent(profileId)}/dict`,
+    method: "GET",
+    throw: false
+  });
+  if (res.status >= 400)
+    throw new Error(errorDetail(res));
   return res.json;
 }
-async function saveDict(wsUrl, data) {
+async function saveProfileDict(wsUrl, profileId, data) {
   const res = await (0, import_obsidian.requestUrl)({
-    url: `${httpBase(wsUrl)}/dict`,
+    url: `${httpBase(wsUrl)}/dictionaries/${encodeURIComponent(profileId)}/dict`,
     method: "POST",
     contentType: "application/json",
     body: JSON.stringify({ replacements: data.replacements, symbols: data.symbols }),
     throw: false
   });
-  if (res.status >= 400) {
-    const detail = res.json && res.json.detail || `HTTP ${res.status}`;
-    throw new Error(detail);
-  }
+  if (res.status >= 400)
+    throw new Error(errorDetail(res));
 }
 var DictionarySetModal = class extends import_obsidian.Modal {
   constructor(app, wsUrl, currentId, onSelect) {
@@ -599,13 +603,16 @@ function countKeys(groups) {
   return groups.reduce((n, g) => n + splitKeys(g.keys).length, 0);
 }
 var DictModal = class extends import_obsidian.Modal {
-  constructor(app, wsUrl) {
+  constructor(app, wsUrl, initialProfileId = "common") {
     super(app);
+    // プロファイル一覧の取得に失敗しても、指定されたプロファイル単体の編集は続けられる。
+    this.profiles = [];
     this.reps = [];
     this.syms = [];
     this.loaded = false;
     this.loadError = null;
     this.wsUrl = wsUrl;
+    this.profileId = initialProfileId;
   }
   async onOpen() {
     this.titleEl.setText("VoxCraft \u30E6\u30FC\u30B6\u30FC\u8F9E\u66F8");
@@ -614,7 +621,18 @@ var DictModal = class extends import_obsidian.Modal {
       cls: "setting-item-description"
     });
     try {
-      const d = await fetchDict(this.wsUrl);
+      this.profiles = (await fetchDictionaryCatalog(this.wsUrl)).profiles;
+    } catch (e) {
+      this.profiles = [];
+    }
+    await this.loadProfile(this.profileId);
+  }
+  async loadProfile(profileId) {
+    this.profileId = profileId;
+    this.loaded = false;
+    this.loadError = null;
+    try {
+      const d = await fetchProfileDict(this.wsUrl, profileId);
       this.reps = toGroups(d.replacements);
       this.syms = toGroups(d.symbols);
       this.loaded = true;
@@ -627,6 +645,17 @@ var DictModal = class extends import_obsidian.Modal {
     var _a;
     const { contentEl } = this;
     contentEl.empty();
+    if (this.profiles.length > 1) {
+      new import_obsidian.Setting(contentEl).setName("\u7DE8\u96C6\u3059\u308B\u8F9E\u66F8").addDropdown((dropdown) => {
+        for (const p of this.profiles) {
+          dropdown.addOption(p.id, p.valid ? p.name : `${p.name}\uFF08\u8981\u4FEE\u6B63\uFF09`);
+        }
+        dropdown.setValue(this.profileId);
+        dropdown.onChange((value) => {
+          void this.loadProfile(value);
+        });
+      });
+    }
     if (!this.loaded) {
       contentEl.createEl("p", {
         text: `\u30B5\u30FC\u30D0\u30FC\u304B\u3089\u8F9E\u66F8\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F: ${(_a = this.loadError) != null ? _a : "\u4E0D\u660E\u306A\u30A8\u30E9\u30FC"}`
@@ -673,7 +702,7 @@ var DictModal = class extends import_obsidian.Modal {
           return;
         }
         try {
-          await saveDict(this.wsUrl, {
+          await saveProfileDict(this.wsUrl, this.profileId, {
             replacements: reps.map,
             symbols: syms.map
           });

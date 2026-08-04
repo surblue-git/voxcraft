@@ -74,8 +74,10 @@ from userdict import (
     get_dictionary_snapshot,
     get_error,
     read_profile,
+    read_profile_raw,
     read_raw,
     validate_profile_raw,
+    write_profile_raw,
     write_raw,
 )
 from vad import ChunkJoiner, VadChunker
@@ -188,6 +190,33 @@ async def dictionary_entry_post(profile_id: str, payload: dict = Body(...)) -> d
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"辞書を保存できません: {exc}") from exc
+
+
+@app.get("/dictionaries/{profile_id}/dict")
+def dictionary_profile_dict_get(profile_id: str) -> dict:
+    """指定プロファイルを置換・記号語のフラット形式で返す（/dict と同じ編集UI用）。"""
+    try:
+        return read_profile_raw(profile_id)
+    except DictionarySchemaError as exc:
+        detail = str(exc)
+        status = 404 if "見つかりません" in detail else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"辞書を読めません: {exc}") from exc
+
+
+@app.post("/dictionaries/{profile_id}/dict")
+async def dictionary_profile_dict_post(profile_id: str, payload: dict = Body(...)) -> dict:
+    """指定プロファイルの置換・記号語を保存する（/dict と同じ検証・即時反映）。"""
+    try:
+        counts = write_profile_raw(
+            profile_id, payload.get("replacements", {}), payload.get("symbols", {})
+        )
+    except (DictValidationError, DictionarySchemaError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"保存できません: {exc}") from exc
+    return {"ok": True, **counts}
 
 
 @app.post("/reconvert")

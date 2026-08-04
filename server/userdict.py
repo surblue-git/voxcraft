@@ -303,6 +303,28 @@ def write_raw(replacements, symbols) -> dict:
     return {"replacements": len(reps), "symbols": len(syms)}
 
 
+def read_profile_raw(profile_id: str) -> dict:
+    """任意プロファイルを従来の replacements / symbols 形式で返す（編集UI用）。"""
+    _ensure_file()
+    result = _REGISTRY.profile_projection(profile_id)
+    result["error"] = None
+    return result
+
+
+def write_profile_raw(profile_id: str, replacements, symbols) -> dict:
+    """任意プロファイルの置換・記号語をUIから更新する。拡張フィールドと無効項目は保持する。"""
+    reps = _validate_map(replacements, "replacements")
+    syms = _validate_map(symbols, "symbols")
+
+    _ensure_file()
+    _REGISTRY.update_profile_maps(profile_id, reps, syms)
+
+    if profile_id == "common":
+        with _lock:
+            _cache["mtime"] = None  # 次の参照で確実に読み直す
+    return {"replacements": len(reps), "symbols": len(syms)}
+
+
 def dictionary_catalog() -> dict:
     """管理UI向けの辞書プロファイル・セット一覧（本文は含めない）。"""
     _ensure_file()

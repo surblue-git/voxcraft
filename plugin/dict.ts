@@ -143,23 +143,30 @@ export async function fetchReconvert(
     return res.json as ReconvertPayload;
 }
 
-export async function fetchDict(wsUrl: string): Promise<DictData> {
-    const res = await requestUrl({ url: `${httpBase(wsUrl)}/dict`, method: "GET" });
+// profileId 省略時は "common"（旧 /dict と同じ辞書）。
+export async function fetchProfileDict(wsUrl: string, profileId = "common"): Promise<DictData> {
+    const res = await requestUrl({
+        url: `${httpBase(wsUrl)}/dictionaries/${encodeURIComponent(profileId)}/dict`,
+        method: "GET",
+        throw: false,
+    });
+    if (res.status >= 400) throw new Error(errorDetail(res));
     return res.json as DictData;
 }
 
-export async function saveDict(wsUrl: string, data: DictData): Promise<void> {
+export async function saveProfileDict(
+    wsUrl: string,
+    profileId: string,
+    data: DictData
+): Promise<void> {
     const res = await requestUrl({
-        url: `${httpBase(wsUrl)}/dict`,
+        url: `${httpBase(wsUrl)}/dictionaries/${encodeURIComponent(profileId)}/dict`,
         method: "POST",
         contentType: "application/json",
         body: JSON.stringify({ replacements: data.replacements, symbols: data.symbols }),
         throw: false,
     });
-    if (res.status >= 400) {
-        const detail = (res.json && (res.json as { detail?: string }).detail) || `HTTP ${res.status}`;
-        throw new Error(detail);
-    }
+    if (res.status >= 400) throw new Error(errorDetail(res));
 }
 
 export class DictionarySetModal extends Modal {
@@ -321,14 +328,18 @@ function countKeys(groups: Group[]): number {
 
 export class DictModal extends Modal {
     private wsUrl: string;
+    private profileId: string;
+    // プロファイル一覧の取得に失敗しても、指定されたプロファイル単体の編集は続けられる。
+    private profiles: DictionaryProfileSummary[] = [];
     private reps: Group[] = [];
     private syms: Group[] = [];
     private loaded = false;
     private loadError: string | null = null;
 
-    constructor(app: App, wsUrl: string) {
+    constructor(app: App, wsUrl: string, initialProfileId = "common") {
         super(app);
         this.wsUrl = wsUrl;
+        this.profileId = initialProfileId;
     }
 
     async onOpen(): Promise<void> {
@@ -338,7 +349,19 @@ export class DictModal extends Modal {
             cls: "setting-item-description",
         });
         try {
-            const d = await fetchDict(this.wsUrl);
+            this.profiles = (await fetchDictionaryCatalog(this.wsUrl)).profiles;
+        } catch {
+            this.profiles = [];
+        }
+        await this.loadProfile(this.profileId);
+    }
+
+    private async loadProfile(profileId: string): Promise<void> {
+        this.profileId = profileId;
+        this.loaded = false;
+        this.loadError = null;
+        try {
+            const d = await fetchProfileDict(this.wsUrl, profileId);
             this.reps = toGroups(d.replacements);
             this.syms = toGroups(d.symbols);
             this.loaded = true;
@@ -351,6 +374,19 @@ export class DictModal extends Modal {
     private render(): void {
         const { contentEl } = this;
         contentEl.empty();
+
+        // プロファイルが複数あるときだけ切り替えを出す（1つだけなら従来通り無言で共通辞書）。
+        if (this.profiles.length > 1) {
+            new Setting(contentEl)
+                .setName("編集する辞書")
+                .addDropdown((dropdown) => {
+                    for (const p of this.profiles) {
+                        dropdown.addOption(p.id, p.valid ? p.name : `${p.name}（要修正）`);
+                    }
+                    dropdown.setValue(this.profileId);
+                    dropdown.onChange((value) => { void this.loadProfile(value); });
+                });
+        }
 
         if (!this.loaded) {
             contentEl.createEl("p", {
@@ -403,7 +439,7 @@ export class DictModal extends Modal {
                             return;
                         }
                         try {
-                            await saveDict(this.wsUrl, {
+                            await saveProfileDict(this.wsUrl, this.profileId, {
                                 replacements: reps.map,
                                 symbols: syms.map,
                             });
