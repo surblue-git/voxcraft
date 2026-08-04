@@ -41,6 +41,29 @@ var RAW_MIC = {
   noiseSuppression: false,
   autoGainControl: false
 };
+async function listAudioInputs() {
+  let probe = null;
+  try {
+    probe = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+  }
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "audioinput" && d.deviceId).map((d) => ({ deviceId: d.deviceId, label: d.label || d.deviceId }));
+  } finally {
+    probe == null ? void 0 : probe.getTracks().forEach((t) => t.stop());
+  }
+}
+async function resolveAudioInput(saved) {
+  var _a;
+  const devices = await listAudioInputs();
+  const byId = devices.find((d) => d.deviceId === saved.deviceId);
+  if (byId)
+    return byId;
+  if (!saved.label)
+    return null;
+  return (_a = devices.find((d) => d.label === saved.label)) != null ? _a : null;
+}
 var WORKLET_CODE = `
 class VoxCraftAudioProcessor extends AudioWorkletProcessor {
     process(inputs, outputs, parameters) {
@@ -58,7 +81,7 @@ class VoxCraftAudioProcessor extends AudioWorkletProcessor {
 registerProcessor('voxcraft-audio-processor', VoxCraftAudioProcessor);
 `;
 var MicRecorder = class {
-  constructor(onPcm, onLevel = null, mic = DICTATION_MIC, targetRate = 16e3) {
+  constructor(onPcm, onLevel = null, mic = DICTATION_MIC, targetRate = 16e3, deviceId = null) {
     this.ctx = null;
     this.stream = null;
     this.source = null;
@@ -77,6 +100,7 @@ var MicRecorder = class {
     this.onLevel = onLevel;
     this.mic = mic;
     this.targetRate = targetRate;
+    this.deviceId = deviceId;
   }
   get active() {
     return this.ctx !== null;
@@ -84,14 +108,15 @@ var MicRecorder = class {
   async start() {
     if (this.ctx)
       return;
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: this.mic.echoCancellation,
-        noiseSuppression: this.mic.noiseSuppression,
-        autoGainControl: this.mic.autoGainControl
-      }
-    });
+    const audio = {
+      channelCount: 1,
+      echoCancellation: this.mic.echoCancellation,
+      noiseSuppression: this.mic.noiseSuppression,
+      autoGainControl: this.mic.autoGainControl
+    };
+    if (this.deviceId)
+      audio.deviceId = { exact: this.deviceId };
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio });
     this.ctx = new AudioContext();
     this.source = this.ctx.createMediaStreamSource(this.stream);
     const inputRate = this.ctx.sampleRate;
@@ -891,6 +916,19 @@ function resolveUrls(s) {
     return all;
   return all.includes(s.selection) ? [s.selection] : all;
 }
+var SYSTEM_INPUT_KEY = "voxcraft:system-input";
+function loadSystemInput(app) {
+  const raw = app.loadLocalStorage(SYSTEM_INPUT_KEY);
+  if (!raw || typeof raw !== "object")
+    return null;
+  const { deviceId, label } = raw;
+  if (typeof deviceId !== "string" || !deviceId)
+    return null;
+  return { deviceId, label: typeof label === "string" ? label : "" };
+}
+function saveSystemInput(app, choice) {
+  app.saveLocalStorage(SYSTEM_INPUT_KEY, choice);
+}
 function labelForUrl(s, url) {
   const ep = s.endpoints.find((e) => e.url.trim() === url);
   return ep ? ep.label : url;
@@ -899,6 +937,50 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+  // PC音声を「この端末で取って送る」ための入力デバイス選択。
+  // Windows のステレオミキサー（既定では無効なので mmsys.cpl で有効化が要る）や
+  // 仮想オーディオケーブルを選ぶと、再生音が普通の録音デバイスとして取れる。
+  displaySystemInput(containerEl) {
+    containerEl.createEl("h3", { text: "PC\u97F3\u58F0\uFF08\u3053\u306E\u7AEF\u672B\uFF09" });
+    containerEl.createEl("p", {
+      text: "\u30B3\u30DE\u30F3\u30C9\u300C\u3053\u306E\u7AEF\u672B\u306EPC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u300D\u3067\u4F7F\u3046\u5165\u529B\u30C7\u30D0\u30A4\u30B9\u3002Windows\u306E\u300C\u30B9\u30C6\u30EC\u30AA \u30DF\u30AD\u30B5\u30FC\u300D\uFF08Win+R \u2192 mmsys.cpl \u2192 \u9332\u97F3\u30BF\u30D6 \u2192 \u53F3\u30AF\u30EA\u30C3\u30AF\u3067\u300C\u7121\u52B9\u306A\u30C7\u30D0\u30A4\u30B9\u306E\u8868\u793A\u300D\u2192 \u6709\u52B9\u5316\uFF09\u3092\u9078\u3076\u3068\u3001\u3053\u306E\u7AEF\u672B\u306E\u518D\u751F\u97F3\u3092\u305D\u306E\u307E\u307E\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\u3078\u9001\u308C\u308B\u3002\u30B5\u30FC\u30D0\u30FC\u6A5F\u304C\u5225\u306EPC\u3067\u3082\u3001\u8F9E\u66F8\u3068\u9332\u97F3\u3092\u30B5\u30FC\u30D0\u30FC\u5074\u306B\u4E00\u672C\u5316\u3057\u305F\u307E\u307E\u4F7F\u3048\u308B\u3002",
+      cls: "setting-item-description"
+    });
+    containerEl.createEl("p", {
+      text: "\u3053\u306E\u8A2D\u5B9A\u306F\u7AEF\u672B\u3054\u3068\u306B\u4FDD\u5B58\u3055\u308C\u308B\uFF08Vault\u306E\u8A2D\u5B9A\u540C\u671F\u306B\u306F\u4E57\u3089\u306A\u3044\uFF09\u3002\u30C7\u30D0\u30A4\u30B9\u540D\u306E\u4E00\u89A7\u3092\u51FA\u3059\u305F\u3081\u306B\u30DE\u30A4\u30AF\u306E\u8A31\u53EF\u3092\u4E00\u5EA6\u6C42\u3081\u308B\u3053\u3068\u304C\u3042\u308B\u3002",
+      cls: "setting-item-description"
+    });
+    const saved = loadSystemInput(this.app);
+    new import_obsidian3.Setting(containerEl).setName("\u5165\u529B\u30C7\u30D0\u30A4\u30B9").setDesc("\u672A\u8A2D\u5B9A\u306E\u307E\u307E\u3060\u3068\u3001\u3053\u306E\u30B3\u30DE\u30F3\u30C9\u306F\u958B\u59CB\u305B\u305A\u306B\u8A2D\u5B9A\u3092\u4FC3\u3059\u3002").addDropdown((d) => {
+      const fill = (devices) => {
+        var _a;
+        d.selectEl.empty();
+        d.addOption("", "\uFF08\u672A\u8A2D\u5B9A\uFF09");
+        for (const dev of devices)
+          d.addOption(dev.deviceId, dev.label);
+        if (saved && !devices.some((x) => x.deviceId === saved.deviceId)) {
+          d.addOption(
+            saved.deviceId,
+            `${saved.label || saved.deviceId}\uFF08\u898B\u3064\u304B\u308A\u307E\u305B\u3093\uFF09`
+          );
+        }
+        d.setValue((_a = saved == null ? void 0 : saved.deviceId) != null ? _a : "");
+      };
+      fill([]);
+      d.onChange((v) => {
+        var _a, _b;
+        if (!v) {
+          saveSystemInput(this.app, null);
+          return;
+        }
+        const label = (_b = (_a = d.selectEl.selectedOptions[0]) == null ? void 0 : _a.text) != null ? _b : "";
+        saveSystemInput(this.app, { deviceId: v, label });
+      });
+      void listAudioInputs().then(fill).catch(() => {
+        new import_obsidian3.Notice("VoxCraft: \u5165\u529B\u30C7\u30D0\u30A4\u30B9\u306E\u4E00\u89A7\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+      });
+    });
   }
   display() {
     const { containerEl } = this;
@@ -965,6 +1047,8 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.display();
       })
     );
+    if (!import_obsidian3.Platform.isMobile)
+      this.displaySystemInput(containerEl);
     containerEl.createEl("h3", { text: "\u30B5\u30FC\u30D0\u30FC\u306E\u72B6\u614B" });
     const statusEl = containerEl.createEl("p", {
       text: "\u300C\u63A5\u7D9A\u78BA\u8A8D\u300D\u3092\u62BC\u3059\u3068\u30B5\u30FC\u30D0\u30FC\u306E\u7A3C\u50CD\u72B6\u6CC1\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
@@ -1495,6 +1579,9 @@ function preserveParagraphBreaks(refined, provisional) {
 }
 
 // ws.ts
+function isSystemSource(source) {
+  return source === "system" || source === "system-client";
+}
 function safeClose(ws) {
   try {
     ws.onopen = null;
@@ -1661,7 +1748,7 @@ var AsrSocket = class {
     if (this.connected)
       this.ws.send(pcm16);
   }
-  sendStart(stripSpace, symbols, mode = "dictation", source = "microphone", dictionarySetId = "default") {
+  sendStart(stripSpace, symbols, mode = "dictation", source = "microphone", device, dictionarySetId = "default") {
     if (!this.connected)
       return Promise.reject(new Error("\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093"));
     this.rejectStart("\u5225\u306E\u958B\u59CB\u8981\u6C42\u306B\u7F6E\u304D\u63DB\u3048\u3089\u308C\u307E\u3057\u305F");
@@ -1673,7 +1760,7 @@ var AsrSocket = class {
         reject(new Error("\u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB\u304C\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F"));
       }, 15e3);
       this.pendingStart = { resolve, reject, timer };
-      this.send({ type: "start", stripSpace, symbols, mode, source, dictionarySetId });
+      this.send({ type: "start", stripSpace, symbols, mode, source, device, dictionarySetId });
     });
   }
   sendStop() {
@@ -2144,6 +2231,22 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       }
     });
     this.addCommand({
+      id: "toggle-client-system-transcribe",
+      name: "\u3053\u306E\u7AEF\u672B\u306EPC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\uFF08\u958B\u59CB/\u505C\u6B62\uFF09",
+      icon: "speaker",
+      checkCallback: (checking) => {
+        if (import_obsidian7.Platform.isMobile)
+          return false;
+        if (!checking) {
+          if (this.recording)
+            this.stopRecording();
+          else
+            void this.startRecording("transcribe", "system-client");
+        }
+        return true;
+      }
+    });
+    this.addCommand({
       id: "cancel-last-input",
       name: "\u76F4\u524D\u306E\u5165\u529B\u3092\u30AD\u30E3\u30F3\u30BB\u30EB\uFF08\u4E00\u6587\u524A\u9664\uFF09",
       icon: "eraser",
@@ -2222,7 +2325,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       void this.startRecording();
   }
   async startRecording(mode = "dictation", source = "microphone") {
-    var _a, _b;
+    var _a, _b, _c;
     if (this.recording || this.starting || this.stopping)
       return;
     const cm = this.getActiveCm();
@@ -2236,6 +2339,14 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       return;
     }
     this.starting = true;
+    let clientInput = null;
+    if (source === "system-client") {
+      clientInput = await this.resolveClientInput();
+      if (!clientInput) {
+        this.starting = false;
+        return;
+      }
+    }
     this.mode = mode;
     this.source = source;
     this.sourceDevice = "";
@@ -2277,7 +2388,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         if (!this.recording)
           return;
         new import_obsidian7.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`);
-        if (fatal && this.source === "system")
+        if (fatal && isSystemSource(this.source))
           this.stopRecording();
       },
       onClose: () => {
@@ -2308,6 +2419,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         this.settings.symbolDictation,
         mode,
         source,
+        clientInput == null ? void 0 : clientInput.label,
         dictionarySetId
       );
       this.sourceDevice = (_a = started.device) != null ? _a : "";
@@ -2322,13 +2434,13 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       }
     } catch (e) {
       new import_obsidian7.Notice(
-        `VoxCraft: ${source === "system" ? "PC\u97F3\u58F0" : "\u30DE\u30A4\u30AF"}\u3092\u958B\u59CB\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\uFF08${e instanceof Error ? e.message : e}\uFF09`
+        `VoxCraft: ${isSystemSource(source) ? "PC\u97F3\u58F0" : "\u30DE\u30A4\u30AF"}\u3092\u958B\u59CB\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\uFF08${e instanceof Error ? e.message : e}\uFF09`
       );
       await this.teardownSession();
       this.setStatus("\u505C\u6B62\u4E2D");
       return;
     }
-    if (source === "microphone") {
+    if (source !== "system") {
       this.recorder = new MicRecorder(
         (pcm) => {
           var _a2;
@@ -2337,14 +2449,19 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         (level) => this.showLevel(level),
         // 文字起こしは自分の声ではなく会場や再生音を拾う。ブラウザの前処理は
         // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
-        mode === "transcribe" ? RAW_MIC : DICTATION_MIC
+        // ループバック入力に至っては、EC/NS/AGC は掛けるだけ音を壊す。
+        mode === "transcribe" ? RAW_MIC : DICTATION_MIC,
+        16e3,
+        (_c = clientInput == null ? void 0 : clientInput.deviceId) != null ? _c : null
       );
       this.recorder.onStalled = () => this.reportStall();
       this.recorder.onGap = (sec) => this.reportGap(sec);
       try {
         await this.recorder.start();
       } catch (e) {
-        new import_obsidian7.Notice("VoxCraft: \u30DE\u30A4\u30AF\u306B\u30A2\u30AF\u30BB\u30B9\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+        new import_obsidian7.Notice(
+          clientInput ? `VoxCraft: \u5165\u529B\u30C7\u30D0\u30A4\u30B9\u300C${clientInput.label}\u300D\u3092\u958B\u3051\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u4ED6\u306E\u30A2\u30D7\u30EA\u304C\u5360\u6709\u3057\u3066\u3044\u308B\u304B\u3001\u30C7\u30D0\u30A4\u30B9\u304C\u7121\u52B9\u5316\u3055\u308C\u305F\u53EF\u80FD\u6027\u304C\u3042\u308B\u3002` : "VoxCraft: \u30DE\u30A4\u30AF\u306B\u30A2\u30AF\u30BB\u30B9\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002"
+        );
         this.socket.sendStop();
         await this.teardownSession();
         this.setStatus("\u505C\u6B62\u4E2D");
@@ -2399,13 +2516,43 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     else
       this.finishStop();
   }
+  // 設定に保存された入力デバイスを、いま実在するものへ解決する。
+  // 見つからないまま既定マイクで始めてしまうと、PC音声のつもりで部屋の音を
+  // 録ることになるので、解決できなければ開始しない。
+  async resolveClientInput() {
+    const saved = loadSystemInput(this.app);
+    if (!saved) {
+      new import_obsidian7.Notice(
+        "VoxCraft: PC\u97F3\u58F0\u306E\u5165\u529B\u30C7\u30D0\u30A4\u30B9\u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A \u2192 VoxCraft \u2192\u300CPC\u97F3\u58F0\uFF08\u3053\u306E\u7AEF\u672B\uFF09\u300D\u3067\u300C\u30B9\u30C6\u30EC\u30AA \u30DF\u30AD\u30B5\u30FC\u300D\u7B49\u3092\u9078\u3093\u3067\u304F\u3060\u3055\u3044\u3002"
+      );
+      return null;
+    }
+    let resolved = null;
+    try {
+      resolved = await resolveAudioInput(saved);
+    } catch (e) {
+      resolved = null;
+    }
+    if (!resolved) {
+      new import_obsidian7.Notice(
+        `VoxCraft: \u5165\u529B\u30C7\u30D0\u30A4\u30B9\u300C${saved.label || saved.deviceId}\u300D\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002\u8A2D\u5B9A\u3067\u9078\u3073\u76F4\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
+      );
+      return null;
+    }
+    if (resolved.deviceId !== saved.deviceId || resolved.label !== saved.label) {
+      saveSystemInput(this.app, resolved);
+    }
+    return resolved;
+  }
   finishStop() {
-    var _a;
+    var _a, _b;
     if (!this.stopping)
       return;
     this.stopping = false;
     this.transcribing = false;
-    (_a = this.socket) == null ? void 0 : _a.close();
+    void ((_a = this.recorder) == null ? void 0 : _a.stop());
+    this.recorder = null;
+    (_b = this.socket) == null ? void 0 : _b.close();
     this.socket = null;
     this.clearDictationAnchor();
     this.pendingRespeak = null;
@@ -2465,7 +2612,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       return;
     this.setStatus("\u26A0 \u97F3\u58F0\u304C\u6B62\u307E\u3063\u3066\u3044\u307E\u3059");
     new import_obsidian7.Notice(
-      "VoxCraft: \u30DE\u30A4\u30AF\u304B\u3089\u306E\u97F3\u58F0\u304C\u6B62\u307E\u3063\u3066\u3044\u307E\u3059\u3002Obsidian \u3092\u524D\u9762\u306B\u623B\u3057\u3001\u753B\u9762\u3092\u70B9\u3051\u305F\u307E\u307E\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+      this.source === "system-client" ? "VoxCraft: PC\u97F3\u58F0\u306E\u5165\u529B\u304C\u6B62\u307E\u3063\u3066\u3044\u307E\u3059\u3002\u5165\u529B\u30C7\u30D0\u30A4\u30B9\u304C\u7121\u52B9\u5316\u3055\u308C\u305F\u304B\u3001\u4ED6\u306E\u30A2\u30D7\u30EA\u306B\u596A\u308F\u308C\u305F\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\u3002" : "VoxCraft: \u30DE\u30A4\u30AF\u304B\u3089\u306E\u97F3\u58F0\u304C\u6B62\u307E\u3063\u3066\u3044\u307E\u3059\u3002Obsidian \u3092\u524D\u9762\u306B\u623B\u3057\u3001\u753B\u9762\u3092\u70B9\u3051\u305F\u307E\u307E\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
     );
   }
   // 途切れが終わった。その間は録れていないので、長さごと知らせる。
@@ -2473,8 +2620,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     if (!this.recording)
       return;
     this.setStatus(this.idleStatus());
+    const cause = this.source === "system-client" ? "\u5165\u529B\u30C7\u30D0\u30A4\u30B9\u306E\u4E00\u6642\u505C\u6B62\u306E\u53EF\u80FD\u6027" : "\u753B\u9762\u30AA\u30D5\uFF0F\u30D0\u30C3\u30AF\u30B0\u30E9\u30A6\u30F3\u30C9\u306E\u53EF\u80FD\u6027";
     new import_obsidian7.Notice(
-      `VoxCraft: \u97F3\u58F0\u304C\u7D04${Math.round(seconds)}\u79D2\u9014\u5207\u308C\u307E\u3057\u305F\uFF08\u753B\u9762\u30AA\u30D5\uFF0F\u30D0\u30C3\u30AF\u30B0\u30E9\u30A6\u30F3\u30C9\u306E\u53EF\u80FD\u6027\uFF09\u3002\u305D\u306E\u9593\u306F\u9332\u97F3\u30FB\u6587\u5B57\u8D77\u3053\u3057\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002`
+      `VoxCraft: \u97F3\u58F0\u304C\u7D04${Math.round(seconds)}\u79D2\u9014\u5207\u308C\u307E\u3057\u305F\uFF08${cause}\uFF09\u3002\u305D\u306E\u9593\u306F\u9332\u97F3\u30FB\u6587\u5B57\u8D77\u3053\u3057\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002`
     );
   }
   // ---- 確定チャンクの処理 ----
@@ -2574,7 +2722,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
   // PC音声の速報範囲を、同じ音声を30秒前後まとめて認識した結果へ差し替える。
   // 追記後にユーザーが本文を編集していた場合は、変更を上書きせず補正を見送る。
   handleTranscribeRefinement(text, msg) {
-    if (this.mode !== "transcribe" || this.source !== "system" || !text)
+    if (this.mode !== "transcribe" || !isSystemSource(this.source) || !text)
       return;
     const start = msg.start;
     const end = msg.end;
@@ -2884,8 +3032,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     if (!this.recording)
       return "\u505C\u6B62\u4E2D";
     const dictionary = this.activeDictionarySetName ? ` / \u8F9E\u66F8: ${this.activeDictionarySetName}` : "";
-    if (this.source === "system") {
-      return this.sourceDevice ? `\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D\uFF08${this.sourceDevice}\uFF09${dictionary}` : `\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D${dictionary}`;
+    if (isSystemSource(this.source)) {
+      const where = this.source === "system-client" ? "\u3053\u306E\u7AEF\u672B" : "\u30B5\u30FC\u30D0\u30FC\u6A5F";
+      return this.sourceDevice ? `\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D\uFF08${where}: ${this.sourceDevice}\uFF09${dictionary}` : `\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D\uFF08${where}\uFF09${dictionary}`;
     }
     return this.mode === "transcribe" ? `\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D${dictionary}` : `\u25CF \u9332\u97F3\u4E2D${dictionary}`;
   }
