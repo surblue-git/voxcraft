@@ -9,6 +9,15 @@
         "common"
       ],
       "writableProfile": "common"
+    },
+    {
+      "id": "payments",
+      "name": "決済・金融",
+      "description": "共通辞書と決済・金融辞書",
+      "profiles": [
+        "common", "payments"
+      ],
+      "writableProfile": "payments"
     }
   ]
 }

@@ -141,31 +141,6 @@
       "enabled": true
     },
     {
-      "observed": "NTTドコモフィナンシャルグループ",
-      "output": "NTTドコモ・フィナンシャルグループ",
-      "enabled": true
-    },
-    {
-      "observed": "SMTV",
-      "output": "SMTB",
-      "enabled": true
-    },
-    {
-      "observed": "Dカード",
-      "output": "dカード",
-      "enabled": true
-    },
-    {
-      "observed": "D払い",
-      "output": "d払い",
-      "enabled": true
-    },
-    {
-      "observed": "どこもSMTVネット銀行",
-      "output": "ドコモSMTBネット銀行",
-      "enabled": true
-    },
-    {
       "observed": "こやまやすひろ",
       "output": "小山安博",
       "enabled": true
@@ -211,56 +186,6 @@
       "enabled": true
     },
     {
-      "observed": "どこもふぃなんしゃるぐるーぷ",
-      "output": "ドコモ・フィナンシャルグループ",
-      "enabled": true
-    },
-    {
-      "observed": "どこもフィナンシャルグループ",
-      "output": "ドコモ・フィナンシャルグループ",
-      "enabled": true
-    },
-    {
-      "observed": "らくてんぺい",
-      "output": "楽天ペイ",
-      "enabled": true
-    },
-    {
-      "observed": "リキット",
-      "output": "Liquid",
-      "enabled": true
-    },
-    {
-      "observed": "リキッド",
-      "output": "Liquid",
-      "enabled": true
-    },
-    {
-      "observed": "ポラリパイ",
-      "output": "ポラリファイ",
-      "enabled": true
-    },
-    {
-      "observed": "一軒米氏",
-      "output": "eKYC",
-      "enabled": true
-    },
-    {
-      "observed": "EKYC",
-      "output": "eKYC",
-      "enabled": true
-    },
-    {
-      "observed": "らくする",
-      "output": "ラクスル",
-      "enabled": true
-    },
-    {
-      "observed": "水尾銀行",
-      "output": "みずほ銀行",
-      "enabled": true
-    },
-    {
       "observed": "超音",
       "output": "長音",
       "enabled": true
@@ -268,16 +193,6 @@
     {
       "observed": "セブン&アイホールディングス",
       "output": "セブン&アイ・ホールディングス",
-      "enabled": true
-    },
-    {
-      "observed": "ぺいぺい",
-      "output": "PayPay",
-      "enabled": true
-    },
-    {
-      "observed": "ペイペイ",
-      "output": "PayPay",
       "enabled": true
     },
     {
@@ -301,21 +216,6 @@
       "enabled": true
     },
     {
-      "observed": "ペーペーカード",
-      "output": "PayPayカード",
-      "enabled": true
-    },
-    {
-      "observed": "ペーペー銀行",
-      "output": "PayPay銀行",
-      "enabled": true
-    },
-    {
-      "observed": "ペーペー証券",
-      "output": "PayPay証券",
-      "enabled": true
-    },
-    {
       "observed": "不良再建",
       "output": "不良債権",
       "enabled": true
@@ -331,28 +231,13 @@
       "enabled": true
     },
     {
-      "observed": "アメリカエクスプレス",
-      "output": "アメリカン・エキスプレス",
+      "observed": "NTTとこのフィナンシャルグループ",
+      "output": "NTTドコモ・フィナンシャルグループ",
       "enabled": true
     },
     {
-      "observed": "アメリカのエクスプレス",
-      "output": "アメリカン・エキスプレス",
-      "enabled": true
-    },
-    {
-      "observed": "アメリカンエクスプレス",
-      "output": "アメリカン・エキスプレス",
-      "enabled": true
-    },
-    {
-      "observed": "アメリカンエンスプレス",
-      "output": "アメリカン・エキスプレス",
-      "enabled": true
-    },
-    {
-      "observed": "アメリカンエンチプレス",
-      "output": "アメリカン・エキスプレス",
+      "observed": "NTTドコンフィナンシャルブループ",
+      "output": "NTTドコモ・フィナンシャルグループ",
       "enabled": true
     }
   ],
