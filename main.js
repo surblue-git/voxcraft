@@ -1763,6 +1763,33 @@ var AsrSocket = class {
       this.send({ type: "start", stripSpace, symbols, mode, source, device, dictionarySetId });
     });
   }
+  // モバイル回線の瞬断などで切れた直後の再接続用。start と違い、既存の
+  // セッションID（＝サーバー側の同じ録音ファイル）へそのまま続きを積む。
+  // サーバーは切断から一定時間だけ同じセッションを保持している。
+  sendResume(session, stripSpace, symbols, source = "microphone", device, dictionarySetId = "default") {
+    if (!this.connected)
+      return Promise.reject(new Error("\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093"));
+    this.rejectStart("\u5225\u306E\u958B\u59CB\u8981\u6C42\u306B\u7F6E\u304D\u63DB\u3048\u3089\u308C\u307E\u3057\u305F");
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        if (!this.pendingStart)
+          return;
+        this.pendingStart = null;
+        reject(new Error("\u9332\u97F3\u306E\u518D\u958B\u304C\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F"));
+      }, 15e3);
+      this.pendingStart = { resolve, reject, timer };
+      this.send({
+        type: "resume",
+        session,
+        stripSpace,
+        symbols,
+        mode: "transcribe",
+        source,
+        device,
+        dictionarySetId
+      });
+    });
+  }
   sendStop() {
     this.send({ type: "stop" });
   }
@@ -2077,6 +2104,9 @@ function isSecondaryClick(evt) {
 function isCommandEcho(text, at) {
   return /^を(?:再変|修正|変換|言い直|訂正)/.test(text.slice(at, at + 5));
 }
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 function buildSurfaces(target, segments) {
   const MAX = 50;
   let combos = [""];
@@ -2114,6 +2144,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.recording = false;
     this.starting = false;
     this.stopping = false;
+    // 文字起こし中にWebSocketが予期せず切れたときの自動再接続（モード分離: 口述には無関係）。
+    this.reconnecting = false;
     // 口述対象として録音開始時に固定するエディタ（背面作業やノート切替の影響を受けない）。
     this.cm = null;
     // アンカーに追記したチャンク列（取り消し・変換戻しの対象特定に使う。アンカー相対）。
@@ -2361,44 +2393,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     }
     this.stopping = false;
     this.setStatus(urls.length > 1 ? "\u63A5\u7D9A\u4E2D\u2026\uFF08\u3064\u306A\u304C\u308B\u65B9\u3092\u9078\u629E\uFF09" : "\u63A5\u7D9A\u4E2D\u2026");
-    this.socket = new AsrSocket(urls, {
-      onReady: () => {
-        var _a2;
-        const url = (_a2 = this.socket) == null ? void 0 : _a2.activeUrl;
-        const label = url ? labelForUrl(this.settings, url) : "";
-        const preparing = source === "system" ? "PC\u97F3\u58F0\u3092\u6E96\u5099\u4E2D\u2026" : "\u5F85\u6A5F\u4E2D\u2026 \u8A71\u3057\u3066\u304F\u3060\u3055\u3044";
-        this.setStatus(label ? `${preparing}\uFF08${label}\uFF09` : preparing);
-      },
-      onPartial: () => {
-        this.transcribing = true;
-        this.setStatus("\u8A8D\u8B58\u4E2D\u2026");
-      },
-      onSession: (id) => {
-        this.session = id;
-      },
-      onChunk: (text, msg) => {
-        this.transcribing = false;
-        this.handleChunk(text, msg);
-      },
-      onRefinement: (text, msg) => this.handleTranscribeRefinement(text, msg),
-      onLevel: (level) => this.showLevel(level),
-      onStopped: (reason) => this.handleServerStopped(reason),
-      onReconvert: (msg) => this.handleReconvert(msg),
-      onError: (m, fatal) => {
-        if (!this.recording)
-          return;
-        new import_obsidian7.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`);
-        if (fatal && isSystemSource(this.source))
-          this.stopRecording();
-      },
-      onClose: () => {
-        if (this.recording || this.stopping) {
-          new import_obsidian7.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u63A5\u7D9A\u304C\u5207\u308C\u307E\u3057\u305F\u3002");
-          void this.teardownSession();
-          this.setStatus("\u505C\u6B62\u4E2D");
-        }
-      }
-    });
+    this.socket = new AsrSocket(urls, this.buildSocketHandlers());
     try {
       await this.socket.connect();
     } catch (e) {
@@ -2575,6 +2570,123 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       );
     }
     this.finishStop();
+  }
+  // AsrSocket のハンドラは初回接続・再接続のどちらでも同じものを使う
+  // （違うのは接続先と start/resume のどちらを送るかだけ）。
+  buildSocketHandlers() {
+    return {
+      onReady: () => {
+        var _a;
+        const url = (_a = this.socket) == null ? void 0 : _a.activeUrl;
+        const label = url ? labelForUrl(this.settings, url) : "";
+        const preparing = this.source === "system" ? "PC\u97F3\u58F0\u3092\u6E96\u5099\u4E2D\u2026" : "\u5F85\u6A5F\u4E2D\u2026 \u8A71\u3057\u3066\u304F\u3060\u3055\u3044";
+        this.setStatus(label ? `${preparing}\uFF08${label}\uFF09` : preparing);
+      },
+      onPartial: () => {
+        this.transcribing = true;
+        this.setStatus("\u8A8D\u8B58\u4E2D\u2026");
+      },
+      onSession: (id) => {
+        this.session = id;
+      },
+      onChunk: (text, msg) => {
+        this.transcribing = false;
+        this.handleChunk(text, msg);
+      },
+      onRefinement: (text, msg) => this.handleTranscribeRefinement(text, msg),
+      onLevel: (level) => this.showLevel(level),
+      onStopped: (reason) => this.handleServerStopped(reason),
+      onReconvert: (msg) => this.handleReconvert(msg),
+      onError: (m, fatal) => {
+        if (!this.recording)
+          return;
+        new import_obsidian7.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`);
+        if (fatal && isSystemSource(this.source))
+          this.stopRecording();
+      },
+      onClose: () => this.handleSocketClose()
+    };
+  }
+  // 接続が切れたときの分岐点。文字起こし中（セッションを持っている＝復旧可能）だけ
+  // 自動再接続を試み、それ以外（口述・停止処理中・セッション開始前）は従来どおり
+  // 即座に録音を終了する。口述の挙動には一切触れない。
+  handleSocketClose() {
+    if (!this.recording && !this.stopping)
+      return;
+    if (!this.stopping && this.recording && this.mode === "transcribe" && this.session) {
+      void this.reconnectTranscribe();
+      return;
+    }
+    new import_obsidian7.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u63A5\u7D9A\u304C\u5207\u308C\u307E\u3057\u305F\u3002");
+    void this.teardownSession();
+    this.setStatus("\u505C\u6B62\u4E2D");
+  }
+  // モバイル回線の瞬断等でWebSocketが切れた直後、マイクは止めずに再接続だけ試みる。
+  // 再接続できたら同じセッションID宛に resume を送り、サーバー側の同じ録音ファイルへ
+  // 続きを積んでもらう（復旧コマンドが引き続き使えるように session を変えない）。
+  async reconnectTranscribe() {
+    var _a, _b;
+    if (this.reconnecting)
+      return;
+    this.reconnecting = true;
+    this.socket = null;
+    const session = this.session;
+    const source = this.source;
+    const stripSpace = this.settings.stripJaAlnumSpace;
+    const symbols = this.settings.symbolDictation;
+    const device = this.sourceDevice || void 0;
+    const disconnectedAt = Date.now();
+    const delaysMs = [1e3, 2e3, 4e3, 8e3, 15e3];
+    const maxTotalMs = 3 * 60 * 1e3;
+    this.setStatus("\u26A0 \u63A5\u7D9A\u304C\u5207\u308C\u307E\u3057\u305F\u3002\u518D\u63A5\u7D9A\u4E2D\u2026");
+    let attempt = 0;
+    while (session && this.recording && !this.stopping && Date.now() - disconnectedAt < maxTotalMs) {
+      await sleep(delaysMs[Math.min(attempt, delaysMs.length - 1)]);
+      attempt += 1;
+      if (!this.recording || this.stopping)
+        break;
+      const urls = resolveUrls(this.settings);
+      const socket = new AsrSocket(urls, this.buildSocketHandlers());
+      try {
+        await socket.connect();
+        const dictionarySetId = this.activeDictionarySetId || "default";
+        const started = await socket.sendResume(
+          session,
+          stripSpace,
+          symbols,
+          source,
+          device,
+          dictionarySetId
+        );
+        if (!this.recording || this.stopping) {
+          socket.close();
+          break;
+        }
+        this.socket = socket;
+        this.sourceDevice = (_a = started.device) != null ? _a : this.sourceDevice;
+        this.autoStopSec = (_b = started.autoStopSec) != null ? _b : this.autoStopSec;
+        this.activeDictionarySetId = started.dictionarySetId;
+        this.activeDictionarySetName = started.dictionarySetName;
+        this.activeDictionaryRevision = started.dictionaryRevision;
+        this.activeDictionaryWritableProfile = started.dictionaryWritableProfile;
+        this.activeDictionaryProfileRevisions = started.dictionaryProfileRevisions;
+        this.reconnecting = false;
+        const gapSec = Math.max(1, Math.round((Date.now() - disconnectedAt) / 1e3));
+        new import_obsidian7.Notice(
+          `VoxCraft: \u30B5\u30FC\u30D0\u30FC\u306B\u518D\u63A5\u7D9A\u3057\u307E\u3057\u305F\uFF08\u7D04${gapSec}\u79D2\u306E\u7A7A\u767D\u3002\u305D\u306E\u9593\u306E\u97F3\u58F0\u306F\u9332\u97F3\u3055\u308C\u3066\u3044\u307E\u305B\u3093\uFF09\u3002`
+        );
+        this.setStatus(this.idleStatus());
+        return;
+      } catch (e) {
+        socket.close();
+      }
+    }
+    this.reconnecting = false;
+    if (this.recording && !this.stopping) {
+      new import_obsidian7.Notice("VoxCraft: \u30B5\u30FC\u30D0\u30FC\u3078\u518D\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u9332\u97F3\u3092\u505C\u6B62\u3057\u307E\u3059\u3002");
+      void this.teardownSession();
+      this.setStatus("\u505C\u6B62\u4E2D");
+    }
   }
   async teardownSession() {
     var _a, _b, _c;
