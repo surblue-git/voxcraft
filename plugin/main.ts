@@ -2,7 +2,13 @@ import { Editor, MarkdownView, Menu, Notice, Platform, Plugin } from "obsidian";
 import { Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
-import { DICTATION_MIC, MicRecorder, RAW_MIC } from "./audio";
+import {
+    AudioInputDevice,
+    DICTATION_MIC,
+    MicRecorder,
+    RAW_MIC,
+    resolveAudioInput,
+} from "./audio";
 import { looksLikeRespeak, parseCommand, parseModalCommand } from "./commands";
 import { DictModal, fetchDict, fetchReconvert, ReconvertPayload, saveDict } from "./dict";
 import { ReconvertModal } from "./suggest";
@@ -10,8 +16,10 @@ import {
     AUTO,
     DEFAULT_SETTINGS,
     labelForUrl,
+    loadSystemInput,
     migrateSettings,
     resolveUrls,
+    saveSystemInput,
     VoxCraftSettingTab,
     VoxCraftSettings,
 } from "./settings";
@@ -24,7 +32,7 @@ import {
 } from "./recover";
 import { RecordingsModal } from "./recordings";
 import { assessRefinementSafety, preserveParagraphBreaks } from "./refinement";
-import { AsrMode, AsrSocket, AsrSource, ServerMessage } from "./ws";
+import { AsrMode, AsrSocket, AsrSource, isSystemSource, ServerMessage } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
 import { keyboardExtension, isKeyboardSuppressed, setKeyboardSuppressed } from "./keyboard";
 import { DictationToolbar } from "./toolbar";
@@ -218,6 +226,19 @@ export default class VoxCraftPlugin extends Plugin {
             },
         });
         this.addCommand({
+            id: "toggle-client-system-transcribe",
+            name: "この端末のPC音声を文字起こし（開始/停止）",
+            icon: "speaker",
+            checkCallback: (checking) => {
+                if (Platform.isMobile) return false;
+                if (!checking) {
+                    if (this.recording) this.stopRecording();
+                    else void this.startRecording("transcribe", "system-client");
+                }
+                return true;
+            },
+        });
+        this.addCommand({
             id: "cancel-last-input",
             name: "直前の入力をキャンセル（一文削除）",
             icon: "eraser",
@@ -305,7 +326,20 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
 
+        // この端末のPC音声は、接続する前にデバイスを確定させる。ここで落としておけば
+        // サーバー側に空の録音セッションを作らせずに済む。
+        // デバイス列挙は待たされる（初回は許可ダイアログも出る）ので、その間に
+        // もう一度コマンドが飛んでも二重に開始しないよう、先に旗を立てておく。
         this.starting = true;
+        let clientInput: AudioInputDevice | null = null;
+        if (source === "system-client") {
+            clientInput = await this.resolveClientInput();
+            if (!clientInput) {
+                this.starting = false;
+                return;
+            }
+        }
+
         this.mode = mode;
         this.source = source;
         this.sourceDevice = "";
@@ -347,7 +381,7 @@ export default class VoxCraftPlugin extends Plugin {
                 // 開始前の fatal は sendStart() の catch で一度だけ表示する。
                 if (!this.recording) return;
                 new Notice(`VoxCraft サーバーエラー: ${m}`);
-                if (fatal && this.source === "system") this.stopRecording();
+                if (fatal && isSystemSource(this.source)) this.stopRecording();
             },
             onClose: () => {
                 if (this.recording || this.stopping) {
@@ -377,13 +411,14 @@ export default class VoxCraftPlugin extends Plugin {
                 this.settings.stripJaAlnumSpace,
                 this.settings.symbolDictation,
                 mode,
-                source
+                source,
+                clientInput?.label
             );
             this.sourceDevice = started.device ?? "";
             this.autoStopSec = started.autoStopSec ?? 0;
         } catch (e) {
             new Notice(
-                `VoxCraft: ${source === "system" ? "PC音声" : "マイク"}を開始できませんでした。` +
+                `VoxCraft: ${isSystemSource(source) ? "PC音声" : "マイク"}を開始できませんでした。` +
                 `（${e instanceof Error ? e.message : e}）`
             );
             await this.teardownSession();
@@ -391,13 +426,18 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
 
-        if (source === "microphone") {
+        // source === "system" のときだけ音声はサーバー自身が取る。それ以外
+        // （マイク／この端末のPC音声）はここから PCM を送る。
+        if (source !== "system") {
             this.recorder = new MicRecorder(
                 (pcm) => this.socket?.sendAudio(pcm),
                 (level) => this.showLevel(level),
                 // 文字起こしは自分の声ではなく会場や再生音を拾う。ブラウザの前処理は
                 // 近接した1人の声を前提にしているので、ここでは無効化して原音を送る。
-                mode === "transcribe" ? RAW_MIC : DICTATION_MIC
+                // ループバック入力に至っては、EC/NS/AGC は掛けるだけ音を壊す。
+                mode === "transcribe" ? RAW_MIC : DICTATION_MIC,
+                16000,
+                clientInput?.deviceId ?? null
             );
             // 「録音中」の表示のまま実は音が来ていない、という壊れ方を必ず外へ出す。
             this.recorder.onStalled = () => this.reportStall();
@@ -405,7 +445,12 @@ export default class VoxCraftPlugin extends Plugin {
             try {
                 await this.recorder.start();
             } catch (e) {
-                new Notice("VoxCraft: マイクにアクセスできませんでした。");
+                new Notice(
+                    clientInput
+                        ? `VoxCraft: 入力デバイス「${clientInput.label}」を開けませんでした。` +
+                          "他のアプリが占有しているか、デバイスが無効化された可能性がある。"
+                        : "VoxCraft: マイクにアクセスできませんでした。"
+                );
                 this.socket.sendStop();
                 await this.teardownSession();
                 this.setStatus("停止中");
@@ -464,10 +509,47 @@ export default class VoxCraftPlugin extends Plugin {
         else this.finishStop();
     }
 
+    // 設定に保存された入力デバイスを、いま実在するものへ解決する。
+    // 見つからないまま既定マイクで始めてしまうと、PC音声のつもりで部屋の音を
+    // 録ることになるので、解決できなければ開始しない。
+    private async resolveClientInput(): Promise<AudioInputDevice | null> {
+        const saved = loadSystemInput(this.app);
+        if (!saved) {
+            new Notice(
+                "VoxCraft: PC音声の入力デバイスが未設定です。" +
+                "設定 → VoxCraft →「PC音声（この端末）」で「ステレオ ミキサー」等を選んでください。"
+            );
+            return null;
+        }
+        let resolved: AudioInputDevice | null = null;
+        try {
+            resolved = await resolveAudioInput(saved);
+        } catch {
+            resolved = null;
+        }
+        if (!resolved) {
+            new Notice(
+                `VoxCraft: 入力デバイス「${saved.label || saved.deviceId}」が見つかりません。` +
+                "設定で選び直してください。"
+            );
+            return null;
+        }
+        // ドライバ再インストール等で ID が変わったら、拾い直せた方へ更新しておく。
+        if (resolved.deviceId !== saved.deviceId || resolved.label !== saved.label) {
+            saveSystemInput(this.app, resolved);
+        }
+        return resolved;
+    }
+
     private finishStop(): void {
         if (!this.stopping) return;
         this.stopping = false;
         this.transcribing = false;
+        // サーバー主導の停止（無音での自動停止）でもここを通る。この端末で録っている
+        // 場合は recorder が残ったままになるので、必ず閉じる。手動停止では
+        // requestStop() で停止済みなので二重呼び出しにはならない。
+        void this.recorder?.stop();
+        this.recorder = null;
         this.socket?.close();
         this.socket = null;
         this.clearDictationAnchor();
@@ -532,8 +614,11 @@ export default class VoxCraftPlugin extends Plugin {
         if (!this.recording) return;
         this.setStatus("⚠ 音声が止まっています");
         new Notice(
-            "VoxCraft: マイクからの音声が止まっています。" +
-            "Obsidian を前面に戻し、画面を点けたままにしてください。"
+            this.source === "system-client"
+                ? "VoxCraft: PC音声の入力が止まっています。" +
+                  "入力デバイスが無効化されたか、他のアプリに奪われた可能性があります。"
+                : "VoxCraft: マイクからの音声が止まっています。" +
+                  "Obsidian を前面に戻し、画面を点けたままにしてください。"
         );
     }
 
@@ -541,8 +626,11 @@ export default class VoxCraftPlugin extends Plugin {
     private reportGap(seconds: number): void {
         if (!this.recording) return;
         this.setStatus(this.idleStatus());
+        const cause = this.source === "system-client"
+            ? "入力デバイスの一時停止の可能性"
+            : "画面オフ／バックグラウンドの可能性";
         new Notice(
-            `VoxCraft: 音声が約${Math.round(seconds)}秒途切れました（画面オフ／バックグラウンドの可能性）。` +
+            `VoxCraft: 音声が約${Math.round(seconds)}秒途切れました（${cause}）。` +
             "その間は録音・文字起こしされていません。"
         );
     }
@@ -658,7 +746,7 @@ export default class VoxCraftPlugin extends Plugin {
     // PC音声の速報範囲を、同じ音声を30秒前後まとめて認識した結果へ差し替える。
     // 追記後にユーザーが本文を編集していた場合は、変更を上書きせず補正を見送る。
     private handleTranscribeRefinement(text: string, msg: ServerMessage): void {
-        if (this.mode !== "transcribe" || this.source !== "system" || !text) return;
+        if (this.mode !== "transcribe" || !isSystemSource(this.source) || !text) return;
         const start = msg.start;
         const end = msg.end;
         const revision = msg.revision;
@@ -1009,10 +1097,11 @@ export default class VoxCraftPlugin extends Plugin {
     // 現在の基本ステータス表記（非同期処理から戻すときに使う）。
     private idleStatus(): string {
         if (!this.recording) return "停止中";
-        if (this.source === "system") {
+        if (isSystemSource(this.source)) {
+            const where = this.source === "system-client" ? "この端末" : "サーバー機";
             return this.sourceDevice
-                ? `● PC音声を文字起こし中（${this.sourceDevice}）`
-                : "● PC音声を文字起こし中";
+                ? `● PC音声を文字起こし中（${where}: ${this.sourceDevice}）`
+                : `● PC音声を文字起こし中（${where}）`;
         }
         return this.mode === "transcribe" ? "● 文字起こし中" : "● 録音中";
     }

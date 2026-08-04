@@ -33,6 +33,44 @@ export const RAW_MIC: MicOptions = {
     autoGainControl: false,
 };
 
+// 入力デバイスの選択肢。deviceId はドライバ再インストール等で変わりうるので、
+// 表示名も一緒に持っておき、ID が消えていたら名前で拾い直す。
+export interface AudioInputDevice {
+    deviceId: string;
+    label: string;
+}
+
+// 選択できる音声入力デバイスの一覧。
+// label は権限が無いと空文字になるため、先に一度だけ取得許可を取ってから列挙する。
+export async function listAudioInputs(): Promise<AudioInputDevice[]> {
+    let probe: MediaStream | null = null;
+    try {
+        probe = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+        // 既に許可済みなら不要。拒否されていれば label が空のまま列挙される。
+    }
+    try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        return devices
+            .filter((d) => d.kind === "audioinput" && d.deviceId)
+            .map((d) => ({ deviceId: d.deviceId, label: d.label || d.deviceId }));
+    } finally {
+        probe?.getTracks().forEach((t) => t.stop());
+    }
+}
+
+// 保存済みの選択を現在の一覧に突き合わせる。ID が一致すればそれを、
+// 無ければ同じ表示名のデバイスを返す。どちらも無ければ null。
+export async function resolveAudioInput(
+    saved: AudioInputDevice
+): Promise<AudioInputDevice | null> {
+    const devices = await listAudioInputs();
+    const byId = devices.find((d) => d.deviceId === saved.deviceId);
+    if (byId) return byId;
+    if (!saved.label) return null;
+    return devices.find((d) => d.label === saved.label) ?? null;
+}
+
 const WORKLET_CODE = `
 class VoxCraftAudioProcessor extends AudioWorkletProcessor {
     process(inputs, outputs, parameters) {
@@ -61,6 +99,7 @@ export class MicRecorder {
     private onLevel: LevelHandler | null;
     private targetRate: number;
     private mic: MicOptions;
+    private deviceId: string | null;
 
     // 録音が止まったことを知らせるための監視。無音のまま録れていた事故の再発防止で、
     // 「録音中の表示のまま実は死んでいる」状態を必ず外に出す。
@@ -75,12 +114,14 @@ export class MicRecorder {
         onPcm: PcmHandler,
         onLevel: LevelHandler | null = null,
         mic: MicOptions = DICTATION_MIC,
-        targetRate = 16000
+        targetRate = 16000,
+        deviceId: string | null = null
     ) {
         this.onPcm = onPcm;
         this.onLevel = onLevel;
         this.mic = mic;
         this.targetRate = targetRate;
+        this.deviceId = deviceId;
     }
 
     get active(): boolean {
@@ -89,14 +130,17 @@ export class MicRecorder {
 
     async start(): Promise<void> {
         if (this.ctx) return;
-        this.stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                channelCount: 1,
-                echoCancellation: this.mic.echoCancellation,
-                noiseSuppression: this.mic.noiseSuppression,
-                autoGainControl: this.mic.autoGainControl,
-            },
-        });
+        const audio: MediaTrackConstraints = {
+            channelCount: 1,
+            echoCancellation: this.mic.echoCancellation,
+            noiseSuppression: this.mic.noiseSuppression,
+            autoGainControl: this.mic.autoGainControl,
+        };
+        // exact で指定する。取れないときに既定マイクへ黙って落ちると、PC音声の
+        // つもりで部屋の音を録り続けることになる（無音のまま録れていた事故と同じ
+        // 「気づけない壊れ方」）。見つからなければ例外にして呼び出し元に知らせる。
+        if (this.deviceId) audio.deviceId = { exact: this.deviceId };
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio });
         this.ctx = new AudioContext();
         this.source = this.ctx.createMediaStreamSource(this.stream);
         const inputRate = this.ctx.sampleRate;

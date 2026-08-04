@@ -2,7 +2,14 @@
 // Desktop では ws://localhost:8760/ws、Android では ws://<Tailscale IP>:8760/ws を想定。
 
 export type AsrMode = "dictation" | "transcribe";
-export type AsrSource = "microphone" | "system";
+// system       = サーバー機の再生音をサーバー自身が WASAPI で取る
+// system-client = この端末の再生音（ステレオミキサー等）を取って送る
+export type AsrSource = "microphone" | "system" | "system-client";
+
+// PC音声として扱う音源か（取得元が違うだけで、扱いはサーバー・クライアントとも共通）。
+export function isSystemSource(source: AsrSource): boolean {
+    return source === "system" || source === "system-client";
+}
 
 export interface StartResult {
     source: AsrSource;
@@ -225,7 +232,8 @@ export class AsrSocket {
         stripSpace: boolean,
         symbols: boolean,
         mode: AsrMode = "dictation",
-        source: AsrSource = "microphone"
+        source: AsrSource = "microphone",
+        device?: string
     ): Promise<StartResult> {
         if (!this.connected) return Promise.reject(new Error("サーバーに接続されていません"));
         this.rejectStart("別の開始要求に置き換えられました");
@@ -236,7 +244,8 @@ export class AsrSocket {
                 reject(new Error("音声入力の開始がタイムアウトしました"));
             }, 15000);
             this.pendingStart = { resolve, reject, timer };
-            this.send({ type: "start", stripSpace, symbols, mode, source });
+            // device は system-client のときだけ意味を持つ（表示名をそのまま返す）。
+            this.send({ type: "start", stripSpace, symbols, mode, source, device });
         });
     }
 

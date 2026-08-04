@@ -1,5 +1,6 @@
 import { App, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import type VoxCraftPlugin from "./main";
+import { AudioInputDevice, listAudioInputs } from "./audio";
 import { DictModal, fetchHealth, httpBase } from "./dict";
 
 export interface VoxEndpoint {
@@ -65,6 +66,25 @@ export function resolveUrls(s: VoxCraftSettings): string[] {
     return all.includes(s.selection) ? [s.selection] : all;
 }
 
+// ---- PC音声（この端末）の入力デバイス ----
+//
+// 端末ごとに違うものなので、Vault の data.json には入れない。同期で他機へ渡ると
+// 存在しない deviceId を指すことになり、録音が始まらない（あるいは別の機械の
+// デバイス名が表示される）。localStorage は Vault 単位かつ端末ローカル。
+const SYSTEM_INPUT_KEY = "voxcraft:system-input";
+
+export function loadSystemInput(app: App): AudioInputDevice | null {
+    const raw = app.loadLocalStorage(SYSTEM_INPUT_KEY);
+    if (!raw || typeof raw !== "object") return null;
+    const { deviceId, label } = raw as Partial<AudioInputDevice>;
+    if (typeof deviceId !== "string" || !deviceId) return null;
+    return { deviceId, label: typeof label === "string" ? label : "" };
+}
+
+export function saveSystemInput(app: App, choice: AudioInputDevice | null): void {
+    app.saveLocalStorage(SYSTEM_INPUT_KEY, choice);
+}
+
 // URL に対応する表示名（見つからなければ URL そのもの）。
 export function labelForUrl(s: VoxCraftSettings, url: string): string {
     const ep = s.endpoints.find((e) => e.url.trim() === url);
@@ -77,6 +97,63 @@ export class VoxCraftSettingTab extends PluginSettingTab {
     constructor(app: App, plugin: VoxCraftPlugin) {
         super(app, plugin);
         this.plugin = plugin;
+    }
+
+    // PC音声を「この端末で取って送る」ための入力デバイス選択。
+    // Windows のステレオミキサー（既定では無効なので mmsys.cpl で有効化が要る）や
+    // 仮想オーディオケーブルを選ぶと、再生音が普通の録音デバイスとして取れる。
+    private displaySystemInput(containerEl: HTMLElement): void {
+        containerEl.createEl("h3", { text: "PC音声（この端末）" });
+        containerEl.createEl("p", {
+            text:
+                "コマンド「この端末のPC音声を文字起こし」で使う入力デバイス。" +
+                "Windowsの「ステレオ ミキサー」（Win+R → mmsys.cpl → 録音タブ → " +
+                "右クリックで「無効なデバイスの表示」→ 有効化）を選ぶと、この端末の" +
+                "再生音をそのまま認識サーバーへ送れる。" +
+                "サーバー機が別のPCでも、辞書と録音をサーバー側に一本化したまま使える。",
+            cls: "setting-item-description",
+        });
+        containerEl.createEl("p", {
+            text:
+                "この設定は端末ごとに保存される（Vaultの設定同期には乗らない）。" +
+                "デバイス名の一覧を出すためにマイクの許可を一度求めることがある。",
+            cls: "setting-item-description",
+        });
+
+        const saved = loadSystemInput(this.app);
+        new Setting(containerEl)
+            .setName("入力デバイス")
+            .setDesc("未設定のままだと、このコマンドは開始せずに設定を促す。")
+            .addDropdown((d) => {
+                const fill = (devices: AudioInputDevice[]) => {
+                    d.selectEl.empty();
+                    d.addOption("", "（未設定）");
+                    for (const dev of devices) d.addOption(dev.deviceId, dev.label);
+                    // 保存済みが一覧に無くても選択肢としては残す。ここで黙って
+                    // 「未設定」に戻すと、設定を開いただけで選択が消える。
+                    if (saved && !devices.some((x) => x.deviceId === saved.deviceId)) {
+                        d.addOption(
+                            saved.deviceId,
+                            `${saved.label || saved.deviceId}（見つかりません）`
+                        );
+                    }
+                    d.setValue(saved?.deviceId ?? "");
+                };
+                fill([]);
+                d.onChange((v) => {
+                    if (!v) {
+                        saveSystemInput(this.app, null);
+                        return;
+                    }
+                    const label = d.selectEl.selectedOptions[0]?.text ?? "";
+                    saveSystemInput(this.app, { deviceId: v, label });
+                });
+                void listAudioInputs()
+                    .then(fill)
+                    .catch(() => {
+                        new Notice("VoxCraft: 入力デバイスの一覧を取得できませんでした。");
+                    });
+            });
     }
 
     display(): void {
@@ -168,6 +245,9 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                     this.display();
                 })
         );
+
+        // ---- PC音声（この端末）の入力デバイス ----
+        if (!Platform.isMobile) this.displaySystemInput(containerEl);
 
         // ---- サーバーの状態確認 ----
         containerEl.createEl("h3", { text: "サーバーの状態" });

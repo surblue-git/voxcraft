@@ -6,6 +6,9 @@
     - テキストフレーム(JSON): 制御コマンド
         {"type": "start", "symbols": true, "stripSpace": true,
          "mode": "transcribe", "source": "system"}
+        # source は "microphone" / "system"（サーバー機の再生音を自前で取る）/
+        # "system-client"（クライアントが取った再生音をバイナリで送ってくる）。
+        # 後者は "device" にデバイス名を添えると started でそのまま返す。
         {"type": "stop"}                     # 残り音声をflushして確定
         {"type": "reconvert", "text": "..."} # 再変換候補を要求
         {"type": "tune", "fast": true}       # 候補選択中だけ応答速度優先に切替（false で復帰）
@@ -244,6 +247,11 @@ async def recognize(payload: dict = Body(...)) -> dict:
     }
 
 
+# PC音声として扱う音源。取得元がサーバー機（system）かクライアント機
+# （system-client）かの違いだけで、分割・連結・補正・自動停止はすべて共通。
+SYSTEM_SOURCES = ("system", "system-client")
+
+
 def _build_chunker(mode: str, source: str = "microphone") -> VadChunker:
     """モードに応じた分割器を作る。dictation は config の既定値そのまま。"""
     if mode != "transcribe":
@@ -255,7 +263,7 @@ def _build_chunker(mode: str, source: str = "microphone") -> VadChunker:
             vad_threshold=config.vad_threshold,
             speech_pad_sec=config.speech_pad_sec,
         )
-    if source == "system":
+    if source in SYSTEM_SOURCES:
         # PC音声は応答コマンドを聞く必要がない。短い息継ぎで細切れにせず、
         # 8〜12秒程度の文脈を速報認識へ渡す。
         return VadChunker(
@@ -525,7 +533,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         if (
             not config.system_refine_enabled
             or mode != "transcribe"
-            or source != "system"
+            or source not in SYSTEM_SOURCES
             or session is None
         ):
             return
@@ -554,7 +562,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     def note_provisional_delivery(end: int, recovery: bool) -> None:
         """クライアントが置換可能になった速報範囲だけを補正対象へ進める。"""
         nonlocal refinement_delivered_end
-        if recovery or mode != "transcribe" or source != "system":
+        if recovery or mode != "transcribe" or source not in SYSTEM_SOURCES:
             return
         refinement_delivered_end = max(refinement_delivered_end, end)
         schedule_refinement()
@@ -804,8 +812,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     symbols = bool(cmd.get("symbols", config.enable_symbol_dictation))
                     mode = "transcribe" if cmd.get("mode") == "transcribe" else "dictation"
                     requested_source = cmd.get("source", "microphone")
-                    source = "system" if requested_source == "system" else "microphone"
-                    if source == "system" and mode != "transcribe":
+                    source = (
+                        requested_source
+                        if requested_source in SYSTEM_SOURCES
+                        else "microphone"
+                    )
+                    if source in SYSTEM_SOURCES and mode != "transcribe":
                         await ws.send_text(json.dumps({
                             "type": "error",
                             "message": "PC音声入力は文字起こしモードでのみ使用できます。",
@@ -815,7 +827,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     chunker = _build_chunker(mode, source)
                     if mode == "transcribe":
                         opts = AsrOptions.transcription()
-                        system_mode = source == "system"
+                        system_mode = source in SYSTEM_SOURCES
                         joiner = ChunkJoiner(
                             sample_rate=config.sample_rate,
                             min_sec=(
@@ -890,14 +902,27 @@ async def ws_endpoint(ws: WebSocket) -> None:
                                 "fatal": True,
                             }))
                             continue
-                        if config.transcribe_auto_stop_sec > 0:
-                            silence_tracker = SilenceTracker(
-                                config.transcribe_auto_stop_sec,
-                                config.transcribe_audible_rms,
-                                asyncio.get_running_loop().time(),
-                            )
-                            auto_stop_task = asyncio.create_task(watch_system_silence())
-                            source_info["autoStopSec"] = config.transcribe_auto_stop_sec
+                    elif source == "system-client":
+                        # 音声はクライアントがバイナリで送ってくる。こちらは開くものが
+                        # 無いので、表示用のデバイス名を受け取って返すだけ。
+                        # null / 非文字列でも落ちないようにし、長さも切る（そのまま
+                        # ログとステータス表示に出るだけの値なので短くて構わない）。
+                        client_device = str(cmd.get("device") or "").strip()[:120]
+                        if client_device:
+                            source_info["device"] = client_device
+                        print(
+                            f"[VoxCraft] PC音声入力(クライアント側): "
+                            f"{client_device or 'デバイス名なし'}"
+                        )
+
+                    if source in SYSTEM_SOURCES and config.transcribe_auto_stop_sec > 0:
+                        silence_tracker = SilenceTracker(
+                            config.transcribe_auto_stop_sec,
+                            config.transcribe_audible_rms,
+                            asyncio.get_running_loop().time(),
+                        )
+                        auto_stop_task = asyncio.create_task(watch_system_silence())
+                        source_info["autoStopSec"] = config.transcribe_auto_stop_sec
                     await ws.send_text(json.dumps({
                         "type": "started", "source": source, **source_info,
                     }))
