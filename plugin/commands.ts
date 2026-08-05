@@ -15,7 +15,11 @@ export type VoiceCommand =
     | { kind: "pick"; index: number }                    // 候補選択「3番」
     | { kind: "reconvertTarget"; target: string }        // 「Aを再変換」（読みで探して候補提示）
     | { kind: "reconvertSelection" }                     // 「これを再変換」（選択範囲）
-    | { kind: "respeak" }                                // 「ここを言い直し」（次の発話で選択範囲を置換）
+    // 「ここを言い直し」（次の発話で対象範囲を置換）。
+    // explicit=true は「本文には現れない、命令とわかる言い方」。この場合だけ、
+    // 選択が無くてもカーソル位置の語を対象にしてよい（Androidで選択が困難なため）。
+    // explicit=false は「訂正」のように本文にも出る語で、選択が無ければ本文として扱う。
+    | { kind: "respeak"; explicit: boolean }
     | { kind: "respeakTarget"; target: string }          // 「Aを言い直し」（探して選び、次の発話で置換）
     | { kind: "confirm" }                                // 「確定」（候補モーダルの確定）
     | { kind: "cancel" }                                 // 「キャンセル」（モーダル/言い直しの解除）
@@ -62,16 +66,22 @@ const RECONVERT_WORDS = words(
 );
 // 言い直しの起動語。「言い直し」は誤認識されやすい（実測で「入れてほしい」
 // 「言い出ほしい」「合意で惜しい」に化ける）ため、認識しやすい短い語も足す。
-// どれも「選択範囲があるときだけ」コマンドになるので、本文を壊さない
-// （main.ts 側で選択が空なら本文として挿入する）。
-const RESPEAK_WORDS = words(
+//
+// 起動語は2種類に分ける。本文を壊さない担保が違うため:
+//   explicit … 命令とわかる言い方。本文にこの形で単独で現れることはまず無いので、
+//              選択が無くてもカーソル位置の語を対象にしてよい。
+//   plain    … 「訂正」のように本文にも出る語。選択があるときだけコマンドにする。
+//              この条件があるおかげで、一般語を起動語にできている。
+const RESPEAK_EXPLICIT_WORDS = words(
     ["言い直し", "いいなおし"], ["言い直して", "いいなおして"], ["言い直す", "いいなおす"],
     ["ここを言い直し", "ここをいいなおし"], ["ここを言い直して", "ここをいいなおして"],
     ["これを言い直し", "これをいいなおし"], ["これを言い直して", "これをいいなおして"],
-    ["訂正", "ていせい"], ["ここを訂正", "ここをていせい"],
-    ["これを訂正", "これをていせい"], ["訂正して", "ていせいして"],
-    ["言い換え", "いいかえ"], ["ここを言い換え", "ここをいいかえ"],
-    ["差し替え", "さしかえ"], ["ここを差し替え", "ここをさしかえ"],
+    ["ここを訂正", "ここをていせい"], ["これを訂正", "これをていせい"],
+    ["ここを言い換え", "ここをいいかえ"], ["ここを差し替え", "ここをさしかえ"],
+);
+const RESPEAK_PLAIN_WORDS = words(
+    ["訂正", "ていせい"], ["訂正して", "ていせいして"],
+    ["言い換え", "いいかえ"], ["差し替え", "さしかえ"],
 );
 
 const STOP = STOP_WORDS.map((w) => w.word);
@@ -79,7 +89,8 @@ const INPUT_CANCEL = INPUT_CANCEL_WORDS.map((w) => w.word);
 const INPUT_RESTORE = INPUT_RESTORE_WORDS.map((w) => w.word);
 const NEWLINE = NEWLINE_WORDS.map((w) => w.word);
 const RECONVERT = RECONVERT_WORDS.map((w) => w.word);
-const RESPEAK = RESPEAK_WORDS.map((w) => w.word);
+const RESPEAK_EXPLICIT = RESPEAK_EXPLICIT_WORDS.map((w) => w.word);
+const RESPEAK_PLAIN = RESPEAK_PLAIN_WORDS.map((w) => w.word);
 // 上のリストから漏れた言い直し起動語を拾う保険。誤爆の代償を小さくするため
 // 「選択範囲がある」「短い発話」の両方を満たすときだけ main.ts が採用する。
 const RESPEAK_LOOSE_RE = /^(?:ここ|これ|この)を?(?:言い|いい|訂正|ていせい|差し替|言い換)/;
@@ -199,7 +210,8 @@ export function parseCommand(rawText: string, prefix = ""): VoiceCommand {
     if (INPUT_RESTORE.includes(text)) return { kind: "restoreInput" };
     if (NEWLINE.includes(text)) return { kind: "newline" };
     if (RECONVERT.includes(text)) return { kind: "reconvert" };
-    if (RESPEAK.includes(text)) return { kind: "respeak" };
+    if (RESPEAK_EXPLICIT.includes(text)) return { kind: "respeak", explicit: true };
+    if (RESPEAK_PLAIN.includes(text)) return { kind: "respeak", explicit: false };
     if (CONFIRM.includes(text)) return { kind: "confirm" };
     if (CANCEL.includes(text)) return { kind: "cancel" };
 
@@ -221,7 +233,7 @@ export function parseCommand(rawText: string, prefix = ""): VoiceCommand {
     if (st) {
         const target = st[1].trim();
         // 「ここを」「これを」は選択範囲の言い直し（従来の挙動）。
-        if (SELECTION_WORDS.has(target)) return { kind: "respeak" };
+        if (SELECTION_WORDS.has(target)) return { kind: "respeak", explicit: true };
         if (target) return { kind: "respeakTarget", target };
     }
 
@@ -305,7 +317,8 @@ const READING_TABLE: { words: CommandWord[]; cmd: NonNullable<VoiceCommand> }[] 
     { words: INPUT_RESTORE_WORDS, cmd: { kind: "restoreInput" } },
     { words: NEWLINE_WORDS, cmd: { kind: "newline" } },
     { words: RECONVERT_WORDS, cmd: { kind: "reconvert" } },
-    { words: RESPEAK_WORDS, cmd: { kind: "respeak" } },
+    { words: RESPEAK_EXPLICIT_WORDS, cmd: { kind: "respeak", explicit: true } },
+    { words: RESPEAK_PLAIN_WORDS, cmd: { kind: "respeak", explicit: false } },
     { words: CONFIRM_WORDS, cmd: { kind: "confirm" } },
     { words: CANCEL_WORDS, cmd: { kind: "cancel" } },
 ];

@@ -29,6 +29,22 @@ check("readingKey: 長音符を落とす", readingKey("サンバー") === "さ�
 check("完全一致: 入力キャンセル", kind(parseCommand("入力キャンセル")) === "cancelInput");
 check("完全一致: 入力終了", kind(parseCommand("入力終了")) === "stop");
 check("完全一致: ここを言い直し", kind(parseCommand("ここを言い直し")) === "respeak");
+
+// ---- 言い直し起動語の explicit 区別 ----
+// explicit なら選択が無くてもカーソル位置の語を対象にしてよい。
+// 「訂正」のような本文にも出る語は、選択があるときだけコマンドにする（従来の担保）。
+function explicitOf(text: string): boolean | null {
+    const c = parseCommand(text);
+    return c && c.kind === "respeak" ? c.explicit : null;
+}
+check("explicit: ここを言い直し", explicitOf("ここを言い直し") === true);
+check("explicit: 言い直し", explicitOf("言い直し") === true);
+check("explicit: これを訂正", explicitOf("これを訂正") === true);
+check("plain: 訂正", explicitOf("訂正") === false);
+check("plain: 言い換え", explicitOf("言い換え") === false);
+check("plain: 差し替え", explicitOf("差し替え") === false);
+// 「これを言い直し」は RESPEAK_TARGET_RE 経由でも explicit に落ちること。
+check("explicit: これを言い直して", explicitOf("これを言い直して") === true);
 check("完全一致: 三番", kind(parseCommand("三番")) === "pick");
 check("完全一致: AをBに修正", kind(parseCommand("参加を惨禍に修正")) === "replace");
 check("完全一致: Aを再変換", kind(parseCommand("スミシンを再変換")) === "reconvertTarget");

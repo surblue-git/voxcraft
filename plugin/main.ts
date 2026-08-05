@@ -50,6 +50,7 @@ import { RecordingsModal } from "./recordings";
 import { assessRefinementSafety, preserveParagraphBreaks } from "./refinement";
 import { AsrMode, AsrSocket, AsrSource, isSystemSource, ServerMessage, WsHandlers } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
+import { wordRangeAt } from "./select";
 import { keyboardExtension, isKeyboardSuppressed, setKeyboardSuppressed } from "./keyboard";
 import { DictationToolbar } from "./toolbar";
 import { ScreenWakeLock } from "./wakelock";
@@ -1100,9 +1101,11 @@ export default class VoxCraftPlugin extends Plugin {
                 void this.reconvertSelection();
                 return true;
             case "respeak":
-                // 選択が無ければコマンドとして扱わない。「訂正」のような普通の語も
-                // 起動語にできるのは、この条件で本文が壊れないから。
-                if (!this.hasSelection()) return false;
+                // 「訂正」のような本文にも出る語は、選択があるときだけコマンドにする。
+                // この条件があるおかげで一般語を起動語にできている。
+                // 「ここを言い直し」のような命令とわかる言い方だけ、選択が無くても
+                // カーソル位置の語を対象にしてよい（Androidで選択が難しいため）。
+                if (!cmd.explicit && !this.hasSelection()) return false;
                 this.startRespeak();
                 return true;
             case "respeakTarget":
@@ -1545,12 +1548,18 @@ export default class VoxCraftPlugin extends Plugin {
             new Notice("VoxCraft: ノートを編集モードで開いてください。");
             return;
         }
-        const sel = cm.state.selection.main;
-        if (sel.empty) {
-            new Notice("VoxCraft: 再変換したい範囲を選択してください。");
+        // 選択が無ければカーソル位置の語を対象にする（Androidで選択が難しいため）。
+        // 再変換は候補を出すだけで、選ばなければ本文は変わらない。多少広く取っても
+        // reconvert 側が文節に切り直すので、実害が無い。
+        const range = this.targetRange(cm);
+        if (!range) {
+            new Notice(
+                "VoxCraft: 再変換する場所が決まりません。" +
+                "直したい語の中にカーソルを置くか、範囲を選択してください。"
+            );
             return;
         }
-        if (sel.to - sel.from > 200) {
+        if (range.to - range.from > 200) {
             new Notice("VoxCraft: 選択が長すぎます（200文字まで）。");
             return;
         }
@@ -1561,7 +1570,7 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
 
-        const text = cm.state.doc.sliceString(sel.from, sel.to);
+        const text = cm.state.doc.sliceString(range.from, range.to);
         this.setStatus("変換候補を取得中…");
         let payload: ReconvertPayload;
         try {
@@ -1576,7 +1585,7 @@ export default class VoxCraftPlugin extends Plugin {
             new Notice("VoxCraft: オフラインのため変換候補を取得できませんでした。");
             return;
         }
-        this.openReconvertModalFor({ from: sel.from, to: sel.to }, text, payload, cm);
+        this.openReconvertModalFor(range, text, payload, cm);
     }
 
     // 新規経路共通: 候補モーダルを開き、確定時に検証付きで置換する。
@@ -1720,6 +1729,21 @@ export default class VoxCraftPlugin extends Plugin {
         return !cm.state.selection.main.empty;
     }
 
+    // 「ここを〜」の対象範囲を決める。選択があればそれ、無ければカーソル位置の語。
+    //
+    // Android の Obsidian では単語のダブルタップ選択がまともに効かず、選択を
+    // 前提にすると言い直し・再変換がその端末で使えない機能になってしまう。
+    // カーソルを置くだけで対象が決まれば、タップ1回＋ボタン1回で届く。
+    // 推定した範囲は必ず選択表示にして、何が対象になったかを見えるようにする。
+    private targetRange(cm: EditorView): { from: number; to: number } | null {
+        const sel = cm.state.selection.main;
+        if (!sel.empty) return { from: sel.from, to: sel.to };
+        const range = wordRangeAt(cm.state.doc.toString(), sel.head);
+        if (!range) return null;
+        cm.dispatch({ selection: { anchor: range.from, head: range.to } });
+        return range;
+    }
+
     // 「ここを言い直し」: 選択範囲を覚え、次の発話1回だけをその範囲への置換にする。
     private startRespeak(): void {
         const cm = this.cm;
@@ -1727,17 +1751,19 @@ export default class VoxCraftPlugin extends Plugin {
             new Notice("VoxCraft: 録音中に、置き換えたい範囲を選択して使ってください。");
             return;
         }
-        const sel = cm.state.selection.main;
-        if (sel.empty) {
-            new Notice("VoxCraft: 言い直したい範囲を選択してから「ここを言い直し」と言ってください。");
+        const range = this.targetRange(cm);
+        if (!range) {
+            new Notice(
+                "VoxCraft: 言い直す場所が決まりません。" +
+                "直したい語の中にカーソルを置くか、範囲を選択してください。"
+            );
             return;
         }
-        this.setPendingRespeak({
-            from: sel.from,
-            to: sel.to,
-            text: cm.state.doc.sliceString(sel.from, sel.to),
-        });
-        this.setStatus("言い直し待ち — 次の発話で置換");
+        const text = cm.state.doc.sliceString(range.from, range.to);
+        this.setPendingRespeak({ from: range.from, to: range.to, text });
+        // 何が対象になったかを必ず見せる。カーソルから推定した場合は特に、
+        // 意図と違う範囲のまま喋られると本文が飛ぶ。
+        this.setStatus(`言い直し待ち —「${text}」を次の発話で置換`);
     }
 
     // 「Xを言い直し」: 直す場所を、選択ではなく声で指す。

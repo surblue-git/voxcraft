@@ -62,12 +62,14 @@ export class DictationToolbar {
         this.textBtn(bar, "、", "読点を挿入", () => this.cb.onInsert("、"));
         this.textBtn(bar, "。", "句点を挿入", () => this.cb.onInsert("。"));
         this.iconBtn(bar, "corner-down-left", "改行を挿入", () => this.cb.onInsert("\n"));
-        // 選択範囲に対する修正操作。音声起動（「ここを言い直し」等）は認識に化ける
+        // 直したい箇所への修正操作。音声起動（「ここを言い直し」等）は認識に化ける
         // ことがあるため、モバイルでは選択→タップの方が確実。
-        this.wordBtn(bar, "言い直し", "選択範囲を言い直す（次の発話で置き換え）", () =>
+        // 範囲選択が要らないのが要点: Android は単語のダブルタップ選択が効かないので、
+        // 直したい語の中にカーソルを置くだけでよい（その語を自動で対象にする）。
+        this.wordBtn(bar, "言い直し", "カーソル位置の語（または選択範囲）を言い直す — 次の発話で置き換え", () =>
             this.cb.onRespeak()
         );
-        this.wordBtn(bar, "再変換", "選択範囲を再変換（候補から選ぶ）", () =>
+        this.wordBtn(bar, "再変換", "カーソル位置の語（または選択範囲）を再変換 — 候補から選ぶ", () =>
             this.cb.onReconvert()
         );
         // キーボードは口述中は抑制されている。出したいときだけここから出す。

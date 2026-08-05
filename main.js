@@ -280,7 +280,7 @@ var RECONVERT_WORDS = words(
   ["\u5909\u63DB\u3084\u308A\u76F4\u3057", "\u3078\u3093\u304B\u3093\u3084\u308A\u306A\u304A\u3057"],
   ["\u518D\u5909\u63DB", "\u3055\u3044\u3078\u3093\u304B\u3093"]
 );
-var RESPEAK_WORDS = words(
+var RESPEAK_EXPLICIT_WORDS = words(
   ["\u8A00\u3044\u76F4\u3057", "\u3044\u3044\u306A\u304A\u3057"],
   ["\u8A00\u3044\u76F4\u3057\u3066", "\u3044\u3044\u306A\u304A\u3057\u3066"],
   ["\u8A00\u3044\u76F4\u3059", "\u3044\u3044\u306A\u304A\u3059"],
@@ -288,21 +288,24 @@ var RESPEAK_WORDS = words(
   ["\u3053\u3053\u3092\u8A00\u3044\u76F4\u3057\u3066", "\u3053\u3053\u3092\u3044\u3044\u306A\u304A\u3057\u3066"],
   ["\u3053\u308C\u3092\u8A00\u3044\u76F4\u3057", "\u3053\u308C\u3092\u3044\u3044\u306A\u304A\u3057"],
   ["\u3053\u308C\u3092\u8A00\u3044\u76F4\u3057\u3066", "\u3053\u308C\u3092\u3044\u3044\u306A\u304A\u3057\u3066"],
-  ["\u8A02\u6B63", "\u3066\u3044\u305B\u3044"],
   ["\u3053\u3053\u3092\u8A02\u6B63", "\u3053\u3053\u3092\u3066\u3044\u305B\u3044"],
   ["\u3053\u308C\u3092\u8A02\u6B63", "\u3053\u308C\u3092\u3066\u3044\u305B\u3044"],
+  ["\u3053\u3053\u3092\u8A00\u3044\u63DB\u3048", "\u3053\u3053\u3092\u3044\u3044\u304B\u3048"],
+  ["\u3053\u3053\u3092\u5DEE\u3057\u66FF\u3048", "\u3053\u3053\u3092\u3055\u3057\u304B\u3048"]
+);
+var RESPEAK_PLAIN_WORDS = words(
+  ["\u8A02\u6B63", "\u3066\u3044\u305B\u3044"],
   ["\u8A02\u6B63\u3057\u3066", "\u3066\u3044\u305B\u3044\u3057\u3066"],
   ["\u8A00\u3044\u63DB\u3048", "\u3044\u3044\u304B\u3048"],
-  ["\u3053\u3053\u3092\u8A00\u3044\u63DB\u3048", "\u3053\u3053\u3092\u3044\u3044\u304B\u3048"],
-  ["\u5DEE\u3057\u66FF\u3048", "\u3055\u3057\u304B\u3048"],
-  ["\u3053\u3053\u3092\u5DEE\u3057\u66FF\u3048", "\u3053\u3053\u3092\u3055\u3057\u304B\u3048"]
+  ["\u5DEE\u3057\u66FF\u3048", "\u3055\u3057\u304B\u3048"]
 );
 var STOP = STOP_WORDS.map((w) => w.word);
 var INPUT_CANCEL = INPUT_CANCEL_WORDS.map((w) => w.word);
 var INPUT_RESTORE = INPUT_RESTORE_WORDS.map((w) => w.word);
 var NEWLINE = NEWLINE_WORDS.map((w) => w.word);
 var RECONVERT = RECONVERT_WORDS.map((w) => w.word);
-var RESPEAK = RESPEAK_WORDS.map((w) => w.word);
+var RESPEAK_EXPLICIT = RESPEAK_EXPLICIT_WORDS.map((w) => w.word);
+var RESPEAK_PLAIN = RESPEAK_PLAIN_WORDS.map((w) => w.word);
 var RESPEAK_LOOSE_RE = /^(?:ここ|これ|この)を?(?:言い|いい|訂正|ていせい|差し替|言い換)/;
 var CONFIRM_WORDS = words(["\u78BA\u5B9A", "\u304B\u304F\u3066\u3044"], ["\u6C7A\u5B9A", "\u3051\u3063\u3066\u3044"]);
 var CANCEL_WORDS = words(["\u30AD\u30E3\u30F3\u30BB\u30EB", "\u304D\u3083\u3093\u305B\u308B"], ["\u3084\u3081\u308B", "\u3084\u3081\u308B"]);
@@ -401,8 +404,10 @@ function parseCommand(rawText, prefix = "") {
     return { kind: "newline" };
   if (RECONVERT.includes(text))
     return { kind: "reconvert" };
-  if (RESPEAK.includes(text))
-    return { kind: "respeak" };
+  if (RESPEAK_EXPLICIT.includes(text))
+    return { kind: "respeak", explicit: true };
+  if (RESPEAK_PLAIN.includes(text))
+    return { kind: "respeak", explicit: false };
   if (CONFIRM.includes(text))
     return { kind: "confirm" };
   if (CANCEL.includes(text))
@@ -425,7 +430,7 @@ function parseCommand(rawText, prefix = "") {
   if (st) {
     const target = st[1].trim();
     if (SELECTION_WORDS.has(target))
-      return { kind: "respeak" };
+      return { kind: "respeak", explicit: true };
     if (target)
       return { kind: "respeakTarget", target };
   }
@@ -472,7 +477,8 @@ var READING_TABLE = [
   { words: INPUT_RESTORE_WORDS, cmd: { kind: "restoreInput" } },
   { words: NEWLINE_WORDS, cmd: { kind: "newline" } },
   { words: RECONVERT_WORDS, cmd: { kind: "reconvert" } },
-  { words: RESPEAK_WORDS, cmd: { kind: "respeak" } },
+  { words: RESPEAK_EXPLICIT_WORDS, cmd: { kind: "respeak", explicit: true } },
+  { words: RESPEAK_PLAIN_WORDS, cmd: { kind: "respeak", explicit: false } },
   { words: CONFIRM_WORDS, cmd: { kind: "confirm" } },
   { words: CANCEL_WORDS, cmd: { kind: "cancel" } }
 ];
@@ -2056,6 +2062,60 @@ function getAnchor(cm) {
   return v === void 0 ? null : v;
 }
 
+// select.ts
+var MAX_LEN = 24;
+var OKURIGANA_MAX = 4;
+function classify(ch) {
+  if (/[一-鿿㐀-䶿々〇]/u.test(ch))
+    return "han";
+  if (/[ぁ-ゖゝゞ]/u.test(ch))
+    return "hiragana";
+  if (/[ァ-ヺーヽヾｦ-ﾟ]/u.test(ch))
+    return "katakana";
+  if (/[0-9A-Za-z０-９Ａ-Ｚａ-ｚ]/u.test(ch))
+    return "latin";
+  return "none";
+}
+function runAt(text, pos) {
+  const cls = classify(text[pos]);
+  if (cls === "none")
+    return null;
+  let from = pos;
+  while (from > 0 && classify(text[from - 1]) === cls)
+    from -= 1;
+  let to = pos + 1;
+  while (to < text.length && classify(text[to]) === cls)
+    to += 1;
+  return { from, to, cls };
+}
+function wordRangeAt(text, pos) {
+  if (!text)
+    return null;
+  const at = Math.max(0, Math.min(pos, text.length));
+  let run = at > 0 ? runAt(text, at - 1) : null;
+  if (!run && at < text.length)
+    run = runAt(text, at);
+  if (!run)
+    return null;
+  let { from, to } = run;
+  if (run.cls === "han") {
+    let end = to;
+    while (end < text.length && classify(text[end]) === "hiragana")
+      end += 1;
+    if (end - to <= OKURIGANA_MAX)
+      to = end;
+  } else if (run.cls === "hiragana" && to - from <= OKURIGANA_MAX) {
+    let start = from;
+    while (start > 0 && classify(text[start - 1]) === "han")
+      start -= 1;
+    if (start < from)
+      from = start;
+  }
+  if (to - from > MAX_LEN)
+    return null;
+  return { from, to };
+}
+
 // keyboard.ts
 var import_state2 = require("@codemirror/state");
 var import_view2 = require("@codemirror/view");
@@ -2131,13 +2191,13 @@ var DictationToolbar = class {
     this.wordBtn(
       bar,
       "\u8A00\u3044\u76F4\u3057",
-      "\u9078\u629E\u7BC4\u56F2\u3092\u8A00\u3044\u76F4\u3059\uFF08\u6B21\u306E\u767A\u8A71\u3067\u7F6E\u304D\u63DB\u3048\uFF09",
+      "\u30AB\u30FC\u30BD\u30EB\u4F4D\u7F6E\u306E\u8A9E\uFF08\u307E\u305F\u306F\u9078\u629E\u7BC4\u56F2\uFF09\u3092\u8A00\u3044\u76F4\u3059 \u2014 \u6B21\u306E\u767A\u8A71\u3067\u7F6E\u304D\u63DB\u3048",
       () => this.cb.onRespeak()
     );
     this.wordBtn(
       bar,
       "\u518D\u5909\u63DB",
-      "\u9078\u629E\u7BC4\u56F2\u3092\u518D\u5909\u63DB\uFF08\u5019\u88DC\u304B\u3089\u9078\u3076\uFF09",
+      "\u30AB\u30FC\u30BD\u30EB\u4F4D\u7F6E\u306E\u8A9E\uFF08\u307E\u305F\u306F\u9078\u629E\u7BC4\u56F2\uFF09\u3092\u518D\u5909\u63DB \u2014 \u5019\u88DC\u304B\u3089\u9078\u3076",
       () => this.cb.onReconvert()
     );
     if (this.opts.keyboardButton) {
@@ -3219,7 +3279,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         void this.reconvertSelection();
         return true;
       case "respeak":
-        if (!this.hasSelection())
+        if (!cmd.explicit && !this.hasSelection())
           return false;
         this.startRespeak();
         return true;
@@ -3604,12 +3664,14 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("VoxCraft: \u30CE\u30FC\u30C8\u3092\u7DE8\u96C6\u30E2\u30FC\u30C9\u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
-    const sel = cm.state.selection.main;
-    if (sel.empty) {
-      new import_obsidian7.Notice("VoxCraft: \u518D\u5909\u63DB\u3057\u305F\u3044\u7BC4\u56F2\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+    const range = this.targetRange(cm);
+    if (!range) {
+      new import_obsidian7.Notice(
+        "VoxCraft: \u518D\u5909\u63DB\u3059\u308B\u5834\u6240\u304C\u6C7A\u307E\u308A\u307E\u305B\u3093\u3002\u76F4\u3057\u305F\u3044\u8A9E\u306E\u4E2D\u306B\u30AB\u30FC\u30BD\u30EB\u3092\u7F6E\u304F\u304B\u3001\u7BC4\u56F2\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+      );
       return;
     }
-    if (sel.to - sel.from > 200) {
+    if (range.to - range.from > 200) {
       new import_obsidian7.Notice("VoxCraft: \u9078\u629E\u304C\u9577\u3059\u304E\u307E\u3059\uFF08200\u6587\u5B57\u307E\u3067\uFF09\u3002");
       return;
     }
@@ -3619,7 +3681,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002");
       return;
     }
-    const text = cm.state.doc.sliceString(sel.from, sel.to);
+    const text = cm.state.doc.sliceString(range.from, range.to);
     this.setStatus("\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u4E2D\u2026");
     let payload;
     try {
@@ -3634,7 +3696,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("VoxCraft: \u30AA\u30D5\u30E9\u30A4\u30F3\u306E\u305F\u3081\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
       return;
     }
-    this.openReconvertModalFor({ from: sel.from, to: sel.to }, text, payload, cm);
+    this.openReconvertModalFor(range, text, payload, cm);
   }
   // 新規経路共通: 候補モーダルを開き、確定時に検証付きで置換する。
   openReconvertModalFor(range, originalText, payload, cm, context = {}) {
@@ -3763,6 +3825,22 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       return false;
     return !cm.state.selection.main.empty;
   }
+  // 「ここを〜」の対象範囲を決める。選択があればそれ、無ければカーソル位置の語。
+  //
+  // Android の Obsidian では単語のダブルタップ選択がまともに効かず、選択を
+  // 前提にすると言い直し・再変換がその端末で使えない機能になってしまう。
+  // カーソルを置くだけで対象が決まれば、タップ1回＋ボタン1回で届く。
+  // 推定した範囲は必ず選択表示にして、何が対象になったかを見えるようにする。
+  targetRange(cm) {
+    const sel = cm.state.selection.main;
+    if (!sel.empty)
+      return { from: sel.from, to: sel.to };
+    const range = wordRangeAt(cm.state.doc.toString(), sel.head);
+    if (!range)
+      return null;
+    cm.dispatch({ selection: { anchor: range.from, head: range.to } });
+    return range;
+  }
   // 「ここを言い直し」: 選択範囲を覚え、次の発話1回だけをその範囲への置換にする。
   startRespeak() {
     const cm = this.cm;
@@ -3770,17 +3848,16 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("VoxCraft: \u9332\u97F3\u4E2D\u306B\u3001\u7F6E\u304D\u63DB\u3048\u305F\u3044\u7BC4\u56F2\u3092\u9078\u629E\u3057\u3066\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
-    const sel = cm.state.selection.main;
-    if (sel.empty) {
-      new import_obsidian7.Notice("VoxCraft: \u8A00\u3044\u76F4\u3057\u305F\u3044\u7BC4\u56F2\u3092\u9078\u629E\u3057\u3066\u304B\u3089\u300C\u3053\u3053\u3092\u8A00\u3044\u76F4\u3057\u300D\u3068\u8A00\u3063\u3066\u304F\u3060\u3055\u3044\u3002");
+    const range = this.targetRange(cm);
+    if (!range) {
+      new import_obsidian7.Notice(
+        "VoxCraft: \u8A00\u3044\u76F4\u3059\u5834\u6240\u304C\u6C7A\u307E\u308A\u307E\u305B\u3093\u3002\u76F4\u3057\u305F\u3044\u8A9E\u306E\u4E2D\u306B\u30AB\u30FC\u30BD\u30EB\u3092\u7F6E\u304F\u304B\u3001\u7BC4\u56F2\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+      );
       return;
     }
-    this.setPendingRespeak({
-      from: sel.from,
-      to: sel.to,
-      text: cm.state.doc.sliceString(sel.from, sel.to)
-    });
-    this.setStatus("\u8A00\u3044\u76F4\u3057\u5F85\u3061 \u2014 \u6B21\u306E\u767A\u8A71\u3067\u7F6E\u63DB");
+    const text = cm.state.doc.sliceString(range.from, range.to);
+    this.setPendingRespeak({ from: range.from, to: range.to, text });
+    this.setStatus(`\u8A00\u3044\u76F4\u3057\u5F85\u3061 \u2014\u300C${text}\u300D\u3092\u6B21\u306E\u767A\u8A71\u3067\u7F6E\u63DB`);
   }
   // 「Xを言い直し」: 直す場所を、選択ではなく声で指す。
   //
