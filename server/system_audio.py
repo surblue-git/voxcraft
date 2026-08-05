@@ -57,32 +57,18 @@ def _enumerate_devices(manager, pyaudio) -> list[tuple[dict, str]]:
 
     ホストAPIは WASAPI だけに絞る。MME/DirectSound/WDM-KS を混ぜると同じ物理
     デバイスが4回並び、どれを選べばいいのか分からない一覧になる。
+
+    走査は get_device_info_by_index の1周だけで済ませる。PyAudioWPatch の
+    get_loopback_device_info_generator も中身は同じ走査なので、呼ぶ API を
+    増やさない（このライブラリはネイティブで落ちるとプロセスごと道連れになる）。
     """
     host_api = _wasapi_index(manager, pyaudio)
     found: list[tuple[dict, str]] = []
-    seen: set[int] = set()
-
-    try:
-        generator = manager.get_loopback_device_info_generator()
-    except (AttributeError, OSError, LookupError):
-        generator = iter(())
-    for info in generator:
-        try:
-            index = int(info["index"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if index in seen:
-            continue
-        seen.add(index)
-        found.append((info, "loopback"))
-
     try:
         count = int(manager.get_device_count())
     except (OSError, TypeError, ValueError):
         count = 0
     for index in range(count):
-        if index in seen:
-            continue
         try:
             info = manager.get_device_info_by_index(index)
         except (OSError, ValueError, KeyError):
@@ -91,10 +77,7 @@ def _enumerate_devices(manager, pyaudio) -> list[tuple[dict, str]]:
             continue
         if int(info.get("maxInputChannels", 0) or 0) < 1:
             continue
-        if info.get("isLoopbackDevice"):
-            continue
-        seen.add(index)
-        found.append((info, "input"))
+        found.append((info, "loopback" if info.get("isLoopbackDevice") else "input"))
     return found
 
 
@@ -105,7 +88,14 @@ def _is_default(info: dict, kind: str, default_output: str) -> bool:
 
 
 def list_capture_devices() -> list[CaptureDevice]:
-    """選択肢として出せる入力先を列挙する（プラグインの設定UI用）。"""
+    """選択肢として出せる入力先を列挙する。
+
+    **サーバー本体から直接呼ばないこと。** PortAudio はアクセス違反で落ちることが
+    あり（実測: 文字起こし中に設定画面を開くと `_portaudiowpatch.pyd` が
+    0xC0000005）、Python の例外にならずプロセスごと死ぬ。録音中のサーバーを
+    設定画面の都合で落とさないため、main.py からは子プロセス経由で呼ぶ
+    （`python system_audio.py --json`）。
+    """
     try:
         import pyaudiowpatch as pyaudio
     except ImportError as exc:
@@ -318,3 +308,37 @@ class WasapiLoopbackCapture:
         finally:
             if manager is not None:
                 manager.terminate()
+
+
+def _main() -> int:
+    """子プロセスとして呼ばれ、デバイス一覧を JSON で標準出力へ出す。
+
+    ここが落ちても死ぬのはこのプロセスだけで、認識サーバーは生き残る。
+    """
+    import json
+
+    try:
+        devices = list_capture_devices()
+    except SystemAudioError as exc:
+        print(json.dumps({"devices": [], "error": str(exc)}, ensure_ascii=False))
+        return 0
+    except Exception as exc:
+        print(json.dumps(
+            {"devices": [], "error": f"入力デバイスを列挙できません: {exc}"},
+            ensure_ascii=False,
+        ))
+        return 0
+    print(json.dumps({
+        "devices": [
+            {"name": d.name, "kind": d.kind, "isDefault": d.is_default}
+            for d in devices
+        ],
+        "error": "",
+    }, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_main())

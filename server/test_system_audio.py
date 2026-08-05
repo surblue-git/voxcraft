@@ -3,6 +3,8 @@
     python -m pytest test_system_audio.py
     python test_system_audio.py
 """
+import pathlib
+
 import numpy as np
 
 from system_audio import (
@@ -94,6 +96,18 @@ def test_streaming_resampler_keeps_long_term_sample_count():
     parts.append(converter.flush())
     output = np.concatenate(parts)
     assert abs(output.size - 16000) <= 1
+
+
+def test_server_never_enumerates_devices_in_its_own_process():
+    """/audio-devices は子プロセス経由でなければならない。
+
+    PortAudio はアクセス違反で落ちることがあり（実測: 文字起こし中に設定画面を
+    開いて `_portaudiowpatch.pyd` が 0xC0000005）、try/except では守れない。
+    プロセス内で呼ぶと録音中のサーバーごと死ぬ。うっかり直呼びへ戻さないための番人。
+    """
+    source = pathlib.Path(__file__).with_name("main.py").read_text(encoding="utf-8")
+    assert "list_capture_devices(" not in source
+    assert "system_audio.py" in source  # 子プロセスとして起動している
 
 
 def _capture(device_name=None):

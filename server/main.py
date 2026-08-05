@@ -43,8 +43,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import traceback
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -68,7 +70,7 @@ from punctuate import available as punctuation_available
 from punctuate import to_reading
 from reconvert import reconvert
 from refinement import RefinementPlanner, RefinementRange
-from system_audio import SystemAudioError, WasapiLoopbackCapture, list_capture_devices
+from system_audio import SystemAudioError, WasapiLoopbackCapture
 from transcribe_guard import (
     AudioRingBuffer,
     SilenceTracker,
@@ -131,25 +133,43 @@ def health() -> dict:
 
 
 @app.get("/audio-devices")
-def audio_devices() -> dict:
+async def audio_devices() -> dict:
     """このサーバー機で PC音声として取り込める入力先の一覧。
 
-    プラグインの設定UIが引く。Windows 以外や PyAudioWPatch 未導入では
-    error を返すだけにして、サーバー自体は起動したままにする。
+    プラグインの設定UIが引く。**列挙は必ず子プロセスで行う。** PortAudio は
+    アクセス違反で落ちることがあり（実測: 別PCから文字起こし中に設定画面を開いて
+    `_portaudiowpatch.pyd` が 0xC0000005）、Python の例外にならないので
+    try/except では守れない。プロセス内で呼ぶと録音中のサーバーごと落ちる。
+    Windows 以外や PyAudioWPatch 未導入でも error を返すだけにする。
     """
+    script = str(Path(__file__).with_name("system_audio.py"))
     try:
-        devices = list_capture_devices()
-    except SystemAudioError as exc:
-        return {"devices": [], "error": str(exc)}
-    except Exception as exc:  # デバイス固有の PortAudio エラーも設定画面へ出す
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, script, "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
         return {"devices": [], "error": f"入力デバイスを列挙できません: {exc}"}
-    return {
-        "devices": [
-            {"name": d.name, "kind": d.kind, "isDefault": d.is_default}
-            for d in devices
-        ],
-        "error": "",
-    }
+
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return {"devices": [], "error": "入力デバイスの列挙が応答しませんでした。"}
+
+    if proc.returncode != 0:
+        # 子プロセスがネイティブごと落ちた場合はここに来る（サーバーは無事）。
+        detail = stderr.decode("utf-8", "replace").strip().splitlines()
+        tail = detail[-1] if detail else f"終了コード {proc.returncode}"
+        print(f"[VoxCraft] 入力デバイスの列挙に失敗: {tail}")
+        return {"devices": [], "error": f"入力デバイスを列挙できません: {tail}"}
+
+    try:
+        return json.loads(stdout.decode("utf-8", "replace"))
+    except json.JSONDecodeError as exc:
+        return {"devices": [], "error": f"入力デバイスの一覧を解釈できません: {exc}"}
 
 
 @app.get("/dict")
