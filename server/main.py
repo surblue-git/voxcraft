@@ -83,6 +83,7 @@ from transcribe_guard import (
 from userdict import (
     DictValidationError,
     add_profile_entry,
+    add_profile_symbol,
     dictionary_catalog,
     get_dictionary_snapshot,
     get_error,
@@ -249,6 +250,40 @@ async def dictionary_entry_post(profile_id: str, payload: dict = Body(...)) -> d
         raise HTTPException(status_code=500, detail=f"辞書を保存できません: {exc}") from exc
 
 
+@app.post("/dictionaries/{profile_id}/symbols")
+async def dictionary_symbol_post(profile_id: str, payload: dict = Body(...)) -> dict:
+    """記号語（単独チャンク一致）を1件だけ追加する。置換とは別枠。
+
+    「まる」と言ったのに『悪』と認識される類は、読みが違うので再変換では拾えない。
+    観測した綴りをここへ入れると、以後は後処理で記号に直る。
+    """
+    expected_revision = payload.get("expectedRevision")
+    if expected_revision is not None and not isinstance(expected_revision, str):
+        raise HTTPException(status_code=400, detail="expectedRevision が不正です")
+    observed = payload.get("observed")
+    output = payload.get("output")
+    if not isinstance(observed, str) or not observed.strip():
+        raise HTTPException(status_code=400, detail="observed が不正です")
+    if not isinstance(output, str) or not output:
+        raise HTTPException(status_code=400, detail="output が不正です")
+    try:
+        return add_profile_symbol(
+            profile_id,
+            observed,
+            output,
+            expected_revision=expected_revision,
+        )
+    except DictionaryRevisionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "currentRevision": exc.current_revision},
+        ) from exc
+    except DictionarySchemaError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"辞書を保存できません: {exc}") from exc
+
+
 @app.get("/dictionaries/{profile_id}/dict")
 def dictionary_profile_dict_get(profile_id: str) -> dict:
     """指定プロファイルを置換・記号語のフラット形式で返す（/dict と同じ編集UI用）。"""
@@ -347,6 +382,29 @@ async def _probe_chunk(audio: np.ndarray, dictionary: DictionarySnapshot):
         return target.transcribe(audio, None, AsrOptions.probe(), dictionary.hallucinations)
 
     return await asyncio.to_thread(_run)
+
+
+def _log_chunk(kind: str, seq: int, raw: str, final: str, seconds: float | None = None) -> None:
+    """認識結果をログに残す（VOXCRAFT_LOG_CHUNKS=1 のときだけ）。
+
+    記号語やコマンドが効かないとき、効く／効かないを分けているのは「Whisperが
+    実際に何と書いたか」であって、耳で聞いた発話ではない。これが見えないと
+    辞書のキーも正規表現も当て推量になる（実測は config.log_chunk_text 参照）。
+
+    後処理の前後を両方出すのは、辞書・記号化が仕事をしたかを1行で見分けるため。
+    同じなら何も掛かっていない＝キーが一致していない、と即断できる。
+    読みを併記するのは、コマンドのあいまい照合がそれを見ているため。
+    """
+    if not config.log_chunk_text:
+        return
+    where = f" {seconds:.1f}秒" if seconds is not None else ""
+    line = f"[VoxCraft] chunk#{seq} {kind}{where} 認識={final!r}"
+    if raw != final:
+        line += f" 後処理前={raw!r}"
+    reading = to_reading(final)
+    if reading:
+        line += f" 読み={reading}"
+    print(line)
 
 
 @app.get("/recordings")
@@ -678,6 +736,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
             try:
                 probe = await _probe_chunk(audio, dictionary)
                 if probe.text:
+                    _log_chunk("probe", seq, probe.text, probe.text)
                     await ws.send_text(json.dumps({
                         "type": "probe",
                         "seq": seq,
@@ -715,9 +774,20 @@ async def ws_endpoint(ws: WebSocket) -> None:
             raw_text,
             strip_space=strip_space,
             symbol_dictation=symbols,
+            # 括弧の文中変換は口述だけ。録音の書き起こしを黙って書き換えない。
+            inline_symbols=(
+                symbols and mode == "dictation" and config.enable_inline_symbols
+            ),
             replacements=dictionary.replacement_plan,
             symbols=dictionary.symbols,
             auto_punctuate=punctuate,
+        )
+        _log_chunk(
+            "recovery" if recovery else mode,
+            seq,
+            result.text,
+            text,
+            (end - start) / config.sample_rate,
         )
         prepared = {
             "text": text, "result": result, "reason": reason,

@@ -262,6 +262,51 @@ def test_single_entry_add_is_idempotent_and_rejects_stale_or_conflicting_writes(
         assert (root / "profiles" / "common.json.bak").is_file()
 
 
+def test_single_symbol_add_is_idempotent_and_rejects_stale_or_conflicting_writes():
+    with TemporaryDirectory() as tmp:
+        registry, _legacy, root = _registry(tmp)
+        registry.ensure_initialized(DEFAULTS)
+        original = registry.profile_projection("common")
+
+        # 記号語は1文字キーでも登録できる（単独チャンク一致でしか効かないため）。
+        created = registry.add_symbol(
+            "common", "悪", "。",
+            expected_revision=original["revision"],
+        )
+        assert created["created"] is True
+        assert Path(created["backupPath"]).is_file()
+        compiled = registry.compile_set("default")
+        assert compiled.symbols["悪"] == "。"
+        # 置換辞書は無傷（本文中の「悪」を巻き添えにしない）。
+        assert compiled.replacement_plan.apply("悪循環") == "悪循環"
+
+        repeated = registry.add_symbol(
+            "common", "悪", "。",
+            expected_revision=created["revision"],
+        )
+        assert repeated["created"] is False
+
+        try:
+            registry.add_symbol(
+                "common", "枠", "。",
+                expected_revision=original["revision"],
+            )
+            raise AssertionError("stale revision was accepted")
+        except DictionaryRevisionConflict as exc:
+            assert exc.current_revision == created["revision"]
+
+        try:
+            registry.add_symbol(
+                "common", "悪", "、",
+                expected_revision=created["revision"],
+            )
+            raise AssertionError("conflicting symbol was accepted")
+        except DictionaryRevisionConflict:
+            pass
+
+        assert (root / "profiles" / "common.json.bak").is_file()
+
+
 def _run_all() -> int:
     functions = [value for name, value in globals().items() if name.startswith("test_") and callable(value)]
     failed = 0

@@ -100,6 +100,26 @@ def to_reading(text: str) -> str | None:
     return "".join(m.reading_form() or m.surface() for m in morphs)
 
 
+def morphemes(text: str) -> list[tuple[str, str]] | None:
+    """形態素を (表層, 読みカタカナ) の列で返す。sudachi 未導入なら None。
+
+    記号語を文の途中から拾うのに使う。表層の綴り（鍵かっこ/鍵カッコ/カギカッコ）は
+    Whisper の気分で変わるが、読みは カギカッコ に収束するため。
+    読みが取れない未知語は表層をそのまま読みとして扱う（かな書きはこれで拾える）。
+    """
+    t = text.strip()
+    if not t:
+        return None
+    tok = _get_tokenizer()
+    if tok is None:
+        return None
+    try:
+        morphs = tok.tokenize(t, _mode)
+    except Exception:  # noqa: BLE001 — 補助情報。取れなくても本文は返す。
+        return None
+    return [(m.surface(), m.reading_form() or m.surface()) for m in morphs]
+
+
 def add_punctuation(text: str) -> str:
     """テキストに「。」「、」を自動挿入して返す（sudachi 未導入ならそのまま）。"""
     t = text.strip()

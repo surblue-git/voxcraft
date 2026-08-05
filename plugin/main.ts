@@ -20,6 +20,7 @@ import {
 } from "./commands";
 import {
     addDictionaryEntry,
+    addDictionarySymbol,
     DictModal,
     DictionarySetModal,
     fetchDictionaryCatalog,
@@ -28,6 +29,7 @@ import {
     ReconvertPayload,
 } from "./dict";
 import { ReconvertModal } from "./suggest";
+import { symbolChoicesFor } from "./symbols";
 import {
     AUTO,
     DEFAULT_SETTINGS,
@@ -141,7 +143,7 @@ export default class VoxCraftPlugin extends Plugin {
     // アンカーに追記したチャンク列（取り消し・変換戻しの対象特定に使う。アンカー相対）。
     private chunks: string[] = [];
     // 変換戻しの応答が返るまで対象範囲を覚えておく。
-    private pendingReconvert: { from: number; to: number } | null = null;
+    private pendingReconvert: { from: number; to: number; text: string } | null = null;
     private reconvertModal: ReconvertModal | null = null;
     // 同じ「Aを再変換」を繰り返したとき、直前に処理した箇所より前を探す。
     private reconvertTraversal: ReconvertTraversal | null = null;
@@ -1466,10 +1468,7 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
         this.setStatus(this.idleStatus());
-        if (!payload.online) {
-            new Notice("VoxCraft: オフラインのため変換候補を取得できませんでした。");
-            return;
-        }
+        if (!payload.online && !this.offlineSymbolsOnly(target)) return;
 
         const surfaces = buildSurfaces(target, payload.segments);
         const targetKey = target.normalize("NFKC").replace(/\s+/gu, "");
@@ -1612,11 +1611,22 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
         this.setStatus(this.idleStatus());
-        if (!payload.online) {
-            new Notice("VoxCraft: オフラインのため変換候補を取得できませんでした。");
-            return;
-        }
+        if (!payload.online && !this.offlineSymbolsOnly(text)) return;
         this.openReconvertModalFor(range, text, payload, cm);
+    }
+
+    // オフライン（Google CGI が使えない）ときに、それでもモーダルを開くか。
+    //
+    // 変換候補は諦めるしかないが、記号語の取り違え（「まる」→『悪』）はローカルの
+    // 記号セットだけで直せる。オフラインでもサーバー本体はLANに居るので、選んだ
+    // 記号の辞書登録もそのまま通る。記号を出せない対象のときだけ従来どおり打ち切る。
+    private offlineSymbolsOnly(text: string): boolean {
+        if (symbolChoicesFor(text, 1).length === 0) {
+            new Notice("VoxCraft: オフラインのため変換候補を取得できませんでした。");
+            return false;
+        }
+        new Notice("VoxCraft: オフラインのため変換候補はありません。記号だけ選べます。");
+        return true;
     }
 
     // 新規経路共通: 候補モーダルを開き、確定時に検証付きで置換する。
@@ -1647,6 +1657,7 @@ export default class VoxCraftPlugin extends Plugin {
             {
                 originalText,
                 onRegister: (f, t) => void this.registerReplacement(f, t),
+                onRegisterSymbol: (f, s) => void this.registerSymbol(f, s),
                 locationLabel: context.locationLabel,
                 onSkip: context.onSkip,
             }
@@ -1730,6 +1741,42 @@ export default class VoxCraftPlugin extends Plugin {
             );
         } catch (e) {
             new Notice(`VoxCraft: 辞書に登録できません — ${e instanceof Error ? e.message : e}`, 8000);
+        }
+    }
+
+    // 記号候補を選んで「辞書に登録」したとき: 観測した綴り→記号を記号語辞書へ入れる。
+    //
+    // 置換辞書に入れないのが肝。『悪』→「。」を置換で持つと本文中の「悪」まで
+    // 消える。記号語はチャンク全体が一致したときだけ効く（server/postproc.py の
+    // apply_symbol_dictation）ので、1文字キーでも安全に登録できる。
+    private async registerSymbol(from: string, symbol: string): Promise<void> {
+        const observed = from.trim();
+        if (!observed || !symbol) return;
+        if (observed.length > 16) {
+            new Notice("VoxCraft: 記号語として登録するには長すぎます（16字まで）。");
+            return;
+        }
+        const url = this.activeUrl();
+        if (!url) {
+            new Notice("VoxCraft: 接続先が設定されていません。");
+            return;
+        }
+        try {
+            const target = await this.dictionaryTarget(url);
+            const result = await addDictionarySymbol(
+                url,
+                target.profileId,
+                observed,
+                symbol,
+                target.revision
+            );
+            new Notice(
+                result.created
+                    ? `VoxCraft: 記号語として登録しました — ${observed} → ${symbol}（次回の録音から反映）`
+                    : `VoxCraft: すでに同じ記号語登録があります — ${observed} → ${symbol}`
+            );
+        } catch (e) {
+            new Notice(`VoxCraft: 記号語を登録できません — ${e instanceof Error ? e.message : e}`, 8000);
         }
     }
 
@@ -1972,7 +2019,7 @@ export default class VoxCraftPlugin extends Plugin {
 
         const from = Math.max(0, anchor - last.length);
         const targetText = cm.state.doc.sliceString(from, anchor);
-        this.pendingReconvert = { from, to: anchor };
+        this.pendingReconvert = { from, to: anchor, text: targetText };
         this.socket.sendReconvert(targetText);
         this.setStatus("変換候補を取得中…");
     }
@@ -1986,9 +2033,18 @@ export default class VoxCraftPlugin extends Plugin {
             new Notice("VoxCraft: 変換候補が得られませんでした。");
             return;
         }
-        const modal = new ReconvertModal(this.app, segments, (chosen) => {
-            this.applyReconvert(target, chosen.join(""));
-        });
+        const modal = new ReconvertModal(
+            this.app,
+            segments,
+            (chosen) => {
+                this.applyReconvert(target, chosen.join(""));
+            },
+            {
+                originalText: target.text,
+                onRegister: (f, t) => void this.registerReplacement(f, t),
+                onRegisterSymbol: (f, s) => void this.registerSymbol(f, s),
+            }
+        );
         this.adoptModal(modal);
     }
 

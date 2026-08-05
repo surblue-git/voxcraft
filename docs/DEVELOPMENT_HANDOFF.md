@@ -32,6 +32,7 @@ Phase 1A（永続形式と互換移行）、Phase 1B（セッション固定ス�
 - `GET /dictionaries/{profile_id}`: 検証済みプロファイル本文。
 - `POST /dictionaries/validate`: 保存なし検証。
 - `POST /dictionaries/{profile_id}/entries`: `observed`, `output`, 任意の `expectedRevision`, `hotword`, `priority`, `note`。競合は409。
+- `POST /dictionaries/{profile_id}/symbols`: `observed`, `output`, 任意の `expectedRevision`。記号語（単独チャンク一致）を1件追加する。置換と違いチャンク全体一致でしか効かないので1文字キーを許す。競合は409。
 - `POST /reconvert`, `POST /recognize`: `dictionarySetId` を受け、辞書メタデータを返す。
 - WebSocket `start`: `dictionarySetId` を受ける。`started` はセットID／名前／リビジョン／構成プロファイル／登録先／診断を返す。
 

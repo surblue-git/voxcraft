@@ -5,6 +5,8 @@
 
 import { App, Modal, Setting } from "obsidian";
 
+import { SymbolChoice, symbolChoicesFor } from "./symbols";
+
 export interface ReconvertSegment {
     reading: string;
     candidates: string[];
@@ -19,6 +21,9 @@ export interface ReconvertModalOpts {
     originalText?: string;
     // 「確定して辞書に登録」ボタンを押したときに呼ばれる（元表記, 確定表記）。
     onRegister?: (from: string, to: string) => void;
+    // 記号候補を選んで登録したときに呼ばれる（元表記, 辞書へ入れる値）。
+    // 置換辞書ではなく記号語辞書へ入れる必要があるため、経路を分ける。
+    onRegisterSymbol?: (from: string, symbol: string) => void;
     // 同じ読みを連続して遡るときの現在位置。
     locationLabel?: string;
     // この一致を変更せず、次回の検索対象から外す。
@@ -32,6 +37,8 @@ export class ReconvertModal extends Modal {
     private onSubmit: SelectHandler;
     private segEls: HTMLElement[] = [];
     private opts: ReconvertModalOpts;
+    // 候補に混ぜた記号（値→定義）。確定時に「記号語として登録」へ振り分ける。
+    private symbolByValue = new Map<string, SymbolChoice>();
 
     constructor(
         app: App,
@@ -41,12 +48,32 @@ export class ReconvertModal extends Modal {
     ) {
         super(app);
         this.segments = segments;
-        this.selection = segments.map(() => 0);
         this.onSubmit = onSubmit;
         this.opts = opts;
+        // 記号語の誤認識は読みが変わるので、読み由来の候補には正解が入っていない。
+        // 短い単語ひとつを直すときだけ、記号を候補の末尾に足す。
+        if (opts.originalText) this.appendSymbolCandidates(opts.originalText);
+        this.selection = this.segments.map(() => 0);
         // 元表記が分かっているときは、それに一致する候補を初期選択にする
         // （文書中の何を直そうとしているかが一目で分かる）。
         if (opts.originalText) this.preselect(opts.originalText);
+    }
+
+    private appendSymbolCandidates(originalText: string): void {
+        const seg = this.segments[0];
+        if (!seg) return;
+        const choices = symbolChoicesFor(originalText, this.segments.length, seg.candidates);
+        if (choices.length === 0) return;
+        for (const choice of choices) this.symbolByValue.set(choice.value, choice);
+        this.segments = [
+            { ...seg, candidates: [...seg.candidates, ...choices.map((c) => c.value)] },
+            ...this.segments.slice(1),
+        ];
+    }
+
+    // 記号は字面が小さく「\n」に至っては見えないので、読みを添えて表示する。
+    private candidateLabel(value: string): string {
+        return this.symbolByValue.get(value)?.label ?? value;
     }
 
     // 元表記を文節候補の連結で貪欲に辿り、一致した候補を初期選択にする。
@@ -87,7 +114,7 @@ export class ReconvertModal extends Modal {
             seg.candidates.forEach((cand, ci) => {
                 const btn = list.createEl("button", {
                     cls: "voxcraft-cand",
-                    text: `${ci + 1}. ${cand}`,
+                    text: `${ci + 1}. ${this.candidateLabel(cand)}`,
                 });
                 btn.onclick = () => {
                     this.activeSeg = si;
@@ -102,11 +129,14 @@ export class ReconvertModal extends Modal {
             .addButton((b) =>
                 b.setButtonText("確定").setCta().onClick(() => this.submit())
             );
-        if (this.opts.onRegister && this.opts.originalText) {
+        if ((this.opts.onRegister || this.opts.onRegisterSymbol) && this.opts.originalText) {
             buttons.addButton((b) =>
                 b
                     .setButtonText("確定して辞書に登録")
-                    .setTooltip("以後、同じ誤変換を自動で修正する")
+                    .setTooltip(
+                        "以後、同じ誤変換を自動で修正する" +
+                        "（記号を選んだときは記号語として登録する）"
+                    )
                     .onClick(() => this.submit(true))
             );
         }
@@ -177,12 +207,19 @@ export class ReconvertModal extends Modal {
         const chosen = this.segments.map((seg, i) => seg.candidates[this.selection[i]]);
         this.close();
         this.onSubmit(chosen);
-        if (register && this.opts.onRegister && this.opts.originalText) {
-            const joined = chosen.join("");
-            if (joined && joined !== this.opts.originalText) {
-                this.opts.onRegister(this.opts.originalText, joined);
-            }
+        if (!register) return;
+        const original = this.opts.originalText;
+        const joined = chosen.join("");
+        if (!original || !joined || joined === original) return;
+
+        // 記号を選んだ場合は置換辞書へ入れてはいけない（本文中の同綴りまで
+        // 巻き添えにする）。単独チャンク一致だけで効く記号語として登録する。
+        const symbol = this.symbolByValue.get(joined);
+        if (symbol) {
+            this.opts.onRegisterSymbol?.(original, symbol.store);
+            return;
         }
+        this.opts.onRegister?.(original, joined);
     }
 
     onClose(): void {

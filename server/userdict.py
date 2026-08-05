@@ -370,3 +370,23 @@ def add_profile_entry(
     with _lock:
         _cache["mtime"] = None
     return result
+
+
+def add_profile_symbol(
+    profile_id: str,
+    observed: str,
+    output: str,
+    *,
+    expected_revision: str | None = None,
+) -> dict:
+    """Add one standalone symbol word to a profile using optimistic concurrency."""
+    _ensure_file()
+    result = _REGISTRY.add_symbol(
+        profile_id,
+        observed,
+        output,
+        expected_revision=expected_revision,
+    )
+    with _lock:
+        _cache["mtime"] = None
+    return result

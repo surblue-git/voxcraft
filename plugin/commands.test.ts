@@ -64,6 +64,21 @@ check("ここを訂正 は選択範囲", kind(parseCommand("ここを訂正")) =
 check("横取りしない: AをBに修正", kind(parseCommand("参加を惨禍に修正")) === "replace");
 check("横取りしない: Aを再変換", kind(parseCommand("スミシンを再変換")) === "reconvertTarget");
 
+// ---- 助詞「を」の表記ゆれ ----
+// 実測 2026-08-05:「かぎかっことじを再変換」→『カギカッコトジオ再変換』。
+// カタカナ主体で認識されると「を」が「オ」に化け、直したい語ほど命令が通らない。
+const wo = parseCommand("カギカッコトジオ再変換");
+check("を→オ: 再変換が成立", wo?.kind === "reconvertTarget", kind(wo));
+check(
+    "を→オ: target は記号語の綴り",
+    wo?.kind === "reconvertTarget" && wo.target === "カギカッコトジ",
+    JSON.stringify(wo)
+);
+check("を→ヲ: 再変換", kind(parseCommand("カギカッコトジヲ再変換")) === "reconvertTarget");
+check("を→オ: 言い直し", kind(parseCommand("カギカッコトジオ言い直し")) === "respeakTarget");
+// 末尾の命令語が一致しなければ、本文の「オ」は巻き込まない。
+check("本文の「オ」は無関係", parseCommand("ラジオを聞きながら書いています") === null);
+
 // ---- 読みでのあいまい照合 ----
 function fuzzy(text: string, reading: string) {
     return matchByReading(text, reading);

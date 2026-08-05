@@ -36,6 +36,78 @@ def test_symbol_standalone_variants():
     assert postprocess("改行", symbol_dictation=True) == "\n"
 
 
+def test_symbol_kagikakko_observed_spellings():
+    # 実測 2026-08-05:「かぎかっこ」→『鍵かっこ』、「かぎかっことじ」→『カギカッコトジ』。
+    # 単独で言えているのに記号にならず、読点付きで本文に落ちていた。
+    assert postprocess("鍵かっこ", symbol_dictation=True) == "「"
+    assert postprocess("カギカッコトジ", symbol_dictation=True) == "」"
+    assert postprocess("鉤括弧", symbol_dictation=True) == "「"
+    assert postprocess("鍵括弧閉じ", symbol_dictation=True) == "」"
+    # 本物の語としての「鍵」は対象外（単独一致でも踏み込まない）。
+    assert postprocess("鍵", symbol_dictation=True) == "鍵"
+    assert postprocess("鍵をかけた", symbol_dictation=True) == "鍵をかけた"
+
+
+def test_inline_bracket_words():
+    # sudachipy 未導入環境では no-op（依存なしで実行可を保つためスキップ扱い）。
+    from punctuate import available
+    if not available():
+        return
+
+    def run(text):
+        return postprocess(text, symbol_dictation=True, inline_symbols=True)
+
+    # 実測 2026-08-05: 括弧は文中で言うので単独チャンクにならず、全体一致では
+    # 一度も拾えなかった。以下はそのとき実際に本文へ落ちた文字列。
+    assert run("このカギカッコ新バージョンは") == "この「新バージョンは"
+    assert run("鍵カッコを入力はしてくれない") == "「を入力はしてくれない"
+    assert run("いつも鍵かっこ閉じ、ダメですね") == "いつも」、ダメですね"
+    assert run("ではかっこ、") == "では（、"
+    # sudachi は連続するカタカナを1語にまとめるので、内側からも切り出す。
+    assert run("ではこのバージョンカッコトジを試しましょう") == "ではこのバージョン）を試しましょう"
+    # 「とじ」の濁点が落ちた実例。
+    assert run("鍵かっことし") == "」"
+
+    # 同音の本物の語は壊さない。読みが違うもの（カッコウ/カッコイイ）は元から
+    # 当たらず、読みが同じもの（括弧/確固）は漢字表記なので対象外。
+    for keep in (
+        "それはかっこいい",
+        "格好が悪い",
+        "括弧を使う",
+        "確固たる意志",
+        "鍵をかけた",
+        "カッコウが鳴いている",
+        "バージョンアップした",
+    ):
+        assert run(keep) == keep, keep
+
+    # カタカナが1語に固まった中は形態素の切れ目が無いので、音で語末を判断する。
+    # 実測: 「かぎかっこ・かっこうの許嫁」が『カギカッコー…』『カギカッコウ…』と
+    # 1語になり、カギカッコ を取ると本文の「カッコー」を食っていた。
+    assert run("カギカッコーの言い名付け") == "カギカッコーの言い名付け"
+    assert run("カギカッコウノイイナヅケ") == "カギカッコウノイイナヅケ"
+    # 続きが別語なら従来どおり変換する（食う心配が無いため）。
+    assert run("カギカッコカッコーノイイナヅケ") == "「カッコーノイイナヅケ"
+    assert run("バージョンカギカッコトジ") == "バージョン」"
+
+    # 口述以外では一切動かさない（既定は無効）。
+    assert postprocess("このカギカッコ新バージョンは", symbol_dictation=True) == \
+        "このカギカッコ新バージョンは"
+
+
+def test_symbol_fullwidth_output_survives_ascii_normalization():
+    # 記号読み上げが返す全角記号は U+FF01〜FF5E に入るものがあり、全角→半角の
+    # 正規化を後ろに置くと「かっこ」と言ったのに ( になる（正規化は記号化より前）。
+    assert postprocess("かっこ", symbol_dictation=True) == "（"
+    assert postprocess("かっことじ", symbol_dictation=True) == "）"
+    assert postprocess("びっくりまーく", symbol_dictation=True) == "！"
+    assert postprocess("ころん", symbol_dictation=True) == "："
+    # ユーザー登録の記号語でも同じ（全角で登録したら全角のまま出る）。
+    assert postprocess("全角はてな", symbol_dictation=True, symbols={"全角はてな": "？"}) == "？"
+    # 半角化そのものは辞書引きのために効いたまま。
+    assert postprocess("Ａトック", replacements=[("Aトック", "ATOK")]) == "ATOK"
+
+
 def test_symbol_trailing_kanji():
     # 文末が漢字「丸」でも句点化する。
     assert postprocess("今日は晴れです丸", symbol_dictation=True) == "今日は晴れです。"

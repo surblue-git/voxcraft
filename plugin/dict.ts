@@ -138,6 +138,26 @@ export async function addDictionaryEntry(
     return res.json as DictionaryEntryResult;
 }
 
+// 記号語（単独チャンク一致）を1件追加する。置換辞書とは別枠なので経路も分ける。
+// 1文字キー（例 悪→。）が許されるのは、チャンク全体一致でしか効かないため。
+export async function addDictionarySymbol(
+    wsUrl: string,
+    profileId: string,
+    observed: string,
+    output: string,
+    expectedRevision?: string
+): Promise<DictionaryEntryResult> {
+    const res = await requestUrl({
+        url: `${httpBase(wsUrl)}/dictionaries/${encodeURIComponent(profileId)}/symbols`,
+        method: "POST",
+        contentType: "application/json",
+        body: JSON.stringify({ observed, output, expectedRevision }),
+        throw: false,
+    });
+    if (res.status >= 400) throw new Error(errorDetail(res));
+    return res.json as DictionaryEntryResult;
+}
+
 // テキストの再変換候補を REST で取得する（WS 接続不要。録音外でも使える）。
 export async function fetchReconvert(
     wsUrl: string,

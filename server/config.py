@@ -148,6 +148,17 @@ class Config:
     # 命令を言い落とすくらいなら、長めの本文チャンクに125ms払う方がまし。
     command_probe_max_sec: float = float(_env("VOXCRAFT_COMMAND_PROBE_MAX_SEC", "4.0"))
 
+    # --- 診断ログ ---
+    # 認識結果をサーバーログに残す。既定OFF（口述した内容がそのままログに残るため、
+    # 必要なときだけ立てる）。
+    # 記号語やコマンドが効かないとき、原因は必ず「Whisperが実際に何と書いたか」に
+    # あり、それが見えないと辞書のキーも正規表現も当て推量になる。実測 2026-08-05:
+    #   「かぎかっこ」    → 『鍵かっこ』      （組み込みのひらがなキーと不一致）
+    #   「かぎかっことじ」→ 『カギカッコトジ』
+    #   「…を再変換」     → 『…オ再変換』     （助詞がカタカナ化してコマンド不成立）
+    # どれもログがあれば一目で分かる類で、無いと画面を突き合わせるしかない。
+    log_chunk_text: bool = _env("VOXCRAFT_LOG_CHUNKS", "0") == "1"
+
     # --- 高速化・GPU最適化 ---
     # CTranslate2 の FlashAttention 有効化（RTX 30xx/40xx 等で速度向上）。
     flash_attention: bool = _env("VOXCRAFT_FLASH_ATTENTION", "0") == "1"
@@ -157,6 +168,12 @@ class Config:
     strip_ja_alnum_space: bool = _env("VOXCRAFT_STRIP_SPACE", "1") == "1"
     # 記号読み上げ（「まる」→「。」など）を有効化する。
     enable_symbol_dictation: bool = _env("VOXCRAFT_SYMBOLS", "1") == "1"
+    # 括弧だけは文の途中からも記号にする（口述のみ・sudachipy 必須）。
+    # 「まる」「てん」は文末で言うので単独チャンクになるが、括弧は文中で言って
+    # そのまま中身を続けるため息継ぎが無く、全体一致では永久に拾えない。
+    # 文字起こしには一切かけない（会議の発言中の「かぎかっこ」は本物の語なので、
+    # 録音の書き起こしを黙って書き換えることになる）。
+    enable_inline_symbols: bool = _env("VOXCRAFT_INLINE_SYMBOLS", "1") == "1"
     # 句読点の自動付与（sudachipy 形態素ルール）。既定ON。
     # kotoba-whisper は自然発話にほぼ句読点を打たないため、認識後テキストへ
     # 「。」「、」を自動挿入する（句読点を発話せずに済む）。sudachipy 未導入なら自動で無効。
@@ -166,6 +183,21 @@ class Config:
     # 不具合があるため（実測: hotwords 約120字超で全チャンクが脱落）。
     # 用語の表記ゆれは replacements（後処理の文字列置換）で安全に矯正できる。
     use_hotwords: bool = _env("VOXCRAFT_HOTWORDS", "0") == "1"
+
+    # --- 再変換の読み揺らし ---
+    # 誤認識の多くは「読みそのものが違う」ので、そのままでは正しい候補が出てこない。
+    # 再変換は読みから変換候補を引く仕組みなので、読みが外れていたら何度やっても
+    # 正解に到達しない（実測 2026-08-05: 「では」→『ては』。テハ からは デハ の
+    # 変換候補が絶対に出ない）。そこで濁点・撥音・促音を1箇所だけ揺らした読みも
+    # 変換して候補に混ぜる。揺らしは決定論的な列挙なのでローカルで完結する。
+    reconvert_variants: bool = _env("VOXCRAFT_RECONVERT_VARIANTS", "1") == "1"
+    # 揺らしをかける対象の長さ上限（文字）。長い文は誤認識箇所を特定できないし、
+    # 候補が増えすぎて本来の候補が選びにくくなる。
+    reconvert_variant_max_len: int = int(_env("VOXCRAFT_RECONVERT_VARIANT_MAX_LEN", "8"))
+    # 変換までかける揺らし読みの上限（＝Google CGI へのリクエスト数）。並列で投げる。
+    reconvert_variant_limit: int = int(_env("VOXCRAFT_RECONVERT_VARIANT_LIMIT", "6"))
+    # 揺らしから本文候補へ足す上限件数。
+    reconvert_variant_candidates: int = int(_env("VOXCRAFT_RECONVERT_VARIANT_CANDS", "8"))
 
     # --- 再変換（変換戻し） ---
     # Google CGI API for Japanese Input を使う（無料・非公式・要オンライン）。

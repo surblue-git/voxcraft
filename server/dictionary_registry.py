@@ -628,6 +628,67 @@ class DictionaryRegistry:
                 "backupPath": str(backup),
             }
 
+    def add_symbol(
+        self,
+        profile_id: str,
+        observed: str,
+        output: str,
+        *,
+        expected_revision: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one standalone-chunk symbol without overwriting concurrent edits.
+
+        記号語は「チャンク全体がその綴りのとき」だけ効くので、置換と違って
+        1文字キー（例 悪→。）でも本文を壊さない。だから entries とは別経路にする。
+        """
+        with self._write_lock:
+            profile = self.load_profile(profile_id)
+            current_revision = _content_revision(profile)
+            if expected_revision is not None and expected_revision != current_revision:
+                raise DictionaryRevisionConflict(
+                    "辞書が別の操作で更新されています。再読み込みしてから登録してください",
+                    current_revision=current_revision,
+                )
+
+            normalized_observed = observed.strip() if isinstance(observed, str) else observed
+            symbols = profile.get("symbols", {})
+            if not isinstance(symbols, dict):
+                raise DictionarySchemaError("symbols はオブジェクトである必要があります")
+
+            existing = symbols.get(normalized_observed)
+            if existing is not None:
+                if existing == output:
+                    return {
+                        "ok": True,
+                        "created": False,
+                        "profileId": profile_id,
+                        "revision": current_revision,
+                        "symbol": {"observed": normalized_observed, "output": existing},
+                    }
+                raise DictionaryRevisionConflict(
+                    f"{normalized_observed} は既に別の記号へ登録されています",
+                    current_revision=current_revision,
+                )
+
+            profile["symbols"] = {**symbols, normalized_observed: output}
+            diagnostics = validate_profile(profile, expected_id=profile_id)
+            errors = [item for item in diagnostics if item.severity == "error"]
+            if errors:
+                raise DictionarySchemaError(errors[0].message, diagnostics)
+
+            path = self.profile_path(profile_id)
+            backup = path.with_suffix(path.suffix + ".bak")
+            shutil.copy2(path, backup)
+            self._write_json(path, profile)
+            return {
+                "ok": True,
+                "created": True,
+                "profileId": profile_id,
+                "revision": _content_revision(profile),
+                "symbol": {"observed": normalized_observed, "output": output},
+                "backupPath": str(backup),
+            }
+
     def update_profile_maps(
         self,
         profile_id: str,

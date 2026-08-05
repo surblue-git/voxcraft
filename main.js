@@ -311,9 +311,16 @@ var CONFIRM_WORDS = words(["\u78BA\u5B9A", "\u304B\u304F\u3066\u3044"], ["\u6C7A
 var CANCEL_WORDS = words(["\u30AD\u30E3\u30F3\u30BB\u30EB", "\u304D\u3083\u3093\u305B\u308B"], ["\u3084\u3081\u308B", "\u3084\u3081\u308B"]);
 var CONFIRM = CONFIRM_WORDS.map((w) => w.word);
 var CANCEL = CANCEL_WORDS.map((w) => w.word);
-var REPLACE_RE = /^(.+?)を(.+?)に(?:修正|変換|直して|してください|変えて)$/;
-var RECONVERT_TARGET_RE = /^(.+?)を(?:再変換?|変換し直し|変換しなおし|もう一度変換)(?:て|して)?$/;
-var RESPEAK_TARGET_RE = /^(.+?)を(?:言い直し|言い直す|いいなおし|訂正|ていせい|言い換え|いいかえ|差し替え|さしかえ)(?:て|して)?$/;
+var WO = "[\u3092\u30AA\u30F2\u304A]";
+var REPLACE_RE = new RegExp(
+  `^(.+?)${WO}(.+?)\u306B(?:\u4FEE\u6B63|\u5909\u63DB|\u76F4\u3057\u3066|\u3057\u3066\u304F\u3060\u3055\u3044|\u5909\u3048\u3066)$`
+);
+var RECONVERT_TARGET_RE = new RegExp(
+  `^(.+?)${WO}(?:\u518D\u5909\u63DB?|\u5909\u63DB\u3057\u76F4\u3057|\u5909\u63DB\u3057\u306A\u304A\u3057|\u3082\u3046\u4E00\u5EA6\u5909\u63DB)(?:\u3066|\u3057\u3066)?$`
+);
+var RESPEAK_TARGET_RE = new RegExp(
+  `^(.+?)${WO}(?:\u8A00\u3044\u76F4\u3057|\u8A00\u3044\u76F4\u3059|\u3044\u3044\u306A\u304A\u3057|\u8A02\u6B63|\u3066\u3044\u305B\u3044|\u8A00\u3044\u63DB\u3048|\u3044\u3044\u304B\u3048|\u5DEE\u3057\u66FF\u3048|\u3055\u3057\u304B\u3048)(?:\u3066|\u3057\u3066)?$`
+);
 var SELECTION_WORDS = /* @__PURE__ */ new Set(["\u3053\u308C", "\u3053\u3053", "\u9078\u629E\u7BC4\u56F2", "\u9078\u629E\u90E8\u5206"]);
 var PICK_RE = /^(?:候補)?([0-9０-９一二三四五六七八九十]+)\s*番?$/;
 var KANJI_NUM = {
@@ -577,6 +584,18 @@ async function fetchDictionaryCatalog(wsUrl) {
 async function addDictionaryEntry(wsUrl, profileId, observed, output, expectedRevision) {
   const res = await (0, import_obsidian.requestUrl)({
     url: `${httpBase(wsUrl)}/dictionaries/${encodeURIComponent(profileId)}/entries`,
+    method: "POST",
+    contentType: "application/json",
+    body: JSON.stringify({ observed, output, expectedRevision }),
+    throw: false
+  });
+  if (res.status >= 400)
+    throw new Error(errorDetail(res));
+  return res.json;
+}
+async function addDictionarySymbol(wsUrl, profileId, observed, output, expectedRevision) {
+  const res = await (0, import_obsidian.requestUrl)({
+    url: `${httpBase(wsUrl)}/dictionaries/${encodeURIComponent(profileId)}/symbols`,
     method: "POST",
     contentType: "application/json",
     body: JSON.stringify({ observed, output, expectedRevision }),
@@ -902,18 +921,72 @@ var DictModal = class extends import_obsidian.Modal {
 
 // suggest.ts
 var import_obsidian2 = require("obsidian");
+
+// symbols.ts
+var SYMBOL_CHOICES = [
+  { value: "\u3002", store: "\u3002", label: "\u3002 \u307E\u308B" },
+  { value: "\u3001", store: "\u3001", label: "\u3001 \u3066\u3093" },
+  { value: "\n", store: "\u6539\u884C", label: "\u6539\u884C \u304B\u3044\u304E\u3087\u3046" },
+  { value: "\u300C", store: "\u300C", label: "\u300C \u304B\u304E\u304B\u3063\u3053" },
+  { value: "\u300D", store: "\u300D", label: "\u300D \u304B\u304E\u304B\u3063\u3053\u3068\u3058" },
+  { value: "\uFF08", store: "\uFF08", label: "\uFF08 \u304B\u3063\u3053" },
+  { value: "\uFF09", store: "\uFF09", label: "\uFF09 \u304B\u3063\u3053\u3068\u3058" },
+  { value: "\uFF1F", store: "\uFF1F", label: "\uFF1F \u306F\u3066\u306A\u307E\u30FC\u304F" },
+  { value: "\uFF01", store: "\uFF01", label: "\uFF01 \u3073\u3063\u304F\u308A\u307E\u30FC\u304F" },
+  { value: "\u30FB", store: "\u30FB", label: "\u30FB \u306A\u304B\u3050\u308D" },
+  { value: "\u2026", store: "\u2026", label: "\u2026 \u3055\u3093\u3066\u3093" },
+  { value: "\uFF1A", store: "\uFF1A", label: "\uFF1A \u3053\u308D\u3093" },
+  { value: "\uFF0F", store: "\uFF0F", label: "\uFF0F \u3059\u3089\u3063\u3057\u3085" }
+];
+var MAX_TARGET_LEN = 6;
+function symbolChoicesFor(originalText, segmentCount, existingCandidates = []) {
+  const target = originalText.trim();
+  if (segmentCount !== 1)
+    return [];
+  if (!target || target.length > MAX_TARGET_LEN)
+    return [];
+  if (SYMBOL_CHOICES.some((choice) => choice.value === target))
+    return [];
+  const taken = new Set(existingCandidates);
+  return SYMBOL_CHOICES.filter((choice) => !taken.has(choice.value));
+}
+
+// suggest.ts
 var ReconvertModal = class extends import_obsidian2.Modal {
   constructor(app, segments, onSubmit, opts = {}) {
     super(app);
     // 各文節で選択中の候補 index
     this.activeSeg = 0;
     this.segEls = [];
+    // 候補に混ぜた記号（値→定義）。確定時に「記号語として登録」へ振り分ける。
+    this.symbolByValue = /* @__PURE__ */ new Map();
     this.segments = segments;
-    this.selection = segments.map(() => 0);
     this.onSubmit = onSubmit;
     this.opts = opts;
     if (opts.originalText)
+      this.appendSymbolCandidates(opts.originalText);
+    this.selection = this.segments.map(() => 0);
+    if (opts.originalText)
       this.preselect(opts.originalText);
+  }
+  appendSymbolCandidates(originalText) {
+    const seg = this.segments[0];
+    if (!seg)
+      return;
+    const choices = symbolChoicesFor(originalText, this.segments.length, seg.candidates);
+    if (choices.length === 0)
+      return;
+    for (const choice of choices)
+      this.symbolByValue.set(choice.value, choice);
+    this.segments = [
+      { ...seg, candidates: [...seg.candidates, ...choices.map((c) => c.value)] },
+      ...this.segments.slice(1)
+    ];
+  }
+  // 記号は字面が小さく「\n」に至っては見えないので、読みを添えて表示する。
+  candidateLabel(value) {
+    var _a, _b;
+    return (_b = (_a = this.symbolByValue.get(value)) == null ? void 0 : _a.label) != null ? _b : value;
   }
   // 元表記を文節候補の連結で貪欲に辿り、一致した候補を初期選択にする。
   preselect(original) {
@@ -949,7 +1022,7 @@ var ReconvertModal = class extends import_obsidian2.Modal {
       seg.candidates.forEach((cand, ci) => {
         const btn = list.createEl("button", {
           cls: "voxcraft-cand",
-          text: `${ci + 1}. ${cand}`
+          text: `${ci + 1}. ${this.candidateLabel(cand)}`
         });
         btn.onclick = () => {
           this.activeSeg = si;
@@ -962,9 +1035,11 @@ var ReconvertModal = class extends import_obsidian2.Modal {
     const buttons = new import_obsidian2.Setting(contentEl).addButton(
       (b) => b.setButtonText("\u78BA\u5B9A").setCta().onClick(() => this.submit())
     );
-    if (this.opts.onRegister && this.opts.originalText) {
+    if ((this.opts.onRegister || this.opts.onRegisterSymbol) && this.opts.originalText) {
       buttons.addButton(
-        (b) => b.setButtonText("\u78BA\u5B9A\u3057\u3066\u8F9E\u66F8\u306B\u767B\u9332").setTooltip("\u4EE5\u5F8C\u3001\u540C\u3058\u8AA4\u5909\u63DB\u3092\u81EA\u52D5\u3067\u4FEE\u6B63\u3059\u308B").onClick(() => this.submit(true))
+        (b) => b.setButtonText("\u78BA\u5B9A\u3057\u3066\u8F9E\u66F8\u306B\u767B\u9332").setTooltip(
+          "\u4EE5\u5F8C\u3001\u540C\u3058\u8AA4\u5909\u63DB\u3092\u81EA\u52D5\u3067\u4FEE\u6B63\u3059\u308B\uFF08\u8A18\u53F7\u3092\u9078\u3093\u3060\u3068\u304D\u306F\u8A18\u53F7\u8A9E\u3068\u3057\u3066\u767B\u9332\u3059\u308B\uFF09"
+        ).onClick(() => this.submit(true))
       );
     }
     if (this.opts.onSkip) {
@@ -1024,15 +1099,22 @@ var ReconvertModal = class extends import_obsidian2.Modal {
     );
   }
   submit(register = false) {
+    var _a, _b, _c, _d;
     const chosen = this.segments.map((seg, i) => seg.candidates[this.selection[i]]);
     this.close();
     this.onSubmit(chosen);
-    if (register && this.opts.onRegister && this.opts.originalText) {
-      const joined = chosen.join("");
-      if (joined && joined !== this.opts.originalText) {
-        this.opts.onRegister(this.opts.originalText, joined);
-      }
+    if (!register)
+      return;
+    const original = this.opts.originalText;
+    const joined = chosen.join("");
+    if (!original || !joined || joined === original)
+      return;
+    const symbol = this.symbolByValue.get(joined);
+    if (symbol) {
+      (_b = (_a = this.opts).onRegisterSymbol) == null ? void 0 : _b.call(_a, original, symbol.store);
+      return;
     }
+    (_d = (_c = this.opts).onRegister) == null ? void 0 : _d.call(_c, original, joined);
   }
   onClose() {
     this.contentEl.empty();
@@ -3667,10 +3749,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       return;
     }
     this.setStatus(this.idleStatus());
-    if (!payload.online) {
-      new import_obsidian7.Notice("VoxCraft: \u30AA\u30D5\u30E9\u30A4\u30F3\u306E\u305F\u3081\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+    if (!payload.online && !this.offlineSymbolsOnly(target))
       return;
-    }
     const surfaces = buildSurfaces(target, payload.segments);
     const targetKey = target.normalize("NFKC").replace(/\s+/gu, "");
     const previous = this.reconvertTraversal;
@@ -3785,11 +3865,22 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       return;
     }
     this.setStatus(this.idleStatus());
-    if (!payload.online) {
-      new import_obsidian7.Notice("VoxCraft: \u30AA\u30D5\u30E9\u30A4\u30F3\u306E\u305F\u3081\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+    if (!payload.online && !this.offlineSymbolsOnly(text))
       return;
-    }
     this.openReconvertModalFor(range, text, payload, cm);
+  }
+  // オフライン（Google CGI が使えない）ときに、それでもモーダルを開くか。
+  //
+  // 変換候補は諦めるしかないが、記号語の取り違え（「まる」→『悪』）はローカルの
+  // 記号セットだけで直せる。オフラインでもサーバー本体はLANに居るので、選んだ
+  // 記号の辞書登録もそのまま通る。記号を出せない対象のときだけ従来どおり打ち切る。
+  offlineSymbolsOnly(text) {
+    if (symbolChoicesFor(text, 1).length === 0) {
+      new import_obsidian7.Notice("VoxCraft: \u30AA\u30D5\u30E9\u30A4\u30F3\u306E\u305F\u3081\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+      return false;
+    }
+    new import_obsidian7.Notice("VoxCraft: \u30AA\u30D5\u30E9\u30A4\u30F3\u306E\u305F\u3081\u5909\u63DB\u5019\u88DC\u306F\u3042\u308A\u307E\u305B\u3093\u3002\u8A18\u53F7\u3060\u3051\u9078\u3079\u307E\u3059\u3002");
+    return true;
   }
   // 新規経路共通: 候補モーダルを開き、確定時に検証付きで置換する。
   openReconvertModalFor(range, originalText, payload, cm, context = {}) {
@@ -3815,6 +3906,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       {
         originalText,
         onRegister: (f, t) => void this.registerReplacement(f, t),
+        onRegisterSymbol: (f, s) => void this.registerSymbol(f, s),
         locationLabel: context.locationLabel,
         onSkip: context.onSkip
       }
@@ -3891,6 +3983,40 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       );
     } catch (e) {
       new import_obsidian7.Notice(`VoxCraft: \u8F9E\u66F8\u306B\u767B\u9332\u3067\u304D\u307E\u305B\u3093 \u2014 ${e instanceof Error ? e.message : e}`, 8e3);
+    }
+  }
+  // 記号候補を選んで「辞書に登録」したとき: 観測した綴り→記号を記号語辞書へ入れる。
+  //
+  // 置換辞書に入れないのが肝。『悪』→「。」を置換で持つと本文中の「悪」まで
+  // 消える。記号語はチャンク全体が一致したときだけ効く（server/postproc.py の
+  // apply_symbol_dictation）ので、1文字キーでも安全に登録できる。
+  async registerSymbol(from, symbol) {
+    const observed = from.trim();
+    if (!observed || !symbol)
+      return;
+    if (observed.length > 16) {
+      new import_obsidian7.Notice("VoxCraft: \u8A18\u53F7\u8A9E\u3068\u3057\u3066\u767B\u9332\u3059\u308B\u306B\u306F\u9577\u3059\u304E\u307E\u3059\uFF0816\u5B57\u307E\u3067\uFF09\u3002");
+      return;
+    }
+    const url = this.activeUrl();
+    if (!url) {
+      new import_obsidian7.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002");
+      return;
+    }
+    try {
+      const target = await this.dictionaryTarget(url);
+      const result = await addDictionarySymbol(
+        url,
+        target.profileId,
+        observed,
+        symbol,
+        target.revision
+      );
+      new import_obsidian7.Notice(
+        result.created ? `VoxCraft: \u8A18\u53F7\u8A9E\u3068\u3057\u3066\u767B\u9332\u3057\u307E\u3057\u305F \u2014 ${observed} \u2192 ${symbol}\uFF08\u6B21\u56DE\u306E\u9332\u97F3\u304B\u3089\u53CD\u6620\uFF09` : `VoxCraft: \u3059\u3067\u306B\u540C\u3058\u8A18\u53F7\u8A9E\u767B\u9332\u304C\u3042\u308A\u307E\u3059 \u2014 ${observed} \u2192 ${symbol}`
+      );
+    } catch (e) {
+      new import_obsidian7.Notice(`VoxCraft: \u8A18\u53F7\u8A9E\u3092\u767B\u9332\u3067\u304D\u307E\u305B\u3093 \u2014 ${e instanceof Error ? e.message : e}`, 8e3);
     }
   }
   // ---- 言い直し（読み自体が壊れた完全誤認識の修正） ----
@@ -4108,7 +4234,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     }
     const from = Math.max(0, anchor - last.length);
     const targetText = cm.state.doc.sliceString(from, anchor);
-    this.pendingReconvert = { from, to: anchor };
+    this.pendingReconvert = { from, to: anchor, text: targetText };
     this.socket.sendReconvert(targetText);
     this.setStatus("\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u4E2D\u2026");
   }
@@ -4121,9 +4247,18 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("VoxCraft: \u5909\u63DB\u5019\u88DC\u304C\u5F97\u3089\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
       return;
     }
-    const modal = new ReconvertModal(this.app, segments, (chosen) => {
-      this.applyReconvert(target, chosen.join(""));
-    });
+    const modal = new ReconvertModal(
+      this.app,
+      segments,
+      (chosen) => {
+        this.applyReconvert(target, chosen.join(""));
+      },
+      {
+        originalText: target.text,
+        onRegister: (f, t) => void this.registerReplacement(f, t),
+        onRegisterSymbol: (f, s) => void this.registerSymbol(f, s)
+      }
+    );
     this.adoptModal(modal);
   }
   applyReconvert(target, newText) {
