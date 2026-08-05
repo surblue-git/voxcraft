@@ -112,6 +112,9 @@ class Config:
     # -80dBFS相当を超える実音が来たときだけタイマーをリセットする。
     transcribe_auto_stop_sec: float = float(_env("VOXCRAFT_AUTO_STOP_SEC", "300"))
     transcribe_audible_rms: float = float(_env("VOXCRAFT_AUDIBLE_RMS", "0.0001"))
+    # 開始からこの秒数、一度も音が来なければ警告する（取得先の選び間違いの早期発見）。
+    # 自動停止の300秒まで黙っていると、気づいたときには何も残っていない。0で無効。
+    transcribe_silent_warn_sec: float = float(_env("VOXCRAFT_SILENT_WARN_SEC", "20"))
 
     # --- 段落分け（文字起こしモード専用。ベタ打ち防止） ---
     # 「一定の字数を超えていて、かつ息継ぎがある所」で空行を入れる。

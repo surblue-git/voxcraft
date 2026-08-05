@@ -125,6 +125,9 @@ export default class VoxCraftPlugin extends Plugin {
 
     private socket: AsrSocket | null = null;
     private recorder: MicRecorder | null = null;
+    // サーバーから「開始から一度も音が来ていない」と言われた状態。ステータスに
+    // 出し続けるための旗で、実際にチャンクが届いたら下ろす。
+    private noAudioWarned = false;
     private recording = false;
     private starting = false;
     private stopping = false;
@@ -246,7 +249,10 @@ export default class VoxCraftPlugin extends Plugin {
         });
         this.addCommand({
             id: "toggle-system-transcribe",
-            name: "PC音声の文字起こしを開始/停止",
+            // コマンド名にどちらのPCの音かを必ず入れる。「PC音声の文字起こし」だけだと
+            // 別PCから叩いたときにサーバー機の音が録れることに気づけない。
+            // id は変えない（ユーザーが割り当てたホットキーが外れるため）。
+            name: "PC音声の文字起こし【サーバー機】を開始/停止",
             icon: "monitor-speaker",
             checkCallback: (checking) => {
                 if (Platform.isMobile) return false;
@@ -259,7 +265,7 @@ export default class VoxCraftPlugin extends Plugin {
         });
         this.addCommand({
             id: "toggle-client-system-transcribe",
-            name: "この端末のPC音声を文字起こし（開始/停止）",
+            name: "PC音声の文字起こし【この端末】を開始/停止",
             icon: "speaker",
             checkCallback: (checking) => {
                 if (Platform.isMobile) return false;
@@ -387,6 +393,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.mode = mode;
         this.source = source;
         this.sourceDevice = "";
+        this.noAudioWarned = false;
         this.autoStopSec = 0;
         if (mode === "transcribe") {
             // onSession は started より先に届くため、開始要求より前に初期化する。
@@ -420,12 +427,17 @@ export default class VoxCraftPlugin extends Plugin {
             const dictionarySetId = connectedUrl
                 ? this.dictionarySetIdFor(connectedUrl)
                 : "default";
+            // device は source で意味が変わる。system はサーバー機で開く入力先の
+            // 指定（空ならサーバーの既定の出力）、system-client は表示名。
+            const device = source === "system"
+                ? (connectedUrl ? this.systemDeviceFor(connectedUrl) : "") || undefined
+                : clientInput?.label;
             const started = await this.socket.sendStart(
                 this.settings.stripJaAlnumSpace,
                 this.settings.symbolDictation,
                 mode,
                 source,
-                clientInput?.label,
+                device,
                 dictionarySetId
             );
             this.sourceDevice = started.device ?? "";
@@ -538,8 +550,9 @@ export default class VoxCraftPlugin extends Plugin {
         const saved = loadSystemInput(this.app);
         if (!saved) {
             new Notice(
-                "VoxCraft: PC音声の入力デバイスが未設定です。" +
-                "設定 → VoxCraft →「PC音声（この端末）」で「ステレオ ミキサー」等を選んでください。"
+                "VoxCraft: この端末のPC音声の入力デバイスが未設定です。" +
+                "設定 → VoxCraft →「PC音声（この端末）」で「ステレオ ミキサー」等を選んでください。" +
+                "サーバー機の音を録りたい場合は【サーバー機】の方のコマンドを使ってください。"
             );
             return null;
         }
@@ -619,6 +632,11 @@ export default class VoxCraftPlugin extends Plugin {
             },
             onChunk: (text, msg) => {
                 this.transcribing = false;
+                // 実際に認識できた＝音は来ている。警告表示を下ろす。
+                if (this.noAudioWarned) {
+                    this.noAudioWarned = false;
+                    this.setStatus(this.idleStatus());
+                }
                 this.handleChunk(text, msg);
             },
             onRefinement: (text, msg) => this.handleTranscribeRefinement(text, msg),
@@ -630,6 +648,16 @@ export default class VoxCraftPlugin extends Plugin {
                 if (!this.recording) return;
                 new Notice(`VoxCraft サーバーエラー: ${m}`);
                 if (fatal && isSystemSource(this.source)) this.stopRecording();
+            },
+            onWarning: (m, code) => {
+                if (!this.recording || !m) return;
+                // 取得先の取り違えは、自動停止まで待つと何も残らない。長めに出し、
+                // ステータスにも残して、通知を見落としても気づけるようにする。
+                new Notice(`VoxCraft: ${m}`, 15000);
+                if (code === "no_audio") {
+                    this.noAudioWarned = true;
+                    this.setStatus(this.idleStatus());
+                }
             },
             onClose: () => this.handleSocketClose(),
         };
@@ -1406,9 +1434,12 @@ export default class VoxCraftPlugin extends Plugin {
         const dictionary = this.activeDictionarySetName ? ` / 辞書: ${this.activeDictionarySetName}` : "";
         if (isSystemSource(this.source)) {
             const where = this.source === "system-client" ? "この端末" : "サーバー機";
+            // 音が来ていないと分かっている間は、レベルメーターで上書きされても
+            // 消えないようにここへ出す（通知を見落としても気づけるように）。
+            const head = this.noAudioWarned ? "⚠ 音が来ていません" : "● PC音声を文字起こし中";
             return this.sourceDevice
-                ? `● PC音声を文字起こし中（${where}: ${this.sourceDevice}）${dictionary}`
-                : `● PC音声を文字起こし中（${where}）${dictionary}`;
+                ? `${head}（${where}: ${this.sourceDevice}）${dictionary}`
+                : `${head}（${where}）${dictionary}`;
         }
         return this.mode === "transcribe" ? `● 文字起こし中${dictionary}` : `● 録音中${dictionary}`;
     }
@@ -2033,6 +2064,23 @@ export default class VoxCraftPlugin extends Plugin {
 
     dictionarySetIdFor(url: string): string {
         return this.settings.dictionarySetByEndpoint[url.trim()] || "default";
+    }
+
+    // サーバー機のどの入力先から PC音声を取るか。空ならサーバーの既定の出力。
+    systemDeviceFor(url: string): string {
+        return this.settings.systemDeviceByEndpoint[url.trim()] || "";
+    }
+
+    async setSystemDeviceFor(url: string, device: string): Promise<void> {
+        const key = url.trim();
+        if (!key) return;
+        if (device) this.settings.systemDeviceByEndpoint[key] = device;
+        else delete this.settings.systemDeviceByEndpoint[key];
+        await this.saveSettings();
+        new Notice(
+            `VoxCraft: PC音声の入力先を「${device || "既定の出力"}」にしました` +
+            (this.recording ? "（現在の録音には影響せず、次回から適用）" : "")
+        );
     }
 
     async setDictionarySetFor(url: string, setId: string): Promise<void> {

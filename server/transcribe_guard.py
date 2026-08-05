@@ -105,6 +105,10 @@ class SilenceTracker:
         self.timeout_sec = timeout_sec
         self.audible_rms = audible_rms
         self.last_audible_at = now
+        # 開始時刻と「一度でも音が来たか」は別に持つ。取得先を間違えた録音は
+        # last_audible_at が初期値のまま動かないので、この2つで見分けられる。
+        self.started_at = now
+        self.heard_any = False
 
     def feed(self, audio: np.ndarray, now: float) -> None:
         x = np.asarray(audio, dtype=np.float32)
@@ -113,6 +117,11 @@ class SilenceTracker:
         rms = float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
         if rms >= self.audible_rms:
             self.last_audible_at = now
+            self.heard_any = True
+
+    def silent_since_start(self, now: float, warn_sec: float) -> bool:
+        """開始から warn_sec 経っても一度も音が来ていない。"""
+        return warn_sec > 0 and not self.heard_any and now - self.started_at >= warn_sec
 
     def remaining(self, now: float) -> float:
         return self.timeout_sec - (now - self.last_audible_at)

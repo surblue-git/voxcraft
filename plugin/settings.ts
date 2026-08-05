@@ -1,7 +1,7 @@
 import { App, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import type VoxCraftPlugin from "./main";
 import { AudioInputDevice, listAudioInputs } from "./audio";
-import { DictModal, fetchDictionaryCatalog, fetchHealth, httpBase } from "./dict";
+import { DictModal, fetchAudioDevices, fetchDictionaryCatalog, fetchHealth, httpBase } from "./dict";
 
 export interface VoxEndpoint {
     label: string; // 表示名（例:「自宅LAN」「Tailscale」）
@@ -14,6 +14,7 @@ export interface VoxCraftSettings {
     endpoints: VoxEndpoint[]; // 接続先候補（上から順に試すが、自動時は同時接続レース）
     selection: string;        // "auto" | エンドポイントの url（固定接続）
     dictionarySetByEndpoint: Record<string, string>; // 接続先URLごとの辞書セットID
+    systemDeviceByEndpoint: Record<string, string>;  // 接続先URLごとのPC音声の入力先（空=既定の出力）
     stripJaAlnumSpace: boolean; // 日本語と英数字の間の半角スペース除去
     symbolDictation: boolean;   // 「まる」等の記号読み上げ
     enableCommands: boolean;    // 音声コマンドを有効化
@@ -32,6 +33,7 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     endpoints: [{ label: "このPC", url: "ws://localhost:8760/ws" }],
     selection: AUTO,
     dictionarySetByEndpoint: {},
+    systemDeviceByEndpoint: {},
     stripJaAlnumSpace: true,
     symbolDictation: true,
     enableCommands: true,
@@ -56,6 +58,9 @@ export function migrateSettings(s: VoxCraftSettings): VoxCraftSettings {
     if (!s.selection) s.selection = AUTO;
     if (!s.dictionarySetByEndpoint || typeof s.dictionarySetByEndpoint !== "object") {
         s.dictionarySetByEndpoint = {};
+    }
+    if (!s.systemDeviceByEndpoint || typeof s.systemDeviceByEndpoint !== "object") {
+        s.systemDeviceByEndpoint = {};
     }
     if (s.insertAt !== "cursor") s.insertAt = "anchor";
     if (typeof s.pauseComma !== "boolean") s.pauseComma = true;
@@ -106,6 +111,74 @@ export class VoxCraftSettingTab extends PluginSettingTab {
         this.plugin = plugin;
     }
 
+    // コマンド「PC音声の文字起こし」で、サーバー機のどこから音を取るか。
+    // 既定は Windows の「既定の出力」のループバックだが、既定がモニターのまま
+    // ヘッドホンで聴いている、といった食い違いだと無音を録り続けることになる。
+    // 一覧はサーバー機のものなので、Android から設定しても同じように効く。
+    private displayServerSystemInput(containerEl: HTMLElement): void {
+        containerEl.createEl("h3", { text: "PC音声（サーバー機）" });
+        containerEl.createEl("p", {
+            text:
+                "コマンド「PC音声の文字起こし【サーバー機】」で使う、サーバー機側の入力先。" +
+                "「既定の出力」のままにしておくと、Windowsの出力先の切り替えに追従する" +
+                "（ヘッドホンを繋いだらそちら、外したらスピーカー）。" +
+                "［ループバック］は再生音をそのまま取る（何も鳴っていなければ無音）。" +
+                "接続先ごとに保存される。",
+            cls: "setting-item-description",
+        });
+
+        for (const endpoint of this.plugin.settings.endpoints) {
+            const url = endpoint.url.trim();
+            if (!url) continue;
+            const saved = this.plugin.systemDeviceFor(url);
+            const setting = new Setting(containerEl)
+                .setName(`入力先 — ${endpoint.label || url}`)
+                .setDesc("サーバーからデバイス一覧を読み込み中…");
+            setting.addDropdown((d) => {
+                d.addOption("", "読み込み中…");
+                d.selectEl.disabled = true;
+                void fetchAudioDevices(url)
+                    .then(({ devices, error }) => {
+                        d.selectEl.empty();
+                        const fallback = devices.find((x) => x.isDefault);
+                        d.addOption(
+                            "",
+                            fallback
+                                ? `既定の出力（今は ${fallback.name}）`
+                                : "既定の出力"
+                        );
+                        for (const dev of devices) {
+                            const kind = dev.kind === "loopback" ? "再生音" : "入力";
+                            d.addOption(dev.name, `［${kind}］${dev.name}`);
+                        }
+                        // 保存済みが消えていても黙って既定へ戻さない。ここで戻すと
+                        // 「設定を開いただけで選択が変わっていた」ことに気づけない。
+                        if (saved && !devices.some((x) => x.name === saved)) {
+                            d.addOption(saved, `${saved}（見つかりません）`);
+                        }
+                        d.setValue(saved);
+                        d.selectEl.disabled = false;
+                        setting.setDesc(
+                            error
+                                ? `⚠ ${error}`
+                                : devices.length === 0
+                                    ? "取り込める入力先がありません（Windows以外のサーバー機など）。"
+                                    : "録音中の変更は次回から適用される。"
+                        );
+                        d.onChange(async (v) => {
+                            await this.plugin.setSystemDeviceFor(url, v);
+                        });
+                    })
+                    .catch((error) => {
+                        d.selectEl.disabled = true;
+                        setting.setDesc(
+                            `デバイス一覧を取得できません: ${error instanceof Error ? error.message : error}`
+                        );
+                    });
+            });
+        }
+    }
+
     // PC音声を「この端末で取って送る」ための入力デバイス選択。
     // Windows のステレオミキサー（既定では無効なので mmsys.cpl で有効化が要る）や
     // 仮想オーディオケーブルを選ぶと、再生音が普通の録音デバイスとして取れる。
@@ -113,7 +186,7 @@ export class VoxCraftSettingTab extends PluginSettingTab {
         containerEl.createEl("h3", { text: "PC音声（この端末）" });
         containerEl.createEl("p", {
             text:
-                "コマンド「この端末のPC音声を文字起こし」で使う入力デバイス。" +
+                "コマンド「PC音声の文字起こし【この端末】」で使う入力デバイス。" +
                 "Windowsの「ステレオ ミキサー」（Win+R → mmsys.cpl → 録音タブ → " +
                 "右クリックで「無効なデバイスの表示」→ 有効化）を選ぶと、この端末の" +
                 "再生音をそのまま認識サーバーへ送れる。" +
@@ -222,10 +295,17 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                             if (this.plugin.settings.selection === prev) {
                                 this.plugin.settings.selection = v.trim();
                             }
-                            if (prev && prev !== v.trim() && this.plugin.settings.dictionarySetByEndpoint[prev]) {
-                                this.plugin.settings.dictionarySetByEndpoint[v.trim()] =
-                                    this.plugin.settings.dictionarySetByEndpoint[prev];
-                                delete this.plugin.settings.dictionarySetByEndpoint[prev];
+                            if (prev && prev !== v.trim()) {
+                                if (this.plugin.settings.dictionarySetByEndpoint[prev]) {
+                                    this.plugin.settings.dictionarySetByEndpoint[v.trim()] =
+                                        this.plugin.settings.dictionarySetByEndpoint[prev];
+                                    delete this.plugin.settings.dictionarySetByEndpoint[prev];
+                                }
+                                if (this.plugin.settings.systemDeviceByEndpoint[prev]) {
+                                    this.plugin.settings.systemDeviceByEndpoint[v.trim()] =
+                                        this.plugin.settings.systemDeviceByEndpoint[prev];
+                                    delete this.plugin.settings.systemDeviceByEndpoint[prev];
+                                }
                             }
                             await this.plugin.saveSettings();
                         });
@@ -242,6 +322,7 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                                 this.plugin.settings.selection = AUTO;
                             }
                             delete this.plugin.settings.dictionarySetByEndpoint[removed];
+                            delete this.plugin.settings.systemDeviceByEndpoint[removed];
                             await this.plugin.saveSettings();
                             this.display();
                         })
@@ -259,7 +340,9 @@ export class VoxCraftSettingTab extends PluginSettingTab {
                 })
         );
 
-        // ---- PC音声（この端末）の入力デバイス ----
+        // ---- PC音声の入力先 ----
+        // サーバー機側はモバイルからでも設定できる（音を取るのは向こうなので）。
+        this.displayServerSystemInput(containerEl);
         if (!Platform.isMobile) this.displaySystemInput(containerEl);
 
         // ---- サーバーの状態確認 ----

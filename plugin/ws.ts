@@ -36,7 +36,8 @@ export interface DictionaryDiagnostic {
 
 export interface ServerMessage {
     type: "ready" | "started" | "chunk" | "refinement" | "stopped" |
-        "reconvert" | "error" | "partial" | "session" | "level" | "probe";
+        "reconvert" | "error" | "warning" | "partial" | "session" | "level" | "probe";
+    code?: string; // warning の種別（"no_audio" 等）
     text?: string;
     // 口述チャンクの通し番号。probe（コマンド先読み）と chunk が同じ番号で対応する。
     seq?: number;
@@ -83,6 +84,8 @@ export interface WsHandlers {
     onStopped?: (reason?: string) => void;
     onLevel?: (level: number) => void;
     onError?: (message: string, fatal: boolean) => void;
+    // 録音は続くが注意が要る状態（取得先から音が来ていない等）。
+    onWarning?: (message: string, code: string) => void;
     onClose?: () => void;
 }
 
@@ -254,6 +257,9 @@ export class AsrSocket {
                 break;
             case "level":
                 if (typeof msg.level === "number") this.handlers.onLevel?.(msg.level);
+                break;
+            case "warning":
+                this.handlers.onWarning?.(msg.message || "", msg.code || "");
                 break;
             case "error":
                 if (msg.fatal) this.rejectStart(msg.message || "PC音声入力を開始できません");

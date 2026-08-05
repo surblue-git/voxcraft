@@ -8,7 +8,9 @@
          "mode": "transcribe", "source": "system", "dictionarySetId": "default"}
         # source は "microphone" / "system"（サーバー機の再生音を自前で取る）/
         # "system-client"（クライアントが取った再生音をバイナリで送ってくる）。
-        # 後者は "device" にデバイス名を添えると started でそのまま返す。
+        # "device" は source によって意味が変わる。"system" ならサーバー機の
+        # どの入力先を開くか（/audio-devices の name。省略時は既定の出力の
+        # ループバック）。"system-client" なら表示用の名前で、started へそのまま返す。
         {"type": "stop"}                     # 残り音声をflushして確定
         {"type": "reconvert", "text": "..."} # 再変換候補を要求
         {"type": "tune", "fast": true}       # 候補選択中だけ応答速度優先に切替（false で復帰）
@@ -27,6 +29,9 @@
     - {"type": "refinement", "text": "補正後", "start": 0, "end": 30,
        "revision": 1}                                    # PC音声の範囲補正
     - {"type": "reconvert", "reading": "...", "segments": [...], "online": bool}
+    - {"type": "warning", "code": "no_audio", "device": "...", "message": "..."}
+      # PC音声で、開始から一度も音が来ていない（取得先の選び間違い）。1回だけ。
+      # 録音は続く。自動停止（既定300秒）まで黙っていると何も残らないための予告。
     - {"type": "error", "message": "..."}
 
 起動:
@@ -63,7 +68,7 @@ from punctuate import available as punctuation_available
 from punctuate import to_reading
 from reconvert import reconvert
 from refinement import RefinementPlanner, RefinementRange
-from system_audio import SystemAudioError, WasapiLoopbackCapture
+from system_audio import SystemAudioError, WasapiLoopbackCapture, list_capture_devices
 from transcribe_guard import (
     AudioRingBuffer,
     SilenceTracker,
@@ -122,6 +127,28 @@ def health() -> dict:
         "systemRefineEnabled": config.system_refine_enabled,
         "systemRefineWindowSeconds": config.system_refine_window_sec,
         "dictError": get_error(),
+    }
+
+
+@app.get("/audio-devices")
+def audio_devices() -> dict:
+    """このサーバー機で PC音声として取り込める入力先の一覧。
+
+    プラグインの設定UIが引く。Windows 以外や PyAudioWPatch 未導入では
+    error を返すだけにして、サーバー自体は起動したままにする。
+    """
+    try:
+        devices = list_capture_devices()
+    except SystemAudioError as exc:
+        return {"devices": [], "error": str(exc)}
+    except Exception as exc:  # デバイス固有の PortAudio エラーも設定画面へ出す
+        return {"devices": [], "error": f"入力デバイスを列挙できません: {exc}"}
+    return {
+        "devices": [
+            {"name": d.name, "kind": d.kind, "isDefault": d.is_default}
+            for d in devices
+        ],
+        "error": "",
     }
 
 
@@ -483,6 +510,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     last_source_chunk_end = 0
     silence_tracker: SilenceTracker | None = None
     auto_stop_task: asyncio.Task | None = None
+    system_device_label = ""  # 無音警告に出す取得先の名前
     input_finished = False
     finish_lock = asyncio.Lock()
     previous_transcript_text = ""
@@ -890,7 +918,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 level = float(np.sqrt(np.mean(np.square(pcm, dtype=np.float64))))
                 await ws.send_text(json.dumps({"type": "level", "level": round(level, 5)}))
 
-    async def start_system_audio() -> dict:
+    async def start_system_audio(device_name: str = "") -> dict:
         nonlocal system_capture, system_audio_queue, system_consumer_task
         if system_capture is not None:
             raise SystemAudioError("PC音声入力は既に開始しています。")
@@ -918,7 +946,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 finally:
                     audio_queue.task_done()
 
-        capture = WasapiLoopbackCapture(config.sample_rate, on_audio, on_error)
+        capture = WasapiLoopbackCapture(
+            config.sample_rate, on_audio, on_error, device_name or None
+        )
         consumer = asyncio.create_task(consume())
         try:
             info = await asyncio.to_thread(capture.start)
@@ -987,16 +1017,44 @@ async def ws_endpoint(ws: WebSocket) -> None:
             await ws.send_text(json.dumps({"type": "stopped", "reason": reason}))
 
     async def watch_system_silence() -> None:
-        """PC出力の実音が既定時間来なければ文字起こしを完了する。"""
+        """PC出力の実音が既定時間来なければ文字起こしを完了する。
+
+        自動停止（既定300秒）まで黙っていると、取得先を間違えた録音は何も
+        残らないまま終わる。開始から一度も音が来ていない場合だけ、手前で一度
+        警告を出して選び直せるようにする。
+        """
+        warn_sec = config.transcribe_silent_warn_sec
+        warned = False
         while silence_tracker is not None and not input_finished:
-            remaining = silence_tracker.remaining(asyncio.get_running_loop().time())
+            now = asyncio.get_running_loop().time()
+            remaining = silence_tracker.remaining(now)
             if remaining <= 0:
                 print(
                     f"[VoxCraft] PC音声が{config.transcribe_auto_stop_sec:.0f}秒無音のため自動停止"
                 )
                 await finish_input("silence")
                 return
-            await asyncio.sleep(min(5.0, max(0.1, remaining)))
+            if not warned and silence_tracker.silent_since_start(now, warn_sec):
+                warned = True
+                where = f"「{system_device_label}」" if system_device_label else "PC音声"
+                print(f"[VoxCraft] {where}から{warn_sec:.0f}秒間まったく音が来ていない")
+                await ws.send_text(json.dumps({
+                    "type": "warning",
+                    "code": "no_audio",
+                    "device": system_device_label,
+                    "message": (
+                        f"{where}から音が来ていません。"
+                        "再生先と取得先が食い違っていないか確認してください。"
+                    ),
+                }))
+            # 警告予定時刻を跨いで眠らない。300秒先の自動停止だけを見ていると
+            # 5秒刻みになり、20秒の警告が最大25秒までずれる。
+            wait = min(5.0, max(0.1, remaining))
+            if not warned and warn_sec > 0:
+                until_warn = silence_tracker.started_at + warn_sec - now
+                if until_warn > 0:
+                    wait = min(wait, max(0.1, until_warn))
+            await asyncio.sleep(wait)
 
     async def apply_start(cmd: dict, *, resume_session: SessionAudio | None = None) -> None:
         """{"type": "start"} と {"type": "resume"} で共用するセッション初期化。
@@ -1011,6 +1069,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         nonlocal opts, punctuate, silence_tracker, auto_stop_task, strip_space, symbols
         nonlocal input_finished, previous_transcript_text, pending_contextual_chunk
         nonlocal refinement_delivered_end, audio_ring, last_source_chunk_end
+        nonlocal system_device_label
 
         requested_dictionary_set = cmd.get("dictionarySetId", "default")
         if not isinstance(requested_dictionary_set, str) or not requested_dictionary_set:
@@ -1117,9 +1176,13 @@ async def ws_endpoint(ws: WebSocket) -> None:
         punctuate = config.enable_auto_punctuation
 
         source_info: dict = {}
+        # device は system なら「サーバー機のどの入力先を開くか」、system-client なら
+        # 「クライアントが開いた入力先の表示名」。null / 非文字列でも落ちないように
+        # し、長さも切る（後者はログとステータス表示に出るだけの値）。
+        requested_device = str(cmd.get("device") or "").strip()[:120]
         if source == "system":
             try:
-                source_info = await start_system_audio()
+                source_info = await start_system_audio(requested_device)
             except (SystemAudioError, OSError) as exc:
                 if session is not None:
                     if created_session:
@@ -1160,9 +1223,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         elif source == "system-client":
             # 音声はクライアントがバイナリで送ってくる。こちらは開くものが
             # 無いので、表示用のデバイス名を受け取って返すだけ。
-            # null / 非文字列でも落ちないようにし、長さも切る（そのまま
-            # ログとステータス表示に出るだけの値なので短くて構わない）。
-            client_device = str(cmd.get("device") or "").strip()[:120]
+            client_device = requested_device
             if client_device:
                 source_info["device"] = client_device
             print(
@@ -1170,6 +1231,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 f"{client_device or 'デバイス名なし'}"
             )
 
+        system_device_label = str(source_info.get("device", "") or "")
         if source in SYSTEM_SOURCES and config.transcribe_auto_stop_sec > 0:
             silence_tracker = SilenceTracker(
                 config.transcribe_auto_stop_sec,

@@ -64,6 +64,23 @@ def test_silence_tracker_resets_only_for_audible_audio():
     assert tracker.expired(550.0)
 
 
+def test_silence_from_the_start_is_reported_once_the_warning_delay_passes():
+    # 取得先を間違えた録音は last_audible_at が初期値のまま動かない。
+    tracker = SilenceTracker(timeout_sec=300, audible_rms=0.0001, now=100)
+    tracker.feed(np.zeros(1600, dtype=np.float32), now=110)
+    assert not tracker.silent_since_start(now=119.9, warn_sec=20)
+    assert tracker.silent_since_start(now=120.0, warn_sec=20)
+    assert not tracker.silent_since_start(now=999.0, warn_sec=0)  # 0で無効
+
+
+def test_audio_that_arrived_once_never_triggers_the_start_warning():
+    # 鳴っていない動画を流しているだけ、という正常な使い方まで警告しない。
+    tracker = SilenceTracker(timeout_sec=300, audible_rms=0.0001, now=100)
+    tracker.feed(np.full(1600, 0.001, dtype=np.float32), now=105)
+    assert tracker.heard_any
+    assert not tracker.silent_since_start(now=500.0, warn_sec=20)
+
+
 def test_embedded_video_artifact_is_removed_without_losing_real_text():
     strong = SpeechEvidence(8.0, 0.02, 0.2, 0.6)
     text, removed = filter_contextual_artifacts(

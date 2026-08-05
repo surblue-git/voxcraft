@@ -549,6 +549,12 @@ async function fetchHealth(wsUrl) {
   const res = await (0, import_obsidian.requestUrl)({ url: `${httpBase(wsUrl)}/health`, method: "GET" });
   return res.json;
 }
+async function fetchAudioDevices(wsUrl) {
+  var _a, _b, _c;
+  const res = await (0, import_obsidian.requestUrl)({ url: `${httpBase(wsUrl)}/audio-devices`, method: "GET" });
+  const body = (_a = res.json) != null ? _a : {};
+  return { devices: (_b = body.devices) != null ? _b : [], error: (_c = body.error) != null ? _c : "" };
+}
 function errorDetail(res) {
   var _a;
   const detail = (_a = res.json) == null ? void 0 : _a.detail;
@@ -1040,6 +1046,7 @@ var DEFAULT_SETTINGS = {
   endpoints: [{ label: "\u3053\u306EPC", url: "ws://localhost:8760/ws" }],
   selection: AUTO,
   dictionarySetByEndpoint: {},
+  systemDeviceByEndpoint: {},
   stripJaAlnumSpace: true,
   symbolDictation: true,
   enableCommands: true,
@@ -1063,6 +1070,9 @@ function migrateSettings(s) {
     s.selection = AUTO;
   if (!s.dictionarySetByEndpoint || typeof s.dictionarySetByEndpoint !== "object") {
     s.dictionarySetByEndpoint = {};
+  }
+  if (!s.systemDeviceByEndpoint || typeof s.systemDeviceByEndpoint !== "object") {
+    s.systemDeviceByEndpoint = {};
   }
   if (s.insertAt !== "cursor")
     s.insertAt = "anchor";
@@ -1105,13 +1115,63 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
+  // コマンド「PC音声の文字起こし」で、サーバー機のどこから音を取るか。
+  // 既定は Windows の「既定の出力」のループバックだが、既定がモニターのまま
+  // ヘッドホンで聴いている、といった食い違いだと無音を録り続けることになる。
+  // 一覧はサーバー機のものなので、Android から設定しても同じように効く。
+  displayServerSystemInput(containerEl) {
+    containerEl.createEl("h3", { text: "PC\u97F3\u58F0\uFF08\u30B5\u30FC\u30D0\u30FC\u6A5F\uFF09" });
+    containerEl.createEl("p", {
+      text: "\u30B3\u30DE\u30F3\u30C9\u300CPC\u97F3\u58F0\u306E\u6587\u5B57\u8D77\u3053\u3057\u3010\u30B5\u30FC\u30D0\u30FC\u6A5F\u3011\u300D\u3067\u4F7F\u3046\u3001\u30B5\u30FC\u30D0\u30FC\u6A5F\u5074\u306E\u5165\u529B\u5148\u3002\u300C\u65E2\u5B9A\u306E\u51FA\u529B\u300D\u306E\u307E\u307E\u306B\u3057\u3066\u304A\u304F\u3068\u3001Windows\u306E\u51FA\u529B\u5148\u306E\u5207\u308A\u66FF\u3048\u306B\u8FFD\u5F93\u3059\u308B\uFF08\u30D8\u30C3\u30C9\u30DB\u30F3\u3092\u7E4B\u3044\u3060\u3089\u305D\u3061\u3089\u3001\u5916\u3057\u305F\u3089\u30B9\u30D4\u30FC\u30AB\u30FC\uFF09\u3002\uFF3B\u30EB\u30FC\u30D7\u30D0\u30C3\u30AF\uFF3D\u306F\u518D\u751F\u97F3\u3092\u305D\u306E\u307E\u307E\u53D6\u308B\uFF08\u4F55\u3082\u9CF4\u3063\u3066\u3044\u306A\u3051\u308C\u3070\u7121\u97F3\uFF09\u3002\u63A5\u7D9A\u5148\u3054\u3068\u306B\u4FDD\u5B58\u3055\u308C\u308B\u3002",
+      cls: "setting-item-description"
+    });
+    for (const endpoint of this.plugin.settings.endpoints) {
+      const url = endpoint.url.trim();
+      if (!url)
+        continue;
+      const saved = this.plugin.systemDeviceFor(url);
+      const setting = new import_obsidian3.Setting(containerEl).setName(`\u5165\u529B\u5148 \u2014 ${endpoint.label || url}`).setDesc("\u30B5\u30FC\u30D0\u30FC\u304B\u3089\u30C7\u30D0\u30A4\u30B9\u4E00\u89A7\u3092\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026");
+      setting.addDropdown((d) => {
+        d.addOption("", "\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026");
+        d.selectEl.disabled = true;
+        void fetchAudioDevices(url).then(({ devices, error }) => {
+          d.selectEl.empty();
+          const fallback = devices.find((x) => x.isDefault);
+          d.addOption(
+            "",
+            fallback ? `\u65E2\u5B9A\u306E\u51FA\u529B\uFF08\u4ECA\u306F ${fallback.name}\uFF09` : "\u65E2\u5B9A\u306E\u51FA\u529B"
+          );
+          for (const dev of devices) {
+            const kind = dev.kind === "loopback" ? "\u518D\u751F\u97F3" : "\u5165\u529B";
+            d.addOption(dev.name, `\uFF3B${kind}\uFF3D${dev.name}`);
+          }
+          if (saved && !devices.some((x) => x.name === saved)) {
+            d.addOption(saved, `${saved}\uFF08\u898B\u3064\u304B\u308A\u307E\u305B\u3093\uFF09`);
+          }
+          d.setValue(saved);
+          d.selectEl.disabled = false;
+          setting.setDesc(
+            error ? `\u26A0 ${error}` : devices.length === 0 ? "\u53D6\u308A\u8FBC\u3081\u308B\u5165\u529B\u5148\u304C\u3042\u308A\u307E\u305B\u3093\uFF08Windows\u4EE5\u5916\u306E\u30B5\u30FC\u30D0\u30FC\u6A5F\u306A\u3069\uFF09\u3002" : "\u9332\u97F3\u4E2D\u306E\u5909\u66F4\u306F\u6B21\u56DE\u304B\u3089\u9069\u7528\u3055\u308C\u308B\u3002"
+          );
+          d.onChange(async (v) => {
+            await this.plugin.setSystemDeviceFor(url, v);
+          });
+        }).catch((error) => {
+          d.selectEl.disabled = true;
+          setting.setDesc(
+            `\u30C7\u30D0\u30A4\u30B9\u4E00\u89A7\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093: ${error instanceof Error ? error.message : error}`
+          );
+        });
+      });
+    }
+  }
   // PC音声を「この端末で取って送る」ための入力デバイス選択。
   // Windows のステレオミキサー（既定では無効なので mmsys.cpl で有効化が要る）や
   // 仮想オーディオケーブルを選ぶと、再生音が普通の録音デバイスとして取れる。
   displaySystemInput(containerEl) {
     containerEl.createEl("h3", { text: "PC\u97F3\u58F0\uFF08\u3053\u306E\u7AEF\u672B\uFF09" });
     containerEl.createEl("p", {
-      text: "\u30B3\u30DE\u30F3\u30C9\u300C\u3053\u306E\u7AEF\u672B\u306EPC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u300D\u3067\u4F7F\u3046\u5165\u529B\u30C7\u30D0\u30A4\u30B9\u3002Windows\u306E\u300C\u30B9\u30C6\u30EC\u30AA \u30DF\u30AD\u30B5\u30FC\u300D\uFF08Win+R \u2192 mmsys.cpl \u2192 \u9332\u97F3\u30BF\u30D6 \u2192 \u53F3\u30AF\u30EA\u30C3\u30AF\u3067\u300C\u7121\u52B9\u306A\u30C7\u30D0\u30A4\u30B9\u306E\u8868\u793A\u300D\u2192 \u6709\u52B9\u5316\uFF09\u3092\u9078\u3076\u3068\u3001\u3053\u306E\u7AEF\u672B\u306E\u518D\u751F\u97F3\u3092\u305D\u306E\u307E\u307E\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\u3078\u9001\u308C\u308B\u3002\u30B5\u30FC\u30D0\u30FC\u6A5F\u304C\u5225\u306EPC\u3067\u3082\u3001\u8F9E\u66F8\u3068\u9332\u97F3\u3092\u30B5\u30FC\u30D0\u30FC\u5074\u306B\u4E00\u672C\u5316\u3057\u305F\u307E\u307E\u4F7F\u3048\u308B\u3002",
+      text: "\u30B3\u30DE\u30F3\u30C9\u300CPC\u97F3\u58F0\u306E\u6587\u5B57\u8D77\u3053\u3057\u3010\u3053\u306E\u7AEF\u672B\u3011\u300D\u3067\u4F7F\u3046\u5165\u529B\u30C7\u30D0\u30A4\u30B9\u3002Windows\u306E\u300C\u30B9\u30C6\u30EC\u30AA \u30DF\u30AD\u30B5\u30FC\u300D\uFF08Win+R \u2192 mmsys.cpl \u2192 \u9332\u97F3\u30BF\u30D6 \u2192 \u53F3\u30AF\u30EA\u30C3\u30AF\u3067\u300C\u7121\u52B9\u306A\u30C7\u30D0\u30A4\u30B9\u306E\u8868\u793A\u300D\u2192 \u6709\u52B9\u5316\uFF09\u3092\u9078\u3076\u3068\u3001\u3053\u306E\u7AEF\u672B\u306E\u518D\u751F\u97F3\u3092\u305D\u306E\u307E\u307E\u8A8D\u8B58\u30B5\u30FC\u30D0\u30FC\u3078\u9001\u308C\u308B\u3002\u30B5\u30FC\u30D0\u30FC\u6A5F\u304C\u5225\u306EPC\u3067\u3082\u3001\u8F9E\u66F8\u3068\u9332\u97F3\u3092\u30B5\u30FC\u30D0\u30FC\u5074\u306B\u4E00\u672C\u5316\u3057\u305F\u307E\u307E\u4F7F\u3048\u308B\u3002",
       cls: "setting-item-description"
     });
     containerEl.createEl("p", {
@@ -1186,9 +1246,15 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
           if (this.plugin.settings.selection === prev) {
             this.plugin.settings.selection = v.trim();
           }
-          if (prev && prev !== v.trim() && this.plugin.settings.dictionarySetByEndpoint[prev]) {
-            this.plugin.settings.dictionarySetByEndpoint[v.trim()] = this.plugin.settings.dictionarySetByEndpoint[prev];
-            delete this.plugin.settings.dictionarySetByEndpoint[prev];
+          if (prev && prev !== v.trim()) {
+            if (this.plugin.settings.dictionarySetByEndpoint[prev]) {
+              this.plugin.settings.dictionarySetByEndpoint[v.trim()] = this.plugin.settings.dictionarySetByEndpoint[prev];
+              delete this.plugin.settings.dictionarySetByEndpoint[prev];
+            }
+            if (this.plugin.settings.systemDeviceByEndpoint[prev]) {
+              this.plugin.settings.systemDeviceByEndpoint[v.trim()] = this.plugin.settings.systemDeviceByEndpoint[prev];
+              delete this.plugin.settings.systemDeviceByEndpoint[prev];
+            }
           }
           await this.plugin.saveSettings();
         });
@@ -1201,6 +1267,7 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
             this.plugin.settings.selection = AUTO;
           }
           delete this.plugin.settings.dictionarySetByEndpoint[removed];
+          delete this.plugin.settings.systemDeviceByEndpoint[removed];
           await this.plugin.saveSettings();
           this.display();
         })
@@ -1214,6 +1281,7 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.display();
       })
     );
+    this.displayServerSystemInput(containerEl);
     if (!import_obsidian3.Platform.isMobile)
       this.displaySystemInput(containerEl);
     containerEl.createEl("h3", { text: "\u30B5\u30FC\u30D0\u30FC\u306E\u72B6\u614B" });
@@ -1861,7 +1929,7 @@ var AsrSocket = class {
     };
   }
   dispatch(msg) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C, _D, _E;
     switch (msg.type) {
       case "ready":
         (_b = (_a = this.handlers).onReady) == null ? void 0 : _b.call(_a);
@@ -1915,10 +1983,13 @@ var AsrSocket = class {
         if (typeof msg.level === "number")
           (_A = (_z = this.handlers).onLevel) == null ? void 0 : _A.call(_z, msg.level);
         break;
+      case "warning":
+        (_C = (_B = this.handlers).onWarning) == null ? void 0 : _C.call(_B, msg.message || "", msg.code || "");
+        break;
       case "error":
         if (msg.fatal)
           this.rejectStart(msg.message || "PC\u97F3\u58F0\u5165\u529B\u3092\u958B\u59CB\u3067\u304D\u307E\u305B\u3093");
-        (_C = (_B = this.handlers).onError) == null ? void 0 : _C.call(_B, msg.message || "unknown error", Boolean(msg.fatal));
+        (_E = (_D = this.handlers).onError) == null ? void 0 : _E.call(_D, msg.message || "unknown error", Boolean(msg.fatal));
         break;
     }
   }
@@ -2389,6 +2460,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     super(...arguments);
     this.socket = null;
     this.recorder = null;
+    // サーバーから「開始から一度も音が来ていない」と言われた状態。ステータスに
+    // 出し続けるための旗で、実際にチャンクが届いたら下ろす。
+    this.noAudioWarned = false;
     this.recording = false;
     this.starting = false;
     this.stopping = false;
@@ -2500,7 +2574,10 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     });
     this.addCommand({
       id: "toggle-system-transcribe",
-      name: "PC\u97F3\u58F0\u306E\u6587\u5B57\u8D77\u3053\u3057\u3092\u958B\u59CB/\u505C\u6B62",
+      // コマンド名にどちらのPCの音かを必ず入れる。「PC音声の文字起こし」だけだと
+      // 別PCから叩いたときにサーバー機の音が録れることに気づけない。
+      // id は変えない（ユーザーが割り当てたホットキーが外れるため）。
+      name: "PC\u97F3\u58F0\u306E\u6587\u5B57\u8D77\u3053\u3057\u3010\u30B5\u30FC\u30D0\u30FC\u6A5F\u3011\u3092\u958B\u59CB/\u505C\u6B62",
       icon: "monitor-speaker",
       checkCallback: (checking) => {
         if (import_obsidian7.Platform.isMobile)
@@ -2516,7 +2593,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     });
     this.addCommand({
       id: "toggle-client-system-transcribe",
-      name: "\u3053\u306E\u7AEF\u672B\u306EPC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\uFF08\u958B\u59CB/\u505C\u6B62\uFF09",
+      name: "PC\u97F3\u58F0\u306E\u6587\u5B57\u8D77\u3053\u3057\u3010\u3053\u306E\u7AEF\u672B\u3011\u3092\u958B\u59CB/\u505C\u6B62",
       icon: "speaker",
       checkCallback: (checking) => {
         if (import_obsidian7.Platform.isMobile)
@@ -2634,6 +2711,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.mode = mode;
     this.source = source;
     this.sourceDevice = "";
+    this.noAudioWarned = false;
     this.autoStopSec = 0;
     if (mode === "transcribe") {
       this.spans = [];
@@ -2661,12 +2739,13 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     try {
       const connectedUrl = this.socket.activeUrl;
       const dictionarySetId = connectedUrl ? this.dictionarySetIdFor(connectedUrl) : "default";
+      const device = source === "system" ? (connectedUrl ? this.systemDeviceFor(connectedUrl) : "") || void 0 : clientInput == null ? void 0 : clientInput.label;
       const started = await this.socket.sendStart(
         this.settings.stripJaAlnumSpace,
         this.settings.symbolDictation,
         mode,
         source,
-        clientInput == null ? void 0 : clientInput.label,
+        device,
         dictionarySetId
       );
       this.sourceDevice = (_a = started.device) != null ? _a : "";
@@ -2770,7 +2849,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     const saved = loadSystemInput(this.app);
     if (!saved) {
       new import_obsidian7.Notice(
-        "VoxCraft: PC\u97F3\u58F0\u306E\u5165\u529B\u30C7\u30D0\u30A4\u30B9\u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A \u2192 VoxCraft \u2192\u300CPC\u97F3\u58F0\uFF08\u3053\u306E\u7AEF\u672B\uFF09\u300D\u3067\u300C\u30B9\u30C6\u30EC\u30AA \u30DF\u30AD\u30B5\u30FC\u300D\u7B49\u3092\u9078\u3093\u3067\u304F\u3060\u3055\u3044\u3002"
+        "VoxCraft: \u3053\u306E\u7AEF\u672B\u306EPC\u97F3\u58F0\u306E\u5165\u529B\u30C7\u30D0\u30A4\u30B9\u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A \u2192 VoxCraft \u2192\u300CPC\u97F3\u58F0\uFF08\u3053\u306E\u7AEF\u672B\uFF09\u300D\u3067\u300C\u30B9\u30C6\u30EC\u30AA \u30DF\u30AD\u30B5\u30FC\u300D\u7B49\u3092\u9078\u3093\u3067\u304F\u3060\u3055\u3044\u3002\u30B5\u30FC\u30D0\u30FC\u6A5F\u306E\u97F3\u3092\u9332\u308A\u305F\u3044\u5834\u5408\u306F\u3010\u30B5\u30FC\u30D0\u30FC\u6A5F\u3011\u306E\u65B9\u306E\u30B3\u30DE\u30F3\u30C9\u3092\u4F7F\u3063\u3066\u304F\u3060\u3055\u3044\u3002"
       );
       return null;
     }
@@ -2844,6 +2923,10 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       },
       onChunk: (text, msg) => {
         this.transcribing = false;
+        if (this.noAudioWarned) {
+          this.noAudioWarned = false;
+          this.setStatus(this.idleStatus());
+        }
         this.handleChunk(text, msg);
       },
       onRefinement: (text, msg) => this.handleTranscribeRefinement(text, msg),
@@ -2856,6 +2939,15 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         new import_obsidian7.Notice(`VoxCraft \u30B5\u30FC\u30D0\u30FC\u30A8\u30E9\u30FC: ${m}`);
         if (fatal && isSystemSource(this.source))
           this.stopRecording();
+      },
+      onWarning: (m, code) => {
+        if (!this.recording || !m)
+          return;
+        new import_obsidian7.Notice(`VoxCraft: ${m}`, 15e3);
+        if (code === "no_audio") {
+          this.noAudioWarned = true;
+          this.setStatus(this.idleStatus());
+        }
       },
       onClose: () => this.handleSocketClose()
     };
@@ -3547,7 +3639,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     const dictionary = this.activeDictionarySetName ? ` / \u8F9E\u66F8: ${this.activeDictionarySetName}` : "";
     if (isSystemSource(this.source)) {
       const where = this.source === "system-client" ? "\u3053\u306E\u7AEF\u672B" : "\u30B5\u30FC\u30D0\u30FC\u6A5F";
-      return this.sourceDevice ? `\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D\uFF08${where}: ${this.sourceDevice}\uFF09${dictionary}` : `\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D\uFF08${where}\uFF09${dictionary}`;
+      const head = this.noAudioWarned ? "\u26A0 \u97F3\u304C\u6765\u3066\u3044\u307E\u305B\u3093" : "\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D";
+      return this.sourceDevice ? `${head}\uFF08${where}: ${this.sourceDevice}\uFF09${dictionary}` : `${head}\uFF08${where}\uFF09${dictionary}`;
     }
     return this.mode === "transcribe" ? `\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D${dictionary}` : `\u25CF \u9332\u97F3\u4E2D${dictionary}`;
   }
@@ -4092,6 +4185,23 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
   }
   dictionarySetIdFor(url) {
     return this.settings.dictionarySetByEndpoint[url.trim()] || "default";
+  }
+  // サーバー機のどの入力先から PC音声を取るか。空ならサーバーの既定の出力。
+  systemDeviceFor(url) {
+    return this.settings.systemDeviceByEndpoint[url.trim()] || "";
+  }
+  async setSystemDeviceFor(url, device) {
+    const key = url.trim();
+    if (!key)
+      return;
+    if (device)
+      this.settings.systemDeviceByEndpoint[key] = device;
+    else
+      delete this.settings.systemDeviceByEndpoint[key];
+    await this.saveSettings();
+    new import_obsidian7.Notice(
+      `VoxCraft: PC\u97F3\u58F0\u306E\u5165\u529B\u5148\u3092\u300C${device || "\u65E2\u5B9A\u306E\u51FA\u529B"}\u300D\u306B\u3057\u307E\u3057\u305F` + (this.recording ? "\uFF08\u73FE\u5728\u306E\u9332\u97F3\u306B\u306F\u5F71\u97FF\u305B\u305A\u3001\u6B21\u56DE\u304B\u3089\u9069\u7528\uFF09" : "")
+    );
   }
   async setDictionarySetFor(url, setId) {
     const key = url.trim();

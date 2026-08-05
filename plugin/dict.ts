@@ -35,6 +35,21 @@ export async function fetchHealth(wsUrl: string): Promise<HealthData> {
     return res.json as HealthData;
 }
 
+// サーバー機で PC音声として取り込める入力先（/audio-devices の応答と対）。
+export interface ServerAudioDevice {
+    name: string;
+    kind: "loopback" | "input";
+    isDefault: boolean;
+}
+
+export async function fetchAudioDevices(
+    wsUrl: string
+): Promise<{ devices: ServerAudioDevice[]; error: string }> {
+    const res = await requestUrl({ url: `${httpBase(wsUrl)}/audio-devices`, method: "GET" });
+    const body = (res.json ?? {}) as { devices?: ServerAudioDevice[]; error?: string };
+    return { devices: body.devices ?? [], error: body.error ?? "" };
+}
+
 // /reconvert の応答（server/reconvert.py の戻り値と対）。
 export interface ReconvertPayload {
     reading: string;
