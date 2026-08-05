@@ -196,6 +196,11 @@
       "enabled": true
     },
     {
+      "observed": "セブン&アイツ",
+      "output": "セブン&アイ・ホールディングス",
+      "enabled": true
+    },
+    {
       "observed": "面積事項",
       "output": "免責事項",
       "enabled": true
@@ -239,6 +244,71 @@
       "observed": "NTTドコンフィナンシャルブループ",
       "output": "NTTドコモ・フィナンシャルグループ",
       "enabled": true
+    },
+    {
+      "observed": "SBOAIジャパン",
+      "output": "SB OAI Japan",
+      "enabled": true
+    },
+    {
+      "observed": "コンシファ",
+      "output": "コンシューマー",
+      "enabled": true
+    },
+    {
+      "observed": "ケリリア",
+      "output": "KDDI",
+      "enabled": true
+    },
+    {
+      "observed": "ADDI",
+      "output": "KDDI",
+      "enabled": true
+    },
+    {
+      "observed": "アハモ",
+      "output": "ahamo",
+      "enabled": true
+    },
+    {
+      "observed": "フィジカル栄養",
+      "output": "フィジカルAI",
+      "enabled": true
+    },
+    {
+      "observed": "8分数",
+      "output": "HAPS",
+      "enabled": true
+    },
+    {
+      "observed": "ウェルビーング",
+      "output": "ウェルビーイング",
+      "enabled": true
+    },
+    {
+      "observed": "市販機",
+      "output": "四半期",
+      "enabled": true
+    },
+    {
+      "observed": "紙機",
+      "output": "上期",
+      "enabled": true
+    },
+    {
+      "observed": "しゅうゆうけん",
+      "output": "周遊券",
+      "enabled": true
+    },
+    {
+      "observed": "習有権",
+      "output": "周遊券",
+      "enabled": true
+    },
+    {
+      "observed": "収有権",
+      "output": "周遊券",
+      "enabled": true
     }
   ],
   "symbols": {
@@ -252,9 +322,13 @@
     "かぎかっことじ": "」",
     "なかぐろ": "・",
     "中黒": "・",
-    "はてなまーく": "？",
-    "ハテナマーク": "？",
-    "てんてんてん": "……"
+    "はてなまーく": "?",
+    "ハテナマーク": "?",
+    "てんてんてん": "……",
+    "かっこ": "（",
+    "かっことじ": "）",
+    "全角果てな": "？",
+    "全角はてな": "？"
   },
   "hotwords": [],
   "hallucinations": [],

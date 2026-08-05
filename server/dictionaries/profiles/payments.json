@@ -96,6 +96,16 @@
       "enabled": true
     },
     {
+      "observed": "ペーペー",
+      "output": "PayPay",
+      "enabled": true
+    },
+    {
+      "observed": "ペペ",
+      "output": "PayPay",
+      "enabled": true
+    },
+    {
       "observed": "ペーペーカード",
       "output": "PayPayカード",
       "enabled": true
@@ -138,6 +148,71 @@
     {
       "observed": "アメリカンエンチプレス",
       "output": "アメリカン・エキスプレス",
+      "enabled": true
+    },
+    {
+      "observed": "現役",
+      "output": "減益",
+      "enabled": true
+    },
+    {
+      "observed": "県役",
+      "output": "減益",
+      "enabled": true
+    },
+    {
+      "observed": "D&Dフィナンシャル生命",
+      "output": "T&Dフィナンシャル生命",
+      "enabled": true
+    },
+    {
+      "observed": "SPLINX",
+      "output": "SP.LINKS",
+      "enabled": true
+    },
+    {
+      "observed": "SBリンクス",
+      "output": "SP.LINKS",
+      "enabled": true
+    },
+    {
+      "observed": "再ゲームス",
+      "output": "Cygames",
+      "enabled": true
+    },
+    {
+      "observed": "ここの端末",
+      "output": "個々の端末",
+      "enabled": true
+    },
+    {
+      "observed": "予診",
+      "output": "与信",
+      "enabled": true
+    },
+    {
+      "observed": "余震",
+      "output": "与信",
+      "enabled": true
+    },
+    {
+      "observed": "よしん",
+      "output": "与信",
+      "enabled": true
+    },
+    {
+      "observed": "再建",
+      "output": "債権",
+      "enabled": true
+    },
+    {
+      "observed": "さいけん",
+      "output": "債権",
+      "enabled": true
+    },
+    {
+      "observed": "バース",
+      "output": "BaaS",
       "enabled": true
     }
   ],
