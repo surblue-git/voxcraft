@@ -214,6 +214,21 @@
       "observed": "バース",
       "output": "BaaS",
       "enabled": true
+    },
+    {
+      "observed": "オリグ",
+      "output": "Olive",
+      "enabled": true
+    },
+    {
+      "observed": "オリーグ",
+      "output": "Olive",
+      "enabled": true
+    },
+    {
+      "observed": "オリーブ",
+      "output": "Olive",
+      "enabled": true
     }
   ],
   "symbols": {},
