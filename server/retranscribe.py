@@ -175,6 +175,7 @@ def transcribe_chunks(
     dictionary,
     paragraphs: bool,
     recover_gaps: bool = True,
+    mark_recovered: bool = True,
     progress: bool = True,
 ) -> tuple[str, Stats]:
     """チャンク列を、実運用と同じ後処理を通して本文に組み立てる。
@@ -219,7 +220,15 @@ def transcribe_chunks(
                 transcriber, audio, prev_end_samples, chunk.start, dictionary=dictionary
             )
             if recovered:
-                body.append(recovered)
+                # 復旧分は本来 VAD が「発話なし」と判断した区間で、他より確度が低い。
+                # 引用する前に音を確かめられるよう、時刻つきで印を残す（既定ON）。
+                # ⟨未認識⟩ と同じ記法にしてあるので、まとめて検索・除去できる。
+                body.append(
+                    f"⟨復旧 {fmt_time(prev_end_samples / config.sample_rate)}–"
+                    f"{fmt_time(start)} {recovered}⟩"
+                    if mark_recovered
+                    else recovered
+                )
                 stats.recovered += 1
                 stats.recovered_sec += gap_samples / config.sample_rate
                 last_end = start  # 埋まったので ⟨未認識⟩ は出さない
@@ -311,6 +320,8 @@ def main() -> int:
     ap.add_argument("--no-paragraphs", action="store_true", help="段落分けをしない")
     ap.add_argument("--no-recover", action="store_true",
                     help="欠落区間の自動再認識をしない（実運用は既定で行う）")
+    ap.add_argument("--no-mark-recovered", action="store_true",
+                    help="復旧した区間に ⟨復旧 …⟩ の印を付けない")
     ap.add_argument("--dictionary-set", default="default", help="使う辞書セットID")
     args = ap.parse_args()
 
@@ -363,6 +374,7 @@ def main() -> int:
             dictionary=dictionary,
             paragraphs=not args.no_paragraphs,
             recover_gaps=not args.no_recover,
+            mark_recovered=not args.no_mark_recovered,
         )
         report(label, text, stats, time.time() - t0)
         results.append((label, text, stats))
