@@ -23,13 +23,15 @@ Phase 1A（永続形式と互換移行）、Phase 1B（セッション固定ス�
 - `plugin/dict.ts`: カタログ／登録API、セット選択・クイック登録・旧一覧編集UI。
 - `plugin/settings.ts`: URL別セット選択の永続化と設定画面。
 - `plugin/main.ts`: 各操作へのセット伝播、適用中表示、登録フロー。
-- `plugin/ws.ts`: `started` 辞書メタデータ、`farMic` の往復。
+- `plugin/ws.ts`: `started` 辞書メタデータ、`lowLatency` の往復。
 - `server/retranscribe.py`: 保存済み録音から本文を作り直す（`--compare` で連結条件の前後比較）。
 - `.github/workflows/release.yml`: タグをビルドしBRAT用Release資産を作る。
 
-遠いマイク（0.11.0）は**連結だけ**を変える。VADの切り方に触れると口述と近接マイクの
-取材まで挙動が動くので、`_build_chunker` は据え置き、`_join_profile` で分岐している。
-根拠の実測値は `server/config.py` の `far_mic_join_sec` の注記にある。
+文字起こしの連結は 0.12.0 で長いほう（10/6/4）が既定になった。短い連結が有利になる
+録音は実測で見つからず、近接マイクの取材でも本文 -0.2% で 2.5倍速だったため。
+低遅延が要るときだけコマンドで `lowLatency` を送る（`_join_profile`）。VADの切り方
+（`_build_chunker`）には触れていない。根拠は `server/config.py` の
+`transcribe_join_sec` の注記にある。
 
 ## API・プロトコル
 

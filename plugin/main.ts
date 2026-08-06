@@ -175,8 +175,8 @@ export default class VoxCraftPlugin extends Plugin {
     private mode: AsrMode = "dictation";
     private source: AsrSource = "microphone";
     private sourceDevice = "";
-    // サーバーが遠いマイク用の連結を実際に適用したか（started の応答をそのまま持つ）。
-    private farMicActive = false;
+    // サーバーが低遅延の連結を実際に適用したか（started の応答をそのまま持つ）。
+    private lowLatencyActive = false;
     private autoStopSec = 0;
     private activeDictionarySetId = "";
     private activeDictionarySetName = "";
@@ -244,11 +244,23 @@ export default class VoxCraftPlugin extends Plugin {
         });
         this.addCommand({
             id: "toggle-transcribe",
-            name: "文字起こし（動画・会議）の開始/停止",
+            name: "文字起こし（動画・会議・会見）の開始/停止",
             icon: "file-audio",
             callback: () => {
                 if (this.recording) this.stopRecording();
                 else void this.startRecording("transcribe");
+            },
+        });
+        this.addCommand({
+            // 目の前の相手と話していて、テキストが早く出てほしいときだけ。
+            // 認識に回す単位が短くなるぶん、定型句の幻覚が出やすくなる
+            // （config.nearby_join_sec の注記を参照）。会議・会見・動画には使わない。
+            id: "toggle-transcribe-nearby",
+            name: "文字起こし【対面インタビュー・低遅延】の開始/停止",
+            icon: "users",
+            callback: () => {
+                if (this.recording) this.stopRecording();
+                else void this.startRecording("transcribe", "microphone", true);
             },
         });
         this.addCommand({
@@ -365,7 +377,11 @@ export default class VoxCraftPlugin extends Plugin {
 
     private async startRecording(
         mode: AsrMode = "dictation",
-        source: AsrSource = "microphone"
+        source: AsrSource = "microphone",
+        // 対面インタビュー用。認識に回す単位を短くして表示を早める代わりに、
+        // 定型句の幻覚が出やすくなる。既定（長い連結）で不利になる録音は
+        // 実測で見つからなかったので、こちらは明示的に選んだときだけ。
+        lowLatency = false
     ): Promise<void> {
         if (this.recording || this.starting || this.stopping) return;
         const cm = this.getActiveCm();
@@ -397,7 +413,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.mode = mode;
         this.source = source;
         this.sourceDevice = "";
-        this.farMicActive = false;
+        this.lowLatencyActive = false;
         this.noAudioWarned = false;
         this.autoStopSec = 0;
         if (mode === "transcribe") {
@@ -444,10 +460,10 @@ export default class VoxCraftPlugin extends Plugin {
                 source,
                 device,
                 dictionarySetId,
-                this.settings.farMic
+                lowLatency
             );
             this.sourceDevice = started.device ?? "";
-            this.farMicActive = started.farMic;
+            this.lowLatencyActive = started.lowLatency;
             this.autoStopSec = started.autoStopSec ?? 0;
             this.activeDictionarySetId = started.dictionarySetId;
             this.activeDictionarySetName = started.dictionarySetName;
@@ -714,8 +730,9 @@ export default class VoxCraftPlugin extends Plugin {
                 await socket.connect();
                 const dictionarySetId = this.activeDictionarySetId || "default";
                 const started = await socket.sendResume(
+                    // 再接続でも連結器を作り直すので、開始時と同じ条件を渡す。
                     session, stripSpace, symbols, source, device, dictionarySetId,
-                    this.settings.farMic
+                    this.lowLatencyActive
                 );
                 if (!this.recording || this.stopping) {
                     // 再接続の最中にユーザーが停止操作をしていた。この接続は使わない。
@@ -1450,9 +1467,9 @@ export default class VoxCraftPlugin extends Plugin {
                 : `${head}（${where}）${dictionary}`;
         }
         if (this.mode === "transcribe") {
-            // 遠いマイクは表示が数秒遅れる。設定が効いていることを画面で見えるようにする
-            // （「反応が遅い」と「設定を入れ忘れた」を取り違えないため）。
-            return `● 文字起こし中${this.farMicActive ? "（遠いマイク）" : ""}${dictionary}`;
+            // 既定は表示が8秒ほどのまとまりで出る。低遅延で始めたときだけ明示して、
+            // 「反応が遅い」と「コマンドを間違えた」を取り違えないようにする。
+            return `● 文字起こし中${this.lowLatencyActive ? "（低遅延）" : ""}${dictionary}`;
         }
         return `● 録音中${dictionary}`;
     }

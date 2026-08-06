@@ -13,8 +13,8 @@ export function isSystemSource(source: AsrSource): boolean {
 
 export interface StartResult {
     source: AsrSource;
-    // サーバーが実際に遠いマイク用の連結を適用したか（設定が届かない事故に気づくため）。
-    farMic: boolean;
+    // サーバーが実際に低遅延の連結を適用したか（指定が届かない事故に気づくため）。
+    lowLatency: boolean;
     device?: string;
     inputSampleRate?: number;
     channels?: number;
@@ -56,7 +56,7 @@ export interface ServerMessage {
     dropped?: string[]; // サーバー側フィルタで捨てたテキスト（無言で消さないための通知）
     pause?: number; // 前チャンクの発話終わりからの無音（秒）。「息継ぎで読点」の判断材料
     source?: AsrSource;
-    farMic?: boolean;
+    lowLatency?: boolean;
     device?: string;
     inputSampleRate?: number;
     channels?: number;
@@ -221,7 +221,7 @@ export class AsrSocket {
                     this.pendingStart = null;
                     pending.resolve({
                         source: msg.source ?? "microphone",
-                        farMic: Boolean(msg.farMic),
+                        lowLatency: Boolean(msg.lowLatency),
                         device: msg.device,
                         inputSampleRate: msg.inputSampleRate,
                         channels: msg.channels,
@@ -283,7 +283,7 @@ export class AsrSocket {
         source: AsrSource = "microphone",
         device?: string,
         dictionarySetId = "default",
-        farMic = false
+        lowLatency = false
     ): Promise<StartResult> {
         if (!this.connected) return Promise.reject(new Error("サーバーに接続されていません"));
         this.rejectStart("別の開始要求に置き換えられました");
@@ -295,10 +295,10 @@ export class AsrSocket {
             }, 15000);
             this.pendingStart = { resolve, reject, timer };
             // device は system-client のときだけ意味を持つ（表示名をそのまま返す）。
-            // farMic はマイク入力の文字起こしにだけ効く（サーバー側で判定する）。
+            // lowLatency はマイク入力の文字起こしにだけ効く（サーバー側で判定する）。
             this.send({
                 type: "start", stripSpace, symbols, mode, source, device,
-                dictionarySetId, farMic,
+                dictionarySetId, lowLatency,
             });
         });
     }
@@ -313,7 +313,7 @@ export class AsrSocket {
         source: AsrSource = "microphone",
         device?: string,
         dictionarySetId = "default",
-        farMic = false
+        lowLatency = false
     ): Promise<StartResult> {
         if (!this.connected) return Promise.reject(new Error("サーバーに接続されていません"));
         this.rejectStart("別の開始要求に置き換えられました");
@@ -324,10 +324,10 @@ export class AsrSocket {
                 reject(new Error("録音の再開がタイムアウトしました"));
             }, 15000);
             this.pendingStart = { resolve, reject, timer };
-            // 再接続でも連結器を作り直すので、farMic は毎回送る必要がある。
+            // 再接続でも連結器を作り直すので、lowLatency は毎回送る必要がある。
             this.send({
                 type: "resume", session, stripSpace, symbols,
-                mode: "transcribe", source, device, dictionarySetId, farMic,
+                mode: "transcribe", source, device, dictionarySetId, lowLatency,
             });
         });
     }

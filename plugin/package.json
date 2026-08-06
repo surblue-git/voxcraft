@@ -1,6 +1,6 @@
 {
   "name": "voxcraft-obsidian",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Voice input for Obsidian backed by a local Whisper server (Japanese long-form dictation).",
   "main": "main.js",
   "scripts": {

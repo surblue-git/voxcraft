@@ -26,7 +26,6 @@ export interface VoxCraftSettings {
     showToolbar: boolean;       // 口述中に画面下部の操作ツールバーを表示する
     suppressKeyboard: boolean;  // 口述中はソフトキーボードを出さない（モバイルのみ）
     keepScreenOn: boolean;      // 文字起こし中は画面を消さない（モバイルのみ）
-    farMic: boolean;            // 会場のスピーカーを離れたマイクで拾う（会見・発表会）
     serverUrl?: string;         // 後方互換: 旧・単一URL（読み込み時に endpoints へ移行）
 }
 
@@ -46,7 +45,6 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     showToolbar: true,
     suppressKeyboard: true,
     keepScreenOn: true,
-    farMic: false,
 };
 
 // 旧バージョン（単一 serverUrl）の設定を新モデルへ移行する。
@@ -69,7 +67,6 @@ export function migrateSettings(s: VoxCraftSettings): VoxCraftSettings {
     if (typeof s.showToolbar !== "boolean") s.showToolbar = true;
     if (typeof s.suppressKeyboard !== "boolean") s.suppressKeyboard = true;
     if (typeof s.keepScreenOn !== "boolean") s.keepScreenOn = true;
-    if (typeof s.farMic !== "boolean") s.farMic = false;
     delete s.serverUrl;
     return s;
 }
@@ -473,22 +470,6 @@ export class VoxCraftSettingTab extends PluginSettingTab {
             .addToggle((t) =>
                 t.setValue(this.plugin.settings.pauseComma).onChange(async (v) => {
                     this.plugin.settings.pauseComma = v;
-                    await this.plugin.saveSettings();
-                })
-            );
-
-        new Setting(containerEl)
-            .setName("遠いマイク（会見・発表会）")
-            .setDesc(
-                "会場のスピーカーや登壇者の声を、離れた場所のマイクで拾うときに入れる。" +
-                "音声を認識に回す単位を長くまとめてから渡すようになる（表示は最大6秒遅れる）。" +
-                "短い断片のまま渡すと、Whisper が「ご視聴ありがとうございました」等の" +
-                "定型句を出して発言そのものが消えるため。実測では同じ10分で15件→0件。" +
-                "文字起こしモードのマイク入力にだけ掛かる（口述とPC音声は変わらない）。"
-            )
-            .addToggle((t) =>
-                t.setValue(this.plugin.settings.farMic).onChange(async (v) => {
-                    this.plugin.settings.farMic = v;
                     await this.plugin.saveSettings();
                 })
             );

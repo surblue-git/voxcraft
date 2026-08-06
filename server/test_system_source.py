@@ -46,30 +46,36 @@ def test_system_chunking_uses_the_system_settings_not_the_microphone_ones():
     assert system._silence_frames != mic._silence_frames
 
 
-def test_far_mic_only_changes_joining_not_the_cutting():
-    # 遠いマイクで壊れていたのは連結であってVADではない（実測でカバー率96.2%）。
-    # 音の切り方に触れると口述・取材まで影響が及ぶので、ここは動かさない。
-    assert _params(_build_chunker("transcribe", "microphone")) == _params(
-        _build_chunker("transcribe", "microphone")
-    )
-    normal = _join_profile(False, False)
-    far = _join_profile(False, True)
-    assert normal == (
+def test_long_joining_is_the_default_for_transcription():
+    # 短い連結が有利になる録音は実測で見つからなかったので、既定は長いほう。
+    # 会見では定型句幻覚 15件→0件、近接マイクの取材でも本文 -0.2% で 2.5倍速。
+    default = _join_profile(False, False)
+    assert default == (
         config.transcribe_join_sec,
         config.transcribe_join_hold_sec,
         config.transcribe_join_break_sec,
     )
-    assert far == (
-        config.far_mic_join_sec,
-        config.far_mic_join_hold_sec,
-        config.far_mic_join_break_sec,
+    assert default[0] >= 10.0 and default[1] >= 6.0 and default[2] >= 4.0
+
+
+def test_low_latency_shortens_only_the_joining():
+    # 対面インタビュー用。音の切り方（VAD）には触れない。
+    assert _params(_build_chunker("transcribe", "microphone")) == _params(
+        _build_chunker("transcribe", "microphone")
     )
-    # 会見は「間」だらけで、待ち時間とまたげる息継ぎの両方が効かないと連結できない。
-    assert far[0] > normal[0] and far[1] > normal[1] and far[2] > normal[2]
+    default = _join_profile(False, False)
+    nearby = _join_profile(False, True)
+    assert nearby == (
+        config.nearby_join_sec,
+        config.nearby_join_hold_sec,
+        config.nearby_join_break_sec,
+    )
+    # 表示を早めるぶん、3つとも既定より短い。
+    assert nearby[0] < default[0] and nearby[1] < default[1] and nearby[2] < default[2]
 
 
-def test_far_mic_does_not_override_pc_audio():
-    # PC音声はもともと長い連結を使う。farMic を送られても system の値のまま。
+def test_low_latency_does_not_override_pc_audio():
+    # PC音声は応答性を気にする必要がない。lowLatency を送られても system の値のまま。
     assert _join_profile(True, True) == _join_profile(True, False)
 
 

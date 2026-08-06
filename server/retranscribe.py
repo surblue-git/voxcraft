@@ -26,9 +26,9 @@ ChunkJoiner は待ち時間を実時間で測る。ここでは音声の位置�
 使い方
 ------
   python retranscribe.py --list
-  python retranscribe.py 20260806-133113 --far-mic --out 会見.md
-  python retranscribe.py 20260806-133113 --compare        # 現行 vs 遠いマイク
-  python retranscribe.py 20260806-133113 --far-mic --limit-sec 600
+  python retranscribe.py 20260806-133113 --out 会見.md
+  python retranscribe.py 20260806-133113 --compare        # 既定 vs 低遅延
+  python retranscribe.py 20260806-133113 --limit-sec 600
 """
 from __future__ import annotations
 
@@ -74,11 +74,11 @@ def fmt_time(sec: float) -> str:
     return f"{int(sec // 60)}:{sec % 60:04.1f}"
 
 
-def build_chunks(audio: np.ndarray, *, far_mic: bool) -> list[Chunk]:
+def build_chunks(audio: np.ndarray, *, low_latency: bool = False) -> list[Chunk]:
     """実運用（マイク文字起こし）と同じ刻み方でチャンクを作る。
 
     VAD の設定は main._build_chunker のマイク経路と同じ。遠いマイクでも音の
-    切り方は変えない（壊れているのは連結だけなので。config.far_mic_join_sec 参照）。
+    切り方は変えない（壊れているのは連結だけなので。config.transcribe_join_sec 参照）。
     """
     chunker = VadChunker(
         sample_rate=config.sample_rate,
@@ -91,12 +91,12 @@ def build_chunks(audio: np.ndarray, *, far_mic: bool) -> list[Chunk]:
     )
     joiner = ChunkJoiner(
         sample_rate=config.sample_rate,
-        min_sec=config.far_mic_join_sec if far_mic else config.transcribe_join_sec,
+        min_sec=config.nearby_join_sec if low_latency else config.transcribe_join_sec,
         max_hold_sec=(
-            config.far_mic_join_hold_sec if far_mic else config.transcribe_join_hold_sec
+            config.nearby_join_hold_sec if low_latency else config.transcribe_join_hold_sec
         ),
         break_sec=(
-            config.far_mic_join_break_sec if far_mic else config.transcribe_join_break_sec
+            config.nearby_join_break_sec if low_latency else config.transcribe_join_break_sec
         ),
     )
     out: list[Chunk] = []
@@ -312,10 +312,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("session", nargs="?", help="セッションID（recordings/ 配下）")
     ap.add_argument("--list", action="store_true", help="保存済みの録音を一覧する")
-    ap.add_argument("--far-mic", action="store_true",
-                    help="遠いマイク（会見・発表会）の連結で回す")
+    ap.add_argument("--low-latency", action="store_true",
+                    help="対面インタビュー用の短い連結で回す（既定は長い連結）")
     ap.add_argument("--compare", action="store_true",
-                    help="現行の連結と遠いマイクの両方で回して比べる")
+                    help="低遅延と既定の両方で回して比べる")
     ap.add_argument("--out", type=Path, help="本文の書き出し先（.md）")
     ap.add_argument("--limit-sec", type=float, help="先頭N秒だけ（お試し用）")
     ap.add_argument("--no-paragraphs", action="store_true", help="段落分けをしない")
@@ -357,11 +357,11 @@ def main() -> int:
         f"辞書 {dictionary.set_id}"
     )
 
-    profiles = [False, True] if args.compare else [bool(args.far_mic)]
+    profiles = [False, True] if args.compare else [bool(args.low_latency)]
     results: list[tuple[str, str, Stats]] = []
-    for far_mic in profiles:
-        label = "遠いマイク" if far_mic else "現行の連結"
-        chunks = build_chunks(audio, far_mic=far_mic)
+    for low_latency in profiles:
+        label = "低遅延（対面）" if low_latency else "既定の連結"
+        chunks = build_chunks(audio, low_latency=low_latency)
         lens = np.array([c.audio.size / config.sample_rate for c in chunks])
         print(
             f"\n# {label}: {len(chunks)}チャンク "
