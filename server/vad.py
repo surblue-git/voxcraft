@@ -55,28 +55,79 @@ class _SileroDetector:
             self._model.reset_states()
 
 
-class _EnergyDetector:
-    """依存なしのフォールバック。短時間エネルギーのしきい値で判定する。"""
+# 暗騒音の追従。フレームは 512サンプル ＝ 32ms。
+# 下がるのは速く（静かな部分にすぐ追いつく）、上がるのは遅く（発話で持ち上がらない）。
+_NOISE_FALL = 0.05    # 時定数 約0.6秒
+_NOISE_RISE = 0.003   # 時定数 約10秒
+# 暗騒音の何倍を発話とみなすか。実測での選定は下の注記を参照。
+_NOISE_RATIO = 3.0
+# 完全な無音（PCループバックの停止中など）で床が0に落ちないための下限。
+_NOISE_MIN_FLOOR = 0.0008  # -62 dBFS
 
-    def __init__(self, sample_rate: int, threshold: float):
+
+class _EnergyDetector:
+    """依存なしのフォールバック。短時間エネルギーのしきい値で判定する。
+
+    絶対しきい値では録音レベルの違いに耐えられない（2026-08-06 実測）
+    ---------------------------------------------------------------
+    床は録音レベルによらない固定値なので、マイクと距離が変われば簡単に外れる。
+    会見録音（会場の音をPCのマイクで収録）は 100ms RMS の中央値が -42.9 dBFS で、
+    既定の床 0.016（-35.9 dBFS）の **7dB下**にあった。結果、12秒のあいだ一度も
+    発話と判定されず、VadChunker._finalize が `not _has_speech` でバッファごと
+    捨てる。⟨未認識⟩ が max_chunk_sec の整数倍で出るのはこれが理由:
+
+        欠落  14:26-14:38   RMS -49.7 dBFS → 発話判定 0/375 フレーム
+        欠落  32:01-32:13   RMS -47.6 dBFS → 発話判定 0/375 フレーム
+        拾えた 15:00-15:12  RMS -33.0 dBFS → 発話判定 111/375 (29.6%)
+
+    捨てられた区間を後から単独で認識すると**実際の発話が出る**。音は入っていた。
+
+    adaptive=True で、直近の静かな部分（暗騒音）を追いかけて床をその比率に置く。
+    **固定床より厳しくはならない**（min で上から抑えている）ので、今まで拾えて
+    いた音は必ず拾う。逆に、静かな録音では床が下がって拾えるようになる。
+
+    口述では使わない（自分の声を近接マイクで録る前提なので絶対床で足りているし、
+    床が下がると吐息を拾って「はい」等の幻覚が増える方向に動くため）。
+    """
+
+    def __init__(self, sample_rate: int, threshold: float, adaptive: bool = False):
         self._sr = sample_rate
         # threshold(0-1) を RMS の絶対しきい値に緩く写像する。
         self._rms_floor = 0.006 + 0.02 * threshold
+        self._adaptive = adaptive
+        self._noise: float | None = None
 
     def is_speech(self, frame: np.ndarray) -> bool:
         rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)) + 1e-9)
-        return rms >= self._rms_floor
+        if not self._adaptive:
+            return rms >= self._rms_floor
+        if self._noise is None:
+            self._noise = rms
+        elif rms < self._noise:
+            self._noise += (rms - self._noise) * _NOISE_FALL
+        else:
+            self._noise += (rms - self._noise) * _NOISE_RISE
+        floor = min(self._rms_floor, max(_NOISE_MIN_FLOOR, self._noise * _NOISE_RATIO))
+        return rms >= floor
 
-    def reset(self) -> None:  # noqa: D401 - フォールバックは状態を持たない
-        pass
+    def reset(self) -> None:
+        """チャンク確定ごとに呼ばれる。暗騒音の推定は**持ち越す**。
+
+        毎チャンク捨てると数百ミリ秒ごとに推定がやり直しになり、追従の意味が
+        無くなる。silero 側の reset は LSTM 状態のクリアで、目的が違う。
+        """
 
 
-def build_detector(sample_rate: int, threshold: float):
-    """利用可能なら silero、無ければエネルギーVADを返す。"""
+def build_detector(sample_rate: int, threshold: float, adaptive: bool = False):
+    """利用可能なら silero、無ければエネルギーVADを返す。
+
+    adaptive はエネルギーVADにだけ効く。silero は学習済みで音量に対して
+    それなりに頑健なので、壊れている側（絶対しきい値）だけを直す。
+    """
     try:
         return _SileroDetector(sample_rate, threshold)
     except Exception:
-        return _EnergyDetector(sample_rate, threshold)
+        return _EnergyDetector(sample_rate, threshold, adaptive=adaptive)
 
 
 class VadChunker:
@@ -100,6 +151,7 @@ class VadChunker:
         vad_threshold: float = 0.5,
         speech_pad_sec: float = 0.2,
         maxlen_search_sec: float = 1.5,
+        adaptive_energy: bool = False,
     ):
         self._sr = sample_rate
         self._silence_frames = max(1, int(silence_sec * sample_rate / _FRAME))
@@ -108,7 +160,9 @@ class VadChunker:
         self._maxlen_search_frames = max(1, int(maxlen_search_sec * sample_rate / _FRAME))
         self._max_samples = int(max_chunk_sec * sample_rate)
         self._min_samples = int(min_speech_sec * sample_rate)
-        self._detector = build_detector(sample_rate, vad_threshold)
+        self._detector = build_detector(
+            sample_rate, vad_threshold, adaptive=adaptive_energy
+        )
 
         self._buf: list[np.ndarray] = []   # 現在のチャンク音声
         self._residual = np.zeros(0, dtype=np.float32)  # フレーム未満の端数

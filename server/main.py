@@ -506,6 +506,8 @@ def _build_chunker(mode: str, source: str = "microphone") -> VadChunker:
             vad_threshold=config.vad_threshold,
             speech_pad_sec=config.speech_pad_sec,
         )
+    # 以降は文字起こし。エネルギーVADの床を暗騒音に追従させる（口述には掛けない）。
+    adaptive = config.adaptive_energy_vad
     if source in SYSTEM_SOURCES:
         # PC音声は応答コマンドを聞く必要がない。短い息継ぎで細切れにせず、
         # 8〜12秒程度の文脈を速報認識へ渡す。
@@ -516,6 +518,7 @@ def _build_chunker(mode: str, source: str = "microphone") -> VadChunker:
             min_speech_sec=0.1,
             vad_threshold=config.vad_threshold,
             speech_pad_sec=max(config.speech_pad_sec, 0.5),
+            adaptive_energy=adaptive,
         )
     # マイク文字起こしは切れ目なく喋り続ける音声が相手。
     # 原稿の読み上げは息継ぎが短く、無音を長く待つと強制確定でしか切れなくなる。
@@ -528,6 +531,7 @@ def _build_chunker(mode: str, source: str = "microphone") -> VadChunker:
         min_speech_sec=0.1,
         vad_threshold=config.vad_threshold,
         speech_pad_sec=max(config.speech_pad_sec, 0.5),
+        adaptive_energy=adaptive,
     )
 
 

@@ -65,6 +65,16 @@ class Config:
     min_speech_sec: float = float(_env("VOXCRAFT_MIN_SPEECH_SEC", "0.3"))
     # silero-vad のしきい値（0-1、大きいほど厳しい）。
     vad_threshold: float = float(_env("VOXCRAFT_VAD_THRESHOLD", "0.5"))
+    # エネルギーVAD（silero 未導入時のフォールバック）の床を、暗騒音に追従させる。
+    # 絶対しきい値 0.016（-35.9 dBFS）は録音レベルが変われば簡単に外れ、音声が
+    # その下に来ると12秒まるごと落ちる（vad._EnergyDetector の注記を参照）。
+    # 実測 2026-08-06、同じ録音・同じ分割条件:
+    #   会見・遠いマイク  カバー率 96.2% → 100.0% / 12秒級の穴 6件 → 0件
+    #   発表会・遠いマイク カバー率 97.0% →  98.0%
+    #   取材・近接マイク  連結後51チャンクで完全に不変（＝従来の録音は影響なし）
+    # 固定床より厳しくはならないので、今まで拾えていた音は必ず拾う。
+    # 文字起こしだけで使い、口述は絶対床のまま（吐息を拾う方向に動かさないため）。
+    adaptive_energy_vad: bool = _env("VOXCRAFT_ADAPTIVE_VAD", "1") == "1"
     # 発話チャンク後方のパディング（秒）。語尾切れ（「です」「ます」が途切れる現象）を防ぐ。
     speech_pad_sec: float = float(_env("VOXCRAFT_SPEECH_PAD_SEC", "0.2"))
 

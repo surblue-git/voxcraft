@@ -87,6 +87,7 @@ def build_chunks(audio: np.ndarray, *, far_mic: bool) -> list[Chunk]:
         min_speech_sec=0.1,
         vad_threshold=config.vad_threshold,
         speech_pad_sec=max(config.speech_pad_sec, 0.5),
+        adaptive_energy=config.adaptive_energy_vad,
     )
     joiner = ChunkJoiner(
         sample_rate=config.sample_rate,

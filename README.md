@@ -381,6 +381,7 @@ Obsidianの辞書画面へ追加する。
 | `VOXCRAFT_SYSTEM_JOIN_SEC` | 10 | PC音声の速報チャンクを連結する目標長（秒） |
 | `VOXCRAFT_SYSTEM_JOIN_HOLD_SEC` | 6 | 目標長未満のPC音声を次の発話まで保持する上限（秒） |
 | `VOXCRAFT_SYSTEM_JOIN_BREAK_SEC` | 4 | これ以上の無音ではPC音声チャンクを連結しない（秒） |
+| `VOXCRAFT_ADAPTIVE_VAD` | 1 | エネルギーVADの床を暗騒音に追従させる（文字起こしのみ）。0で従来の固定床 |
 | `VOXCRAFT_FAR_MIC_JOIN_SEC` | 10 | 遠いマイクで速報チャンクを連結する目標長（秒） |
 | `VOXCRAFT_FAR_MIC_JOIN_HOLD_SEC` | 6 | 目標長未満を次の発話まで保持する上限（秒） |
 | `VOXCRAFT_FAR_MIC_JOIN_BREAK_SEC` | 4 | これ以上の無音では連結しない（秒） |
