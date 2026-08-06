@@ -1139,7 +1139,8 @@ var DEFAULT_SETTINGS = {
   pauseComma: true,
   showToolbar: true,
   suppressKeyboard: true,
-  keepScreenOn: true
+  keepScreenOn: true,
+  farMic: false
 };
 function migrateSettings(s) {
   if ((!s.endpoints || s.endpoints.length === 0) && s.serverUrl) {
@@ -1166,6 +1167,8 @@ function migrateSettings(s) {
     s.suppressKeyboard = true;
   if (typeof s.keepScreenOn !== "boolean")
     s.keepScreenOn = true;
+  if (typeof s.farMic !== "boolean")
+    s.farMic = false;
   delete s.serverUrl;
   return s;
 }
@@ -1461,6 +1464,14 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
     ).addToggle(
       (t) => t.setValue(this.plugin.settings.pauseComma).onChange(async (v) => {
         this.plugin.settings.pauseComma = v;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("\u9060\u3044\u30DE\u30A4\u30AF\uFF08\u4F1A\u898B\u30FB\u767A\u8868\u4F1A\uFF09").setDesc(
+      "\u4F1A\u5834\u306E\u30B9\u30D4\u30FC\u30AB\u30FC\u3084\u767B\u58C7\u8005\u306E\u58F0\u3092\u3001\u96E2\u308C\u305F\u5834\u6240\u306E\u30DE\u30A4\u30AF\u3067\u62FE\u3046\u3068\u304D\u306B\u5165\u308C\u308B\u3002\u97F3\u58F0\u3092\u8A8D\u8B58\u306B\u56DE\u3059\u5358\u4F4D\u3092\u9577\u304F\u307E\u3068\u3081\u3066\u304B\u3089\u6E21\u3059\u3088\u3046\u306B\u306A\u308B\uFF08\u8868\u793A\u306F\u6700\u59276\u79D2\u9045\u308C\u308B\uFF09\u3002\u77ED\u3044\u65AD\u7247\u306E\u307E\u307E\u6E21\u3059\u3068\u3001Whisper \u304C\u300C\u3054\u8996\u8074\u3042\u308A\u304C\u3068\u3046\u3054\u3056\u3044\u307E\u3057\u305F\u300D\u7B49\u306E\u5B9A\u578B\u53E5\u3092\u51FA\u3057\u3066\u767A\u8A00\u305D\u306E\u3082\u306E\u304C\u6D88\u3048\u308B\u305F\u3081\u3002\u5B9F\u6E2C\u3067\u306F\u540C\u305810\u5206\u306715\u4EF6\u21920\u4EF6\u3002\u6587\u5B57\u8D77\u3053\u3057\u30E2\u30FC\u30C9\u306E\u30DE\u30A4\u30AF\u5165\u529B\u306B\u3060\u3051\u639B\u304B\u308B\uFF08\u53E3\u8FF0\u3068PC\u97F3\u58F0\u306F\u5909\u308F\u3089\u306A\u3044\uFF09\u3002"
+    ).addToggle(
+      (t) => t.setValue(this.plugin.settings.farMic).onChange(async (v) => {
+        this.plugin.settings.farMic = v;
         await this.plugin.saveSettings();
       })
     );
@@ -2023,6 +2034,7 @@ var AsrSocket = class {
           this.pendingStart = null;
           pending.resolve({
             source: (_c = msg.source) != null ? _c : "microphone",
+            farMic: Boolean(msg.farMic),
             device: msg.device,
             inputSampleRate: msg.inputSampleRate,
             channels: msg.channels,
@@ -2079,7 +2091,7 @@ var AsrSocket = class {
     if (this.connected)
       this.ws.send(pcm16);
   }
-  sendStart(stripSpace, symbols, mode = "dictation", source = "microphone", device, dictionarySetId = "default") {
+  sendStart(stripSpace, symbols, mode = "dictation", source = "microphone", device, dictionarySetId = "default", farMic = false) {
     if (!this.connected)
       return Promise.reject(new Error("\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093"));
     this.rejectStart("\u5225\u306E\u958B\u59CB\u8981\u6C42\u306B\u7F6E\u304D\u63DB\u3048\u3089\u308C\u307E\u3057\u305F");
@@ -2091,13 +2103,22 @@ var AsrSocket = class {
         reject(new Error("\u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB\u304C\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F"));
       }, 15e3);
       this.pendingStart = { resolve, reject, timer };
-      this.send({ type: "start", stripSpace, symbols, mode, source, device, dictionarySetId });
+      this.send({
+        type: "start",
+        stripSpace,
+        symbols,
+        mode,
+        source,
+        device,
+        dictionarySetId,
+        farMic
+      });
     });
   }
   // モバイル回線の瞬断などで切れた直後の再接続用。start と違い、既存の
   // セッションID（＝サーバー側の同じ録音ファイル）へそのまま続きを積む。
   // サーバーは切断から一定時間だけ同じセッションを保持している。
-  sendResume(session, stripSpace, symbols, source = "microphone", device, dictionarySetId = "default") {
+  sendResume(session, stripSpace, symbols, source = "microphone", device, dictionarySetId = "default", farMic = false) {
     if (!this.connected)
       return Promise.reject(new Error("\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093"));
     this.rejectStart("\u5225\u306E\u958B\u59CB\u8981\u6C42\u306B\u7F6E\u304D\u63DB\u3048\u3089\u308C\u307E\u3057\u305F");
@@ -2117,7 +2138,8 @@ var AsrSocket = class {
         mode: "transcribe",
         source,
         device,
-        dictionarySetId
+        dictionarySetId,
+        farMic
       });
     });
   }
@@ -2584,6 +2606,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.mode = "dictation";
     this.source = "microphone";
     this.sourceDevice = "";
+    // サーバーが遠いマイク用の連結を実際に適用したか（started の応答をそのまま持つ）。
+    this.farMicActive = false;
     this.autoStopSec = 0;
     this.activeDictionarySetId = "";
     this.activeDictionarySetName = "";
@@ -2793,6 +2817,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.mode = mode;
     this.source = source;
     this.sourceDevice = "";
+    this.farMicActive = false;
     this.noAudioWarned = false;
     this.autoStopSec = 0;
     if (mode === "transcribe") {
@@ -2828,9 +2853,11 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         mode,
         source,
         device,
-        dictionarySetId
+        dictionarySetId,
+        this.settings.farMic
       );
       this.sourceDevice = (_a = started.device) != null ? _a : "";
+      this.farMicActive = started.farMic;
       this.autoStopSec = (_b = started.autoStopSec) != null ? _b : 0;
       this.activeDictionarySetId = started.dictionarySetId;
       this.activeDictionarySetName = started.dictionarySetName;
@@ -3083,7 +3110,8 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
           symbols,
           source,
           device,
-          dictionarySetId
+          dictionarySetId,
+          this.settings.farMic
         );
         if (!this.recording || this.stopping) {
           socket.close();
@@ -3724,7 +3752,10 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       const head = this.noAudioWarned ? "\u26A0 \u97F3\u304C\u6765\u3066\u3044\u307E\u305B\u3093" : "\u25CF PC\u97F3\u58F0\u3092\u6587\u5B57\u8D77\u3053\u3057\u4E2D";
       return this.sourceDevice ? `${head}\uFF08${where}: ${this.sourceDevice}\uFF09${dictionary}` : `${head}\uFF08${where}\uFF09${dictionary}`;
     }
-    return this.mode === "transcribe" ? `\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D${dictionary}` : `\u25CF \u9332\u97F3\u4E2D${dictionary}`;
+    if (this.mode === "transcribe") {
+      return `\u25CF \u6587\u5B57\u8D77\u3053\u3057\u4E2D${this.farMicActive ? "\uFF08\u9060\u3044\u30DE\u30A4\u30AF\uFF09" : ""}${dictionary}`;
+    }
+    return `\u25CF \u9332\u97F3\u4E2D${dictionary}`;
   }
   // 「Aを再変換」: 誤変換でも読みは正しいことを利用する。
   // A の読みから得た変換候補（誤変換の表記もここに現れやすい）で文書を探し、

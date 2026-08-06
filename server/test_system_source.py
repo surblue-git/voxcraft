@@ -8,7 +8,7 @@ system（サーバー機の再生音を自前で取る）と system-client（ク
 分割条件がずれると、片方だけ細切れになって前後の文脈が失われる。
 """
 from config import config
-from main import SYSTEM_SOURCES, _build_chunker
+from main import SYSTEM_SOURCES, _build_chunker, _join_profile
 from vad import _FRAME
 
 
@@ -44,6 +44,33 @@ def test_system_chunking_uses_the_system_settings_not_the_microphone_ones():
     assert system._max_samples == int(config.system_max_chunk_sec * config.sample_rate)
     assert system._silence_frames == _silence_frames(config.system_silence_sec)
     assert system._silence_frames != mic._silence_frames
+
+
+def test_far_mic_only_changes_joining_not_the_cutting():
+    # 遠いマイクで壊れていたのは連結であってVADではない（実測でカバー率96.2%）。
+    # 音の切り方に触れると口述・取材まで影響が及ぶので、ここは動かさない。
+    assert _params(_build_chunker("transcribe", "microphone")) == _params(
+        _build_chunker("transcribe", "microphone")
+    )
+    normal = _join_profile(False, False)
+    far = _join_profile(False, True)
+    assert normal == (
+        config.transcribe_join_sec,
+        config.transcribe_join_hold_sec,
+        config.transcribe_join_break_sec,
+    )
+    assert far == (
+        config.far_mic_join_sec,
+        config.far_mic_join_hold_sec,
+        config.far_mic_join_break_sec,
+    )
+    # 会見は「間」だらけで、待ち時間とまたげる息継ぎの両方が効かないと連結できない。
+    assert far[0] > normal[0] and far[1] > normal[1] and far[2] > normal[2]
+
+
+def test_far_mic_does_not_override_pc_audio():
+    # PC音声はもともと長い連結を使う。farMic を送られても system の値のまま。
+    assert _join_profile(True, True) == _join_profile(True, False)
 
 
 def test_dictation_is_unaffected_by_source():

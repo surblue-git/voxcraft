@@ -531,6 +531,34 @@ def _build_chunker(mode: str, source: str = "microphone") -> VadChunker:
     )
 
 
+def _join_profile(system_mode: bool, far_mic: bool) -> tuple[float, float, float]:
+    """ChunkJoiner の (連結する下限, 待つ上限, またがない息継ぎ) を返す。
+
+    遠いマイクだけ別扱いにするのは、音の切り方（VAD）ではなく**連結**が
+    壊れるため。会場のスピーカーを離れたマイクで拾うと2秒以上の間が頻繁に
+    生じ、既定の break=2.0 / hold=2.0 の両方に毎回引っかかって、3秒前後の
+    チャンクが単体で Whisper に渡る。詳しい実測値は config.far_mic_join_sec
+    の注記を参照（同じ10分で定型句幻覚 15件 → 0件、認識時間 511秒 → 116秒）。
+    """
+    if system_mode:
+        return (
+            config.system_join_sec,
+            config.system_join_hold_sec,
+            config.system_join_break_sec,
+        )
+    if far_mic:
+        return (
+            config.far_mic_join_sec,
+            config.far_mic_join_hold_sec,
+            config.far_mic_join_break_sec,
+        )
+    return (
+        config.transcribe_join_sec,
+        config.transcribe_join_hold_sec,
+        config.transcribe_join_break_sec,
+    )
+
+
 @dataclass
 class _PendingSession:
     """接続が予期せず切れた文字起こしセッション。再開されるまで音声ファイルを保持する。"""
@@ -1216,24 +1244,28 @@ async def ws_endpoint(ws: WebSocket) -> None:
             }))
             return
         chunker = _build_chunker(mode, source)
+        # 遠いマイク（会見・発表会）。マイク入力の文字起こしにだけ効く。
+        # PC音声はもともと長い連結を使っているので指定は無視する。
+        far_mic = (
+            bool(cmd.get("farMic"))
+            and mode == "transcribe"
+            and source not in SYSTEM_SOURCES
+        )
         if mode == "transcribe":
             opts = AsrOptions.transcription()
             system_mode = source in SYSTEM_SOURCES
+            join_sec, join_hold_sec, join_break_sec = _join_profile(system_mode, far_mic)
             joiner = ChunkJoiner(
                 sample_rate=config.sample_rate,
-                min_sec=(
-                    config.system_join_sec if system_mode
-                    else config.transcribe_join_sec
-                ),
-                max_hold_sec=(
-                    config.system_join_hold_sec if system_mode
-                    else config.transcribe_join_hold_sec
-                ),
-                break_sec=(
-                    config.system_join_break_sec if system_mode
-                    else config.transcribe_join_break_sec
-                ),
+                min_sec=join_sec,
+                max_hold_sec=join_hold_sec,
+                break_sec=join_break_sec,
             )
+            if far_mic:
+                print(
+                    f"[VoxCraft] 遠いマイク: 連結 {join_sec:.0f}秒 / "
+                    f"待ち {join_hold_sec:.0f}秒 / 息継ぎ上限 {join_break_sec:.0f}秒"
+                )
             breaker = ParagraphBreaker(
                 min_chars=config.paragraph_chars,
                 pause_sec=config.paragraph_pause_sec,
@@ -1333,6 +1365,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
         await ws.send_text(json.dumps({
             "type": "started",
             "source": source,
+            # 実際に効いたかを端末に返す（設定が届いていない事故を画面で気づけるように）。
+            "farMic": far_mic,
             **source_info,
             **dictionary_snapshot.metadata(),
         }))

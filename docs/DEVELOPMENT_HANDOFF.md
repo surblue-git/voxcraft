@@ -23,8 +23,13 @@ Phase 1A（永続形式と互換移行）、Phase 1B（セッション固定ス�
 - `plugin/dict.ts`: カタログ／登録API、セット選択・クイック登録・旧一覧編集UI。
 - `plugin/settings.ts`: URL別セット選択の永続化と設定画面。
 - `plugin/main.ts`: 各操作へのセット伝播、適用中表示、登録フロー。
-- `plugin/ws.ts`: `started` 辞書メタデータ。
+- `plugin/ws.ts`: `started` 辞書メタデータ、`farMic` の往復。
+- `server/retranscribe.py`: 保存済み録音から本文を作り直す（`--compare` で連結条件の前後比較）。
 - `.github/workflows/release.yml`: タグをビルドしBRAT用Release資産を作る。
+
+遠いマイク（0.11.0）は**連結だけ**を変える。VADの切り方に触れると口述と近接マイクの
+取材まで挙動が動くので、`_build_chunker` は据え置き、`_join_profile` で分岐している。
+根拠の実測値は `server/config.py` の `far_mic_join_sec` の注記にある。
 
 ## API・プロトコル
 
@@ -51,6 +56,10 @@ Get-ChildItem server -Filter 'test_*.py' | ForEach-Object {
   & .\server\.venv\Scripts\python.exe $_.FullName
   if ($LASTEXITCODE -ne 0) { throw "failed: $($_.Name)" }
 }
+
+# 連結条件を変えたときは、保存済み録音で前後を比べる（GPUが要る）
+.\server\.venv\Scripts\python.exe server/retranscribe.py --list
+.\server\.venv\Scripts\python.exe server/retranscribe.py <session> --compare --limit-sec 600
 
 # Obsidian型定義側の既知HistoryHandler不整合だけ除外して、自コードを型検査
 .\plugin\node_modules\.bin\tsc.cmd --noEmit --skipLibCheck -p plugin/tsconfig.json

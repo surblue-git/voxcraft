@@ -175,6 +175,8 @@ export default class VoxCraftPlugin extends Plugin {
     private mode: AsrMode = "dictation";
     private source: AsrSource = "microphone";
     private sourceDevice = "";
+    // サーバーが遠いマイク用の連結を実際に適用したか（started の応答をそのまま持つ）。
+    private farMicActive = false;
     private autoStopSec = 0;
     private activeDictionarySetId = "";
     private activeDictionarySetName = "";
@@ -395,6 +397,7 @@ export default class VoxCraftPlugin extends Plugin {
         this.mode = mode;
         this.source = source;
         this.sourceDevice = "";
+        this.farMicActive = false;
         this.noAudioWarned = false;
         this.autoStopSec = 0;
         if (mode === "transcribe") {
@@ -440,9 +443,11 @@ export default class VoxCraftPlugin extends Plugin {
                 mode,
                 source,
                 device,
-                dictionarySetId
+                dictionarySetId,
+                this.settings.farMic
             );
             this.sourceDevice = started.device ?? "";
+            this.farMicActive = started.farMic;
             this.autoStopSec = started.autoStopSec ?? 0;
             this.activeDictionarySetId = started.dictionarySetId;
             this.activeDictionarySetName = started.dictionarySetName;
@@ -709,7 +714,8 @@ export default class VoxCraftPlugin extends Plugin {
                 await socket.connect();
                 const dictionarySetId = this.activeDictionarySetId || "default";
                 const started = await socket.sendResume(
-                    session, stripSpace, symbols, source, device, dictionarySetId
+                    session, stripSpace, symbols, source, device, dictionarySetId,
+                    this.settings.farMic
                 );
                 if (!this.recording || this.stopping) {
                     // 再接続の最中にユーザーが停止操作をしていた。この接続は使わない。
@@ -1443,7 +1449,12 @@ export default class VoxCraftPlugin extends Plugin {
                 ? `${head}（${where}: ${this.sourceDevice}）${dictionary}`
                 : `${head}（${where}）${dictionary}`;
         }
-        return this.mode === "transcribe" ? `● 文字起こし中${dictionary}` : `● 録音中${dictionary}`;
+        if (this.mode === "transcribe") {
+            // 遠いマイクは表示が数秒遅れる。設定が効いていることを画面で見えるようにする
+            // （「反応が遅い」と「設定を入れ忘れた」を取り違えないため）。
+            return `● 文字起こし中${this.farMicActive ? "（遠いマイク）" : ""}${dictionary}`;
+        }
+        return `● 録音中${dictionary}`;
     }
 
     // 「Aを再変換」: 誤変換でも読みは正しいことを利用する。
