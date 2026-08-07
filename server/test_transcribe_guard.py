@@ -90,7 +90,7 @@ def test_embedded_video_artifact_is_removed_without_losing_real_text():
     assert removed == ["次回予告"]
 
 
-def test_midstream_thanks_is_removed_but_real_ending_is_kept():
+def test_video_outro_thanks_is_removed_at_any_position():
     strong = SpeechEvidence(30.0, 0.02, 0.2, 0.6)
     text, removed = filter_contextual_artifacts(
         "体験価値を提供します。ご視聴ありがとうございました。昨年は新施設を開設しました。",
@@ -98,9 +98,50 @@ def test_midstream_thanks_is_removed_but_real_ending_is_kept():
     )
     assert text == "体験価値を提供します。昨年は新施設を開設しました。"
     assert removed == ["ご視聴ありがとうございました"]
-    assert filter_contextual_artifacts(
+
+    # 実際に発話された動画末尾でも、内容記録には不要なので除去する。
+    ending, ending_removed = filter_contextual_artifacts(
         "以上で発表を終わります。ご視聴ありがとうございました。", strong
-    )[0] == "以上で発表を終わります。ご視聴ありがとうございました。"
+    )
+    assert ending == "以上で発表を終わります。"
+    assert ending_removed == ["ご視聴ありがとうございました"]
+
+    # 今回の実例: 本文に癒着してチャンク末尾へ出る場合も除去する。
+    suffix, suffix_removed = filter_contextual_artifacts(
+        "これによりご視聴ありがとうございました", strong
+    )
+    assert suffix == "これにより"
+    assert suffix_removed == ["ご視聴ありがとうございました"]
+
+    suffix2, suffix_removed2 = filter_contextual_artifacts(
+        "PayPayカードの利用拡大を通じてご視聴ありがとうございました", strong
+    )
+    assert suffix2 == "PayPayカードの利用拡大を通じて"
+    assert suffix_removed2 == ["ご視聴ありがとうございました"]
+
+    # 単独チャンクでも、強い音声根拠の有無にかかわらず除去する。
+    standalone, standalone_removed = filter_contextual_artifacts(
+        "ご視聴ありがとうございました。", strong
+    )
+    assert standalone == ""
+    assert standalone_removed == ["ご視聴ありがとうございました"]
+
+
+def test_video_outro_variants_are_removed_but_real_thanks_are_kept():
+    strong = SpeechEvidence(30.0, 0.02, 0.2, 0.6)
+    text, removed = filter_contextual_artifacts(
+        "最後までご視聴いただきありがとうございます。次の話題です。", strong
+    )
+    assert text == "次の話題です。"
+    assert removed == ["最後までご視聴いただきありがとうございます"]
+
+    # 発表・会議で実在し、話者交代の意味も持つ挨拶は対象外。
+    assert filter_contextual_artifacts(
+        "以上です。ありがとうございました。", strong
+    )[0] == "以上です。ありがとうございました。"
+    assert filter_contextual_artifacts(
+        "以上で発表を終わります。ご清聴ありがとうございました。", strong
+    )[0] == "以上で発表を終わります。ご清聴ありがとうございました。"
 
 
 def test_real_strong_standalone_phrase_is_kept():
