@@ -36,7 +36,10 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     selection: AUTO,
     dictionarySetByEndpoint: {},
     systemDeviceByEndpoint: {},
-    transcribeLanguage: "ja",
+    // 既定は自動判別。純日本語の録音で誤って英語と判定した実測は 0.4〜0.8% で、
+    // しかも全部が1.6秒未満の短いチャンク（サーバー側で判定から外している）。
+    // 選ばせるほど当たらない設定なので、既定で正しく動くほうを選ぶ。
+    transcribeLanguage: "auto",
     stripJaAlnumSpace: true,
     symbolDictation: true,
     enableCommands: true,
@@ -457,14 +460,15 @@ export class VoxCraftSettingTab extends PluginSettingTab {
             .setName("文字起こしの言語")
             .setDesc(
                 "口述には影響しない（常に日本語）。" +
-                "「英語」は英語のみの話者向けで、日本語向けの後処理（辞書・自動句読点）は当たらない。" +
-                "「自動判別」は逐次通訳のように話者が入れ替わる取材向けで、" +
-                "チャンクごとに言語を判定するぶん少し遅くなる。"
+                "既定の「自動判別」は、チャンクごとに言語を判定して切り替える。" +
+                "純日本語の録音で誤って英語と判定したのは実測 0.4〜0.8%（全部1.6秒未満の短いチャンクで、" +
+                "それらは判定から外してある）。代償は1チャンクあたり約96ミリ秒。" +
+                "固定したいときだけ日本語／英語を選ぶ。英語では日本語向けの後処理（辞書・自動句読点）が当たらない。"
             )
             .addDropdown((d) => {
-                d.addOption("ja", "日本語（既定）");
-                d.addOption("en", "英語");
-                d.addOption("auto", "自動判別（日英が混ざる取材）");
+                d.addOption("auto", "自動判別（既定）");
+                d.addOption("ja", "日本語に固定");
+                d.addOption("en", "英語に固定");
                 d.setValue(this.plugin.settings.transcribeLanguage);
                 d.onChange(async (v) => {
                     this.plugin.settings.transcribeLanguage = v as TranscribeLanguage;

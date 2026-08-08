@@ -652,6 +652,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
     # 文字起こしの言語。"ja" | "en" | "auto"（チャンクごとに判定）。
     # 口述には一切効かない（日本語固定のまま ＝ 挙動不変）。
     transcribe_language = "ja"
+    # auto のとき、直前のチャンクがどちらだったか。短くて判定できないチャンクが
+    # これを引き継ぐ。逐次通訳では短い相槌が話者交代を挟まないことがほとんどなので、
+    # 既定言語に倒すより当たる。
+    last_chunk_language = config.language
     strip_space = config.strip_ja_alnum_space
     symbols = config.enable_symbol_dictation
     punctuate = config.enable_auto_punctuation
@@ -793,7 +797,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         evidence: SpeechEvidence | None = None,
         dictionary: DictionarySnapshot | None = None,
     ) -> None:
-        nonlocal pending_contextual_chunk, chunk_seq
+        nonlocal pending_contextual_chunk, chunk_seq, last_chunk_language
         if dictionary is None:
             raise RuntimeError("辞書スナップショットがありません")
         # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
@@ -829,7 +833,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
         # 逐次通訳（language=auto）は、チャンクごとに話者が入れ替わる。
         # 復旧はもとの言語が分からないので既定のまま触らない。
         if mode == "transcribe" and not recovery and transcribe_language == "auto":
-            chunk_opts = replace(chunk_opts, language=await _detect_chunk_language(audio))
+            # 短いチャンクは判定を当てにできない（純日本語の録音での誤判定は
+            # 実測3件で全部1.6秒未満。config.language_detect_min_sec を参照）。
+            # 判定せず、直前のチャンクの言語をそのまま引き継ぐ。
+            if audio.size >= config.language_detect_min_sec * config.sample_rate:
+                last_chunk_language = await _detect_chunk_language(audio)
+            chunk_opts = replace(chunk_opts, language=last_chunk_language)
         # 英語チャンクに日本語向けの後処理を当てない（下の postprocess で使う）。
         english = mode == "transcribe" and (chunk_opts.language or config.language) == "en"
         result = await _transcribe_chunk(
@@ -1268,7 +1277,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         """
         nonlocal dictionary_snapshot, session, mode, source, chunker, joiner, breaker
         nonlocal opts, punctuate, silence_tracker, auto_stop_task, strip_space, symbols
-        nonlocal transcribe_language
+        nonlocal transcribe_language, last_chunk_language
         nonlocal input_finished, previous_transcript_text, pending_contextual_chunk
         nonlocal refinement_delivered_end, audio_ring, last_source_chunk_end
         nonlocal system_device_label
@@ -1345,6 +1354,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 else "ja"
             )
             opts = AsrOptions.transcription()
+            # 前のセッションの言語を持ち越さない。
+            last_chunk_language = config.language
             if transcribe_language != "auto":
                 opts = replace(opts, language=transcribe_language)
             if transcribe_language != "ja":
