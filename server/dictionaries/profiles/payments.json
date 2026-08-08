@@ -229,6 +229,31 @@
       "observed": "オリーブ",
       "output": "Olive",
       "enabled": true
+    },
+    {
+      "observed": "若干説法",
+      "output": "釈迦に説法",
+      "enabled": true
+    },
+    {
+      "observed": "7-11",
+      "output": "セブン-イレブン",
+      "enabled": true
+    },
+    {
+      "observed": "アイオン",
+      "output": "IOWN",
+      "enabled": true
+    },
+    {
+      "observed": "ベルカード",
+      "output": "メルカード",
+      "enabled": true
+    },
+    {
+      "observed": "蘇生",
+      "output": "組成",
+      "enabled": true
     }
   ],
   "symbols": {},
