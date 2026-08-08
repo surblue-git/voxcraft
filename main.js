@@ -1129,6 +1129,7 @@ var DEFAULT_SETTINGS = {
   selection: AUTO,
   dictionarySetByEndpoint: {},
   systemDeviceByEndpoint: {},
+  transcribeLanguage: "ja",
   stripJaAlnumSpace: true,
   symbolDictation: true,
   enableCommands: true,
@@ -1450,6 +1451,18 @@ var VoxCraftSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     containerEl.createEl("h3", { text: "\u8A8D\u8B58\u30FB\u6574\u5F62" });
+    new import_obsidian3.Setting(containerEl).setName("\u6587\u5B57\u8D77\u3053\u3057\u306E\u8A00\u8A9E").setDesc(
+      "\u53E3\u8FF0\u306B\u306F\u5F71\u97FF\u3057\u306A\u3044\uFF08\u5E38\u306B\u65E5\u672C\u8A9E\uFF09\u3002\u300C\u82F1\u8A9E\u300D\u306F\u82F1\u8A9E\u306E\u307F\u306E\u8A71\u8005\u5411\u3051\u3067\u3001\u65E5\u672C\u8A9E\u5411\u3051\u306E\u5F8C\u51E6\u7406\uFF08\u8F9E\u66F8\u30FB\u81EA\u52D5\u53E5\u8AAD\u70B9\uFF09\u306F\u5F53\u305F\u3089\u306A\u3044\u3002\u300C\u81EA\u52D5\u5224\u5225\u300D\u306F\u9010\u6B21\u901A\u8A33\u306E\u3088\u3046\u306B\u8A71\u8005\u304C\u5165\u308C\u66FF\u308F\u308B\u53D6\u6750\u5411\u3051\u3067\u3001\u30C1\u30E3\u30F3\u30AF\u3054\u3068\u306B\u8A00\u8A9E\u3092\u5224\u5B9A\u3059\u308B\u3076\u3093\u5C11\u3057\u9045\u304F\u306A\u308B\u3002"
+    ).addDropdown((d) => {
+      d.addOption("ja", "\u65E5\u672C\u8A9E\uFF08\u65E2\u5B9A\uFF09");
+      d.addOption("en", "\u82F1\u8A9E");
+      d.addOption("auto", "\u81EA\u52D5\u5224\u5225\uFF08\u65E5\u82F1\u304C\u6DF7\u3056\u308B\u53D6\u6750\uFF09");
+      d.setValue(this.plugin.settings.transcribeLanguage);
+      d.onChange(async (v) => {
+        this.plugin.settings.transcribeLanguage = v;
+        await this.plugin.saveSettings();
+      });
+    });
     new import_obsidian3.Setting(containerEl).setName("\u82F1\u6570\u5B57\u307E\u308F\u308A\u306E\u534A\u89D2\u30B9\u30DA\u30FC\u30B9\u3092\u9664\u53BB").setDesc("\u65E5\u672C\u8A9E\u3068\u82F1\u6570\u5B57\u306E\u9593\u306B\u52DD\u624B\u306B\u5165\u308B\u534A\u89D2\u30B9\u30DA\u30FC\u30B9\u3092\u53D6\u308A\u9664\u304F\u3002").addToggle(
       (t) => t.setValue(this.plugin.settings.stripJaAlnumSpace).onChange(async (v) => {
         this.plugin.settings.stripJaAlnumSpace = v;
@@ -2080,7 +2093,7 @@ var AsrSocket = class {
     if (this.connected)
       this.ws.send(pcm16);
   }
-  sendStart(stripSpace, symbols, mode = "dictation", source = "microphone", device, dictionarySetId = "default", lowLatency = false) {
+  sendStart(stripSpace, symbols, mode = "dictation", source = "microphone", device, dictionarySetId = "default", lowLatency = false, language = "ja") {
     if (!this.connected)
       return Promise.reject(new Error("\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093"));
     this.rejectStart("\u5225\u306E\u958B\u59CB\u8981\u6C42\u306B\u7F6E\u304D\u63DB\u3048\u3089\u308C\u307E\u3057\u305F");
@@ -2100,14 +2113,15 @@ var AsrSocket = class {
         source,
         device,
         dictionarySetId,
-        lowLatency
+        lowLatency,
+        language
       });
     });
   }
   // モバイル回線の瞬断などで切れた直後の再接続用。start と違い、既存の
   // セッションID（＝サーバー側の同じ録音ファイル）へそのまま続きを積む。
   // サーバーは切断から一定時間だけ同じセッションを保持している。
-  sendResume(session, stripSpace, symbols, source = "microphone", device, dictionarySetId = "default", lowLatency = false) {
+  sendResume(session, stripSpace, symbols, source = "microphone", device, dictionarySetId = "default", lowLatency = false, language = "ja") {
     if (!this.connected)
       return Promise.reject(new Error("\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093"));
     this.rejectStart("\u5225\u306E\u958B\u59CB\u8981\u6C42\u306B\u7F6E\u304D\u63DB\u3048\u3089\u308C\u307E\u3057\u305F");
@@ -2128,7 +2142,8 @@ var AsrSocket = class {
         source,
         device,
         dictionarySetId,
-        lowLatency
+        lowLatency,
+        language
       });
     });
   }
@@ -2857,7 +2872,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         source,
         device,
         dictionarySetId,
-        lowLatency
+        lowLatency,
+        // 言語は文字起こしにだけ効く。口述は常に日本語（サーバー側でも無視される）。
+        mode === "transcribe" ? this.settings.transcribeLanguage : "ja"
       );
       this.sourceDevice = (_a = started.device) != null ? _a : "";
       this.lowLatencyActive = started.lowLatency;
@@ -3115,7 +3132,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
           source,
           device,
           dictionarySetId,
-          this.lowLatencyActive
+          this.lowLatencyActive,
+          // 再開は文字起こしにしか存在しないので、そのまま設定を渡す。
+          this.settings.transcribeLanguage
         );
         if (!this.recording || this.stopping) {
           socket.close();

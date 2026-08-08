@@ -460,7 +460,9 @@ export default class VoxCraftPlugin extends Plugin {
                 source,
                 device,
                 dictionarySetId,
-                lowLatency
+                lowLatency,
+                // 言語は文字起こしにだけ効く。口述は常に日本語（サーバー側でも無視される）。
+                mode === "transcribe" ? this.settings.transcribeLanguage : "ja"
             );
             this.sourceDevice = started.device ?? "";
             this.lowLatencyActive = started.lowLatency;
@@ -732,7 +734,9 @@ export default class VoxCraftPlugin extends Plugin {
                 const started = await socket.sendResume(
                     // 再接続でも連結器を作り直すので、開始時と同じ条件を渡す。
                     session, stripSpace, symbols, source, device, dictionarySetId,
-                    this.lowLatencyActive
+                    this.lowLatencyActive,
+                    // 再開は文字起こしにしか存在しないので、そのまま設定を渡す。
+                    this.settings.transcribeLanguage
                 );
                 if (!this.recording || this.stopping) {
                     // 再接続の最中にユーザーが停止操作をしていた。この接続は使わない。

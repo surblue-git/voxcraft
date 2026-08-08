@@ -85,6 +85,11 @@ class AsrOptions:
     # 口述は従来の block_hallucinations で同じ文言を既に捨てているので False のまま
     # ＝ 挙動不変。文字起こし・復旧だけ True にする。
     block_boilerplate: bool = False
+    # 認識させる言語。None なら config.language（既定 ja）を使う ＝ 従来の挙動。
+    # 逐次通訳のように日英が混ざる録音を、チャンクごとに言語を変えて認識するために
+    # 持たせている。config.language はグローバル env なので、これを env で切り替えると
+    # 日本語の口述まで巻き添えで壊れる。モード別に持てば口述は None のまま無傷でいられる。
+    language: str | None = None
 
     @staticmethod
     def dictation() -> "AsrOptions":
@@ -348,6 +353,22 @@ class Transcriber:
             if self._model is None:
                 self.load()
 
+    def detect_language(self, audio: np.ndarray) -> tuple[str, float, dict[str, float]]:
+        """チャンクが何語かを判定する（本文は作らない）。
+
+        逐次通訳のように日英が混ざる録音で、チャンクごとにどちらの言語で認識させるかを
+        決めるために使う。Whisper の判定は先頭の30秒窓ひとつを見るだけなので、
+        VAD で切ったチャンク（数秒）なら1回で足りる。
+
+        戻り値は (最有力の言語, その確率, 全言語の確率)。呼び出し側が ja と en の
+        差を見たいので、上位1件だけでなく全体も返す。
+        """
+        if self._model is None:
+            raise RuntimeError("model not loaded")
+        with self._lock:
+            lang, prob, all_probs = self._model.detect_language(audio)
+        return lang, float(prob), {k: float(v) for k, v in all_probs}
+
     def transcribe(
         self,
         audio: np.ndarray,
@@ -378,7 +399,7 @@ class Transcriber:
         with self._lock:
             segments, _info = self._model.transcribe(
                 audio,
-                language=config.language,
+                language=o.language or config.language,
                 task="transcribe",
                 initial_prompt=o.initial_prompt,
                 hotwords=hotwords or None,
@@ -455,3 +476,23 @@ _probe_transcriber: Transcriber | None = (
 def probe_transcriber() -> Transcriber:
     """コマンド先読み用のモデルを返す（未設定なら口述と同じものを使う）。"""
     return _probe_transcriber or transcriber
+
+
+# 言語判定専用モデル（既定 base ≒ 99ms）。本文には使わない。
+# 文字起こしと同じモデルが指定されたら二重ロードを避けて使い回す。
+_lid_transcriber: Transcriber | None = (
+    Transcriber(config.language_detect_model)
+    if config.language_detect_model
+    and resolve_model_name(config.language_detect_model)
+    != resolve_model_name(config.transcribe_model)
+    else None
+)
+
+
+def lid_transcriber() -> Transcriber:
+    """言語判定用のモデルを返す（未設定なら文字起こしと同じものを使う）。
+
+    口述モデル（既定 kotoba）には決して落とさない。日本語特化モデルの言語判定は
+    当てにならないため。判定にどれだけ小さいモデルで足りるかは config を参照。
+    """
+    return _lid_transcriber or hq_transcriber()

@@ -2,6 +2,7 @@ import { App, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import type VoxCraftPlugin from "./main";
 import { AudioInputDevice, listAudioInputs } from "./audio";
 import { DictModal, fetchAudioDevices, fetchDictionaryCatalog, fetchHealth, httpBase } from "./dict";
+import type { TranscribeLanguage } from "./ws";
 
 export interface VoxEndpoint {
     label: string; // 表示名（例:「自宅LAN」「Tailscale」）
@@ -15,6 +16,7 @@ export interface VoxCraftSettings {
     selection: string;        // "auto" | エンドポイントの url（固定接続）
     dictionarySetByEndpoint: Record<string, string>; // 接続先URLごとの辞書セットID
     systemDeviceByEndpoint: Record<string, string>;  // 接続先URLごとのPC音声の入力先（空=既定の出力）
+    transcribeLanguage: TranscribeLanguage; // 文字起こしの言語。口述には効かない
     stripJaAlnumSpace: boolean; // 日本語と英数字の間の半角スペース除去
     symbolDictation: boolean;   // 「まる」等の記号読み上げ
     enableCommands: boolean;    // 音声コマンドを有効化
@@ -34,6 +36,7 @@ export const DEFAULT_SETTINGS: VoxCraftSettings = {
     selection: AUTO,
     dictionarySetByEndpoint: {},
     systemDeviceByEndpoint: {},
+    transcribeLanguage: "ja",
     stripJaAlnumSpace: true,
     symbolDictation: true,
     enableCommands: true,
@@ -449,6 +452,25 @@ export class VoxCraftSettingTab extends PluginSettingTab {
 
         // ---- 認識・整形オプション ----
         containerEl.createEl("h3", { text: "認識・整形" });
+
+        new Setting(containerEl)
+            .setName("文字起こしの言語")
+            .setDesc(
+                "口述には影響しない（常に日本語）。" +
+                "「英語」は英語のみの話者向けで、日本語向けの後処理（辞書・自動句読点）は当たらない。" +
+                "「自動判別」は逐次通訳のように話者が入れ替わる取材向けで、" +
+                "チャンクごとに言語を判定するぶん少し遅くなる。"
+            )
+            .addDropdown((d) => {
+                d.addOption("ja", "日本語（既定）");
+                d.addOption("en", "英語");
+                d.addOption("auto", "自動判別（日英が混ざる取材）");
+                d.setValue(this.plugin.settings.transcribeLanguage);
+                d.onChange(async (v) => {
+                    this.plugin.settings.transcribeLanguage = v as TranscribeLanguage;
+                    await this.plugin.saveSettings();
+                });
+            });
 
         new Setting(containerEl)
             .setName("英数字まわりの半角スペースを除去")

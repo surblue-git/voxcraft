@@ -32,6 +32,19 @@ class Config:
     # （216秒＝12秒×18）が ⟨未認識⟩ として欠落していた。
     # 口述は短い発話が中心で挙動を変えない方針のため、こちらは model のまま。
     transcribe_model: str = _env("VOXCRAFT_TRANSCRIBE_MODEL", "turbo")
+    # 文字起こしの言語判定（language=auto）に使うモデル。本文には一切使わない。
+    # 判定はエンコーダ1回で済むので、本文用の大きいモデルを使う必要がない。
+    # 実測 2026-08-08（英語30・日本語30チャンク / GTX 1660 SUPER）:
+    #   turbo 1114ms / small 272ms / base 99ms / tiny 57ms
+    #   判定結果は4つとも完全一致（英語30/30・日本語30/30）。
+    # turbo で判定すると認識と同じ時間がもう一度かかり、auto が実質2倍遅くなる。
+    language_detect_model: str = _env("VOXCRAFT_LANGUAGE_DETECT_MODEL", "base")
+    # 両方の言語がこの確率を超えたら「1つの範囲に日英が同居している」とみなす。
+    # 逐次通訳の実測（2026-08-07・50.4分）で、7秒チャンクの 9.5% がこれに該当した。
+    # PC音声の補正は30秒を丸ごと1言語で解き直すので、該当する範囲は差し替えない。
+    language_mix_threshold: float = float(
+        _env("VOXCRAFT_LANGUAGE_MIX_THRESHOLD", "0.15")
+    )
     # "auto"（GPUがあれば cuda、無ければ cpu）/ "cpu" / "cuda"
     device: str = _env("VOXCRAFT_DEVICE", "auto")
     # "auto"（cuda→int8_float16 / cpu→int8）/ "int8" / "float16" / "int8_float16" ...

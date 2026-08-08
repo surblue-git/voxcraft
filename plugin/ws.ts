@@ -6,6 +6,13 @@ export type AsrMode = "dictation" | "transcribe";
 // system-client = この端末の再生音（ステレオミキサー等）を取って送る
 export type AsrSource = "microphone" | "system" | "system-client";
 
+// 文字起こしの言語。口述は常に日本語で、この指定の影響を受けない。
+//   ja   … 従来どおり日本語固定
+//   en   … 英語のみの話者。日本語向けの後処理（辞書・自動句読点）は当たらない
+//   auto … チャンクごとに判定。逐次通訳のように話者が入れ替わる取材向け。
+//          判定1回ぶん（エンコーダ1パス）が毎チャンクに乗る
+export type TranscribeLanguage = "ja" | "en" | "auto";
+
 // PC音声として扱う音源か（取得元が違うだけで、扱いはサーバー・クライアントとも共通）。
 export function isSystemSource(source: AsrSource): boolean {
     return source === "system" || source === "system-client";
@@ -283,7 +290,8 @@ export class AsrSocket {
         source: AsrSource = "microphone",
         device?: string,
         dictionarySetId = "default",
-        lowLatency = false
+        lowLatency = false,
+        language: TranscribeLanguage = "ja"
     ): Promise<StartResult> {
         if (!this.connected) return Promise.reject(new Error("サーバーに接続されていません"));
         this.rejectStart("別の開始要求に置き換えられました");
@@ -296,9 +304,10 @@ export class AsrSocket {
             this.pendingStart = { resolve, reject, timer };
             // device は system-client のときだけ意味を持つ（表示名をそのまま返す）。
             // lowLatency はマイク入力の文字起こしにだけ効く（サーバー側で判定する）。
+            // language も文字起こしにだけ効く（口述側はサーバーが無視する）。
             this.send({
                 type: "start", stripSpace, symbols, mode, source, device,
-                dictionarySetId, lowLatency,
+                dictionarySetId, lowLatency, language,
             });
         });
     }
@@ -313,7 +322,8 @@ export class AsrSocket {
         source: AsrSource = "microphone",
         device?: string,
         dictionarySetId = "default",
-        lowLatency = false
+        lowLatency = false,
+        language: TranscribeLanguage = "ja"
     ): Promise<StartResult> {
         if (!this.connected) return Promise.reject(new Error("サーバーに接続されていません"));
         this.rejectStart("別の開始要求に置き換えられました");
@@ -324,10 +334,11 @@ export class AsrSocket {
                 reject(new Error("録音の再開がタイムアウトしました"));
             }, 15000);
             this.pendingStart = { resolve, reject, timer };
-            // 再接続でも連結器を作り直すので、lowLatency は毎回送る必要がある。
+            // 再接続でも連結器を作り直すので、lowLatency と language は毎回送る。
             this.send({
                 type: "resume", session, stripSpace, symbols,
-                mode: "transcribe", source, device, dictionarySetId, lowLatency,
+                mode: "transcribe", source, device, dictionarySetId,
+                lowLatency, language,
             });
         });
     }

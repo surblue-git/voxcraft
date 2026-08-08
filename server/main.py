@@ -45,13 +45,15 @@ import asyncio
 import json
 import sys
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
-from asr import AsrOptions, hq_transcriber, probe_transcriber, transcriber
+from asr import (
+    AsrOptions, hq_transcriber, lid_transcriber, probe_transcriber, transcriber,
+)
 from config import config
 from dictionary_registry import (
     DictionaryRevisionConflict,
@@ -345,6 +347,45 @@ def _pcm16_to_float32(data: bytes) -> np.ndarray:
     return (ints.astype(np.float32) / 32768.0)
 
 
+def _detect_language_sync(audio: np.ndarray) -> dict[str, float]:
+    tr = lid_transcriber()
+    tr.ensure_loaded()
+    return tr.detect_language(audio)[2]
+
+
+async def _detect_language_probs(audio: np.ndarray) -> dict[str, float]:
+    """言語ごとの確率を返す。判定に失敗したら空の dict。
+
+    呼び出し側が ja と en の差だけでなく「両方高い＝日英が同居している」も
+    見たいので、勝った言語ではなく確率そのものを返す。
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _detect_language_sync, audio)
+    except Exception as exc:  # noqa: BLE001 — 判定は補助。落ちても本文は流す。
+        print(f"[VoxCraft] 言語判定に失敗: {str(exc)[:80]}")
+        return {}
+
+
+async def _detect_chunk_language(audio: np.ndarray) -> str:
+    """チャンクが日本語か英語かを判定する（文字起こしの language=auto 用）。
+
+    逐次通訳の取材では話者と通訳者が交互に話すので、セッション単位で言語を
+    決め打ちできない。bilingual.py の実測（2026-08-07 の取材50分）では、
+    「ja固定なのに英字だらけになった区間」102件の97%を en と呼べている。
+
+    判定には小さい専用モデルを使う（config.language_detect_model / 既定 base ≒ 99ms）。
+    turbo で判定すると 1114ms かかり、認識そのもの（1272ms）とほぼ同じ時間がもう一度
+    乗る。判定結果は base と turbo で完全一致したので、大きいモデルを使う理由がない。
+
+    判定に失敗しても本文そのものは作れるので、既定言語に倒す。
+    """
+    probs = await _detect_language_probs(audio)
+    if not probs:
+        return config.language
+    return "en" if probs.get("en", 0.0) > probs.get("ja", 0.0) else "ja"
+
+
 async def _transcribe_chunk(
     audio: np.ndarray,
     opts: AsrOptions,
@@ -608,6 +649,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
     joiner: ChunkJoiner | None = None
     breaker: ParagraphBreaker | None = None
     opts = AsrOptions.dictation()
+    # 文字起こしの言語。"ja" | "en" | "auto"（チャンクごとに判定）。
+    # 口述には一切効かない（日本語固定のまま ＝ 挙動不変）。
+    transcribe_language = "ja"
     strip_space = config.strip_ja_alnum_space
     symbols = config.enable_symbol_dictation
     punctuate = config.enable_auto_punctuation
@@ -782,6 +826,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
         # mode は下のコマンド処理で書き換わる。ここは常に現在のモードを見る。
         chunk_opts = AsrOptions.recovery() if recovery else opts
+        # 逐次通訳（language=auto）は、チャンクごとに話者が入れ替わる。
+        # 復旧はもとの言語が分からないので既定のまま触らない。
+        if mode == "transcribe" and not recovery and transcribe_language == "auto":
+            chunk_opts = replace(chunk_opts, language=await _detect_chunk_language(audio))
+        # 英語チャンクに日本語向けの後処理を当てない（下の postprocess で使う）。
+        english = mode == "transcribe" and (chunk_opts.language or config.language) == "en"
         result = await _transcribe_chunk(
             audio, chunk_opts, dictionary, hq=(mode == "transcribe")
         )
@@ -804,17 +854,19 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     f"[VoxCraft] 文脈付き定型句を除去: {contextual_blocked} "
                     f"({start / config.sample_rate:.1f}-{end / config.sample_rate:.1f}秒)"
                 )
+        # 日本語向けの後処理（表記ゆれ辞書・記号読み・和欧間スペース除去・自動句読点）は
+        # 英語チャンクには当てない。英語が直るわけではなく、壊す余地しかないため。
         text = postprocess(
             raw_text,
-            strip_space=strip_space,
-            symbol_dictation=symbols,
+            strip_space=strip_space and not english,
+            symbol_dictation=symbols and not english,
             # 括弧の文中変換は口述だけ。録音の書き起こしを黙って書き換えない。
             inline_symbols=(
                 symbols and mode == "dictation" and config.enable_inline_symbols
             ),
-            replacements=dictionary.replacement_plan,
+            replacements=None if english else dictionary.replacement_plan,
             symbols=dictionary.symbols,
-            auto_punctuate=punctuate,
+            auto_punctuate=punctuate and not english,
         )
         _log_chunk(
             "recovery" if recovery else mode,
@@ -842,8 +894,33 @@ async def ws_endpoint(ws: WebSocket) -> None:
         audio = job["audio"]
         span: RefinementRange = job["range"]
         dictionary: DictionarySnapshot = job["dictionary"]
+        # 補正は速報と同じ言語で解かないと、英語の速報を日本語で差し替えてしまう。
+        refine_language = transcribe_language
+        if transcribe_language == "auto":
+            probs = await _detect_language_probs(audio)
+            # 30秒の窓に日英が同居していたら、差し替えそのものをやめる。
+            # 補正は範囲を丸ごと1言語で解き直すので、逐次通訳のように話者が入れ替わる
+            # 範囲では**必ず半分を壊す**。速報はチャンクごとに判定できていて既に
+            # 正しいのだから、そこへ上書きするほうが悪い（実測: 逐次通訳で
+            # チャンクの9.5%が同居。30秒に広げればさらに増える）。
+            # 判定できなかったときも、賭けずに速報を残す。
+            mix = config.language_mix_threshold
+            if not probs or min(probs.get("ja", 0.0), probs.get("en", 0.0)) >= mix:
+                print(
+                    f"[VoxCraft] PC音声の補正を見送り（日英が同居）: "
+                    f"{span.start / config.sample_rate:.1f}-"
+                    f"{span.end / config.sample_rate:.1f}秒"
+                )
+                return
+            refine_language = (
+                "en" if probs.get("en", 0.0) > probs.get("ja", 0.0) else "ja"
+            )
+        refine_english = refine_language == "en"
         result = await _transcribe_chunk(
-            audio, AsrOptions.refinement(), dictionary, hq=True
+            audio,
+            replace(AsrOptions.refinement(), language=refine_language),
+            dictionary,
+            hq=True,
         )
         raw_text = result.text
         if raw_text:
@@ -861,12 +938,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
             result.blocked.extend(contextual_blocked)
         text = postprocess(
             raw_text,
-            strip_space=strip_space,
+            strip_space=strip_space and not refine_english,
             # 動画中の「まる」を句点命令として扱わない。
             symbol_dictation=False,
-            replacements=dictionary.replacement_plan,
+            replacements=None if refine_english else dictionary.replacement_plan,
             symbols=dictionary.symbols,
-            auto_punctuate=punctuate,
+            auto_punctuate=punctuate and not refine_english,
         )
         if not text:
             print(
@@ -1191,6 +1268,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         """
         nonlocal dictionary_snapshot, session, mode, source, chunker, joiner, breaker
         nonlocal opts, punctuate, silence_tracker, auto_stop_task, strip_space, symbols
+        nonlocal transcribe_language
         nonlocal input_finished, previous_transcript_text, pending_contextual_chunk
         nonlocal refinement_delivered_end, audio_ring, last_source_chunk_end
         nonlocal system_device_label
@@ -1258,7 +1336,19 @@ async def ws_endpoint(ws: WebSocket) -> None:
             and source not in SYSTEM_SOURCES
         )
         if mode == "transcribe":
+            # 取材の言語。既定 ja ＝ 従来の挙動。en は英語のみの話者、
+            # auto は逐次通訳のようにチャンクごとに入れ替わる場合。
+            requested_language = cmd.get("language", "ja")
+            transcribe_language = (
+                requested_language
+                if requested_language in ("ja", "en", "auto")
+                else "ja"
+            )
             opts = AsrOptions.transcription()
+            if transcribe_language != "auto":
+                opts = replace(opts, language=transcribe_language)
+            if transcribe_language != "ja":
+                print(f"[VoxCraft] 文字起こしの言語: {transcribe_language}")
             system_mode = source in SYSTEM_SOURCES
             join_sec, join_hold_sec, join_break_sec = _join_profile(
                 system_mode, low_latency
@@ -1287,6 +1377,13 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 asyncio.get_running_loop().run_in_executor(
                     None, hq.ensure_loaded
                 )
+            # 言語判定も初回チャンクで待たせない（auto のときだけロードする）。
+            if transcribe_language == "auto":
+                lid = lid_transcriber()
+                if not lid.ready:
+                    asyncio.get_running_loop().run_in_executor(
+                        None, lid.ensure_loaded
+                    )
             if resume_session is not None:
                 # 同じWAVファイルへ引き続き追記する。新規セッションは作らない。
                 session = resume_session
@@ -1303,6 +1400,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
             opts = AsrOptions.dictation()
             joiner = None
             breaker = None
+            # 口述に戻したら言語も既定へ戻す（モードをまたいで持ち越さない）。
+            transcribe_language = "ja"
         punctuate = config.enable_auto_punctuation
 
         source_info: dict = {}
