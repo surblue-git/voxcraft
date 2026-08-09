@@ -33,7 +33,31 @@
     border-bottom: 1px dotted var(--text-faint);
 }
 
+/* 言い直し待ちの対象。次の発話でここが置き換わる、という予告。
+   点線（叩ける）とは別物なので、はっきり分かる塗りにする。 */
+.voxcraft-respeak-target {
+    background: var(--text-highlight-bg, rgba(255, 200, 0, 0.3));
+    border-radius: 3px;
+    box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
 /* 変換戻しモーダル */
+/* ボタン列。既定では右寄せ1行に並ぶので、画面が狭いと（折りたたみ端末を
+   閉じたとき等）左端から溢れて「確定」が切れていた。折り返して収める。 */
+.voxcraft-reconvert .setting-item-control {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.4em;
+}
+.voxcraft-reconvert .setting-item {
+    border-top: none;
+    padding-top: 0.5em;
+}
+.voxcraft-reconvert .setting-item-control button {
+    /* 長い文言でも潰れず、必要なら次の行へ回る。 */
+    flex: 0 0 auto;
+}
+
 .voxcraft-reconvert .voxcraft-hint {
     color: var(--text-muted);
     font-size: 0.85em;

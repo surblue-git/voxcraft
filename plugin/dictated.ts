@@ -89,7 +89,59 @@ const dictatedDecorations = EditorView.decorations.compute(
     }
 );
 
-export const dictatedExtension: Extension = [dictatedField, dictatedDecorations];
+// ---- 言い直し待ちの対象 ----
+//
+// 「次の発話でここを置き換える」状態を本文の上で見せる。ステータスバーにも
+// 文言は出しているが、モバイルではツールバーの下敷きになって気づけない。
+// **何が置き換わるか**は本文を見て分かるべきなので、対象そのものを光らせる。
+
+export const setRespeakTargetEffect = StateEffect.define<DictatedRange | null>();
+
+const respeakField = StateField.define<DictatedRange | null>({
+    create() {
+        return null;
+    },
+    update(value, tr) {
+        for (const e of tr.effects) {
+            if (e.is(setRespeakTargetEffect)) return e.value;
+        }
+        if (value && tr.docChanged) {
+            const from = tr.changes.mapPos(value.from, 1);
+            const to = tr.changes.mapPos(value.to, -1);
+            return to > from ? { from, to } : null;
+        }
+        return value;
+    },
+});
+
+const respeakDecorations = EditorView.decorations.compute(
+    [respeakField],
+    (state): DecorationSet => {
+        const r = state.field(respeakField, false);
+        if (!r) return Decoration.none;
+        const from = Math.max(0, r.from);
+        const to = Math.min(r.to, state.doc.length);
+        if (to <= from) return Decoration.none;
+        return Decoration.set([
+            Decoration.mark({ class: "voxcraft-respeak-target" }).range(from, to),
+        ]);
+    }
+);
+
+export const dictatedExtension: Extension = [
+    dictatedField,
+    dictatedDecorations,
+    respeakField,
+    respeakDecorations,
+];
+
+export function setRespeakTarget(cm: EditorView, range: DictatedRange | null): void {
+    cm.dispatch({ effects: setRespeakTargetEffect.of(range) });
+}
+
+export function respeakTargetIn(state: EditorState): DictatedRange | null {
+    return state.field(respeakField, false) ?? null;
+}
 
 // ---- ヘルパー（main.ts から使う） ----
 

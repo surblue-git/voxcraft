@@ -58,6 +58,7 @@ import {
     clearDictated,
     dictatedRangeAt,
     clauseAround,
+    setRespeakTarget,
     TAP_WINDOW_MAX,
 } from "./dictated";
 import { wordRangeAt } from "./select";
@@ -816,6 +817,9 @@ export default class VoxCraftPlugin extends Plugin {
             // 停止後に点線が残っていると「叩けるのに反応しない」という
             // 見た目と挙動の食い違いになる。
             clearDictated(this.cm);
+            // 言い直し待ちの塗りも同様。呼び出し側は this.cm を消したあとに
+            // setPendingRespeak(null) を呼ぶので、ここで消さないと残る。
+            setRespeakTarget(this.cm, null);
         }
         this.cm = null;
     }
@@ -1800,6 +1804,12 @@ export default class VoxCraftPlugin extends Plugin {
                 onRegisterSymbol: (f, s) => void this.registerSymbol(f, s),
                 locationLabel: context.locationLabel,
                 onSkip: context.onSkip,
+                // 読みが壊れている誤認識は候補では直らない。口述の録音中だけ、
+                // その場から言い直しへ抜けられるようにする。
+                onRespeak:
+                    this.recording && this.mode === "dictation"
+                        ? () => this.startRespeakRange(range, originalText)
+                        : undefined,
             }
         );
         this.adoptModal(modal);
@@ -1934,10 +1944,40 @@ export default class VoxCraftPlugin extends Plugin {
     ): void {
         const was = this.pendingRespeak !== null;
         this.pendingRespeak = value;
+        // 何が置き換わるかを本文の上で見せる。ステータスバーの文言だけでは、
+        // モバイルでツールバーの下敷きになって気づけない。
+        if (this.cm && this.cm.dom.isConnected) {
+            setRespeakTarget(this.cm, value ? { from: value.from, to: value.to } : null);
+        }
         const now = value !== null;
         if (was === now) return;
         // 録音していないときは送る先が無い（開始時に既定値から始まるので問題ない）。
         if (this.recording && this.mode === "dictation") this.socket?.sendTuneWord(now);
+    }
+
+    // 候補モーダルの「言い直す」。候補に正解が無い＝読み自体が誤認識されている
+    // ケースの逃げ道で、閉じたあと次の発話1回をこの範囲への置換にする。
+    private startRespeakRange(range: { from: number; to: number }, text: string): void {
+        const cm = this.cm;
+        if (!cm || !cm.dom.isConnected || !this.recording || this.mode !== "dictation") {
+            new Notice("VoxCraft: 言い直しは口述の録音中にだけ使えます。");
+            return;
+        }
+        // 対象が動いていたら、置換と同じ規則で探し直す（applyRespeak も再検証する）。
+        const doc = cm.state.doc;
+        let to = Math.min(range.to, doc.length);
+        let from = Math.min(range.from, to);
+        if (doc.sliceString(from, to) !== text) {
+            const idx = doc.toString().lastIndexOf(text);
+            if (idx < 0) {
+                new Notice("VoxCraft: 対象が編集されたため言い直せません。");
+                return;
+            }
+            from = idx;
+            to = idx + text.length;
+        }
+        this.setPendingRespeak({ from, to, text });
+        this.setStatus(`言い直し待ち —「${text}」を次の発話で置換`);
     }
 
     // 口述対象のエディタに選択範囲があるか（言い直しコマンドの成立条件）。

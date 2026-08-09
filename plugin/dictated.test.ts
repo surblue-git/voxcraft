@@ -12,6 +12,8 @@ import {
     dictatedExtension,
     dictatedRangesIn,
     clauseAround,
+    setRespeakTargetEffect,
+    respeakTargetIn,
 } from "./dictated";
 
 let failures = 0;
@@ -113,6 +115,47 @@ function eq(label: string, got: string[], want: string[]): void {
     s = s.update({ changes: { from: 5, to: 5, insert: "です" } }).state;
     s = s.update({ effects: addDictatedEffect.of({ from: 5, to: 7 }) }).state;
     eq("続けて口述", texts(s), ["口述です"]);
+}
+
+// ---- 言い直し待ちの対象 ----
+
+function respeakText(state: EditorState): string | null {
+    const r = respeakTargetIn(state);
+    return r ? state.doc.sliceString(r.from, r.to) : null;
+}
+
+function eqRespeak(label: string, got: string | null, want: string | null): void {
+    if (got !== want) {
+        failures++;
+        console.error(`FAIL ${label}\n  got  ${got}\n  want ${want}`);
+    } else {
+        console.log(`ok   ${label}`);
+    }
+}
+
+// 対象は文書変更に追従する（前に文字が入っても中身は変わらない）
+{
+    let s = EditorState.create({ doc: "これは口述です", extensions: [dictatedExtension] });
+    s = s.update({ effects: setRespeakTargetEffect.of({ from: 3, to: 5 }) }).state;
+    eqRespeak("言い直し対象", respeakText(s), "口述");
+    s = s.update({ changes: { from: 0, to: 0, insert: "さて、" } }).state;
+    eqRespeak("言い直し対象（前に挿入）", respeakText(s), "口述");
+}
+
+// 対象が消えたら塗りも消える（存在しない範囲を光らせ続けない）
+{
+    let s = EditorState.create({ doc: "これは口述です", extensions: [dictatedExtension] });
+    s = s.update({ effects: setRespeakTargetEffect.of({ from: 3, to: 5 }) }).state;
+    s = s.update({ changes: { from: 3, to: 5, insert: "" } }).state;
+    eqRespeak("言い直し対象（削除）", respeakText(s), null);
+}
+
+// 明示的な解除
+{
+    let s = EditorState.create({ doc: "これは口述です", extensions: [dictatedExtension] });
+    s = s.update({ effects: setRespeakTargetEffect.of({ from: 3, to: 5 }) }).state;
+    s = s.update({ effects: setRespeakTargetEffect.of(null) }).state;
+    eqRespeak("言い直し対象（解除）", respeakText(s), null);
 }
 
 // ---- clauseAround: 送る窓の切り出し ----

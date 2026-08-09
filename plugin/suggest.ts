@@ -24,6 +24,11 @@ export interface ReconvertModalOpts {
     // 記号候補を選んで登録したときに呼ばれる（元表記, 辞書へ入れる値）。
     // 置換辞書ではなく記号語辞書へ入れる必要があるため、経路を分ける。
     onRegisterSymbol?: (from: string, symbol: string) => void;
+    // 「言い直す」を押したとき。読み自体が壊れている誤認識は、候補をいくら
+    // 並べても正解が出てこない（「変換候補」を『変換個』と聞き取ったら、
+    // 読みは「こ」なので「こうほ」の候補は原理的に現れない）。その行き止まりから
+    // 抜ける道として、候補の隣に置く。録音中の口述でしか意味がないので任意。
+    onRespeak?: () => void;
     // 同じ読みを連続して遡るときの現在位置。
     locationLabel?: string;
     // この一致を変更せず、次回の検索対象から外す。
@@ -138,6 +143,20 @@ export class ReconvertModal extends Modal {
                         "（記号を選んだときは記号語として登録する）"
                     )
                     .onClick(() => this.submit(true))
+            );
+        }
+        if (this.opts.onRespeak) {
+            buttons.addButton((b) =>
+                b
+                    .setButtonText("言い直す")
+                    .setTooltip(
+                        "候補に正解が無いとき（読み自体が誤認識されている）。" +
+                        "閉じて、次の発話でこの範囲を置き換える"
+                    )
+                    .onClick(() => {
+                        this.close();
+                        this.opts.onRespeak?.();
+                    })
             );
         }
         if (this.opts.onSkip) {

@@ -1045,6 +1045,17 @@ var ReconvertModal = class extends import_obsidian2.Modal {
         ).onClick(() => this.submit(true))
       );
     }
+    if (this.opts.onRespeak) {
+      buttons.addButton(
+        (b) => b.setButtonText("\u8A00\u3044\u76F4\u3059").setTooltip(
+          "\u5019\u88DC\u306B\u6B63\u89E3\u304C\u7121\u3044\u3068\u304D\uFF08\u8AAD\u307F\u81EA\u4F53\u304C\u8AA4\u8A8D\u8B58\u3055\u308C\u3066\u3044\u308B\uFF09\u3002\u9589\u3058\u3066\u3001\u6B21\u306E\u767A\u8A71\u3067\u3053\u306E\u7BC4\u56F2\u3092\u7F6E\u304D\u63DB\u3048\u308B"
+        ).onClick(() => {
+          var _a, _b;
+          this.close();
+          (_b = (_a = this.opts).onRespeak) == null ? void 0 : _b.call(_a);
+        })
+      );
+    }
     if (this.opts.onSkip) {
       buttons.addButton(
         (b) => b.setButtonText("\u3053\u306E\u7B87\u6240\u3092\u30B9\u30AD\u30C3\u30D7").setTooltip("\u5909\u66F4\u305B\u305A\u3001\u6B21\u306E\u540C\u3058\u518D\u5909\u63DB\u3067\u306F\u4E00\u3064\u524D\u306E\u4E00\u81F4\u3092\u63A2\u3059").onClick(() => {
@@ -2297,7 +2308,48 @@ var dictatedDecorations = import_view2.EditorView.decorations.compute(
     return marks.length ? import_state2.RangeSet.of(marks, true) : import_view2.Decoration.none;
   }
 );
-var dictatedExtension = [dictatedField, dictatedDecorations];
+var setRespeakTargetEffect = import_state2.StateEffect.define();
+var respeakField = import_state2.StateField.define({
+  create() {
+    return null;
+  },
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setRespeakTargetEffect))
+        return e.value;
+    }
+    if (value && tr.docChanged) {
+      const from = tr.changes.mapPos(value.from, 1);
+      const to = tr.changes.mapPos(value.to, -1);
+      return to > from ? { from, to } : null;
+    }
+    return value;
+  }
+});
+var respeakDecorations = import_view2.EditorView.decorations.compute(
+  [respeakField],
+  (state) => {
+    const r = state.field(respeakField, false);
+    if (!r)
+      return import_view2.Decoration.none;
+    const from = Math.max(0, r.from);
+    const to = Math.min(r.to, state.doc.length);
+    if (to <= from)
+      return import_view2.Decoration.none;
+    return import_view2.Decoration.set([
+      import_view2.Decoration.mark({ class: "voxcraft-respeak-target" }).range(from, to)
+    ]);
+  }
+);
+var dictatedExtension = [
+  dictatedField,
+  dictatedDecorations,
+  respeakField,
+  respeakDecorations
+];
+function setRespeakTarget(cm, range) {
+  cm.dispatch({ effects: setRespeakTargetEffect.of(range) });
+}
 function markDictated(cm, from, to) {
   if (to <= from)
     return;
@@ -3294,6 +3346,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     if (this.cm && this.cm.dom.isConnected) {
       clearAnchor(this.cm);
       clearDictated(this.cm);
+      setRespeakTarget(this.cm, null);
     }
     this.cm = null;
   }
@@ -4148,7 +4201,10 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         onRegister: (f, t) => void this.registerReplacement(f, t),
         onRegisterSymbol: (f, s) => void this.registerSymbol(f, s),
         locationLabel: context.locationLabel,
-        onSkip: context.onSkip
+        onSkip: context.onSkip,
+        // 読みが壊れている誤認識は候補では直らない。口述の録音中だけ、
+        // その場から言い直しへ抜けられるようにする。
+        onRespeak: this.recording && this.mode === "dictation" ? () => this.startRespeakRange(range, originalText) : void 0
       }
     );
     this.adoptModal(modal);
@@ -4271,11 +4327,37 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     var _a;
     const was = this.pendingRespeak !== null;
     this.pendingRespeak = value;
+    if (this.cm && this.cm.dom.isConnected) {
+      setRespeakTarget(this.cm, value ? { from: value.from, to: value.to } : null);
+    }
     const now = value !== null;
     if (was === now)
       return;
     if (this.recording && this.mode === "dictation")
       (_a = this.socket) == null ? void 0 : _a.sendTuneWord(now);
+  }
+  // 候補モーダルの「言い直す」。候補に正解が無い＝読み自体が誤認識されている
+  // ケースの逃げ道で、閉じたあと次の発話1回をこの範囲への置換にする。
+  startRespeakRange(range, text) {
+    const cm = this.cm;
+    if (!cm || !cm.dom.isConnected || !this.recording || this.mode !== "dictation") {
+      new import_obsidian7.Notice("VoxCraft: \u8A00\u3044\u76F4\u3057\u306F\u53E3\u8FF0\u306E\u9332\u97F3\u4E2D\u306B\u3060\u3051\u4F7F\u3048\u307E\u3059\u3002");
+      return;
+    }
+    const doc = cm.state.doc;
+    let to = Math.min(range.to, doc.length);
+    let from = Math.min(range.from, to);
+    if (doc.sliceString(from, to) !== text) {
+      const idx = doc.toString().lastIndexOf(text);
+      if (idx < 0) {
+        new import_obsidian7.Notice("VoxCraft: \u5BFE\u8C61\u304C\u7DE8\u96C6\u3055\u308C\u305F\u305F\u3081\u8A00\u3044\u76F4\u305B\u307E\u305B\u3093\u3002");
+        return;
+      }
+      from = idx;
+      to = idx + text.length;
+    }
+    this.setPendingRespeak({ from, to, text });
+    this.setStatus(`\u8A00\u3044\u76F4\u3057\u5F85\u3061 \u2014\u300C${text}\u300D\u3092\u6B21\u306E\u767A\u8A71\u3067\u7F6E\u63DB`);
   }
   // 口述対象のエディタに選択範囲があるか（言い直しコマンドの成立条件）。
   hasSelection() {
