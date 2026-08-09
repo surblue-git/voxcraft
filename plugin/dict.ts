@@ -53,7 +53,11 @@ export async function fetchAudioDevices(
 // /reconvert の応答（server/reconvert.py の戻り値と対）。
 export interface ReconvertPayload {
     reading: string;
-    segments: { reading: string; candidates: string[] }[];
+    // start/end は送ったテキスト上の文字位置。タップした語を特定するために使う
+    // （古いサーバーは返さないので任意）。
+    segments: { reading: string; candidates: string[]; start?: number; end?: number }[];
+    // offset を渡したときだけ返る。その位置を含む文節の番号（範囲外なら null）。
+    at?: number | null;
     online: boolean;
     dictionarySetId?: string;
     dictionaryRevision?: string;
@@ -162,13 +166,19 @@ export async function addDictionarySymbol(
 export async function fetchReconvert(
     wsUrl: string,
     text: string,
-    dictionarySetId = "default"
+    dictionarySetId = "default",
+    // タップした位置（text 上の文字位置）。渡すと payload.at でその文節が返る。
+    offset?: number
 ): Promise<ReconvertPayload> {
     const res = await requestUrl({
         url: `${httpBase(wsUrl)}/reconvert`,
         method: "POST",
         contentType: "application/json",
-        body: JSON.stringify({ text, dictionarySetId }),
+        body: JSON.stringify(
+            offset === undefined
+                ? { text, dictionarySetId }
+                : { text, dictionarySetId, offset }
+        ),
         throw: false,
     });
     if (res.status >= 400) {

@@ -266,6 +266,11 @@ class Config:
         "VOXCRAFT_GOOGLE_CGI_URL", "https://www.google.com/transliterate"
     )
     http_timeout_sec: float = float(_env("VOXCRAFT_HTTP_TIMEOUT", "5.0"))
+    # Google CGI に一度に投げられる読みの長さ。実測 2026-08-09（3回とも同じ）:
+    #   読み52字→9文節 / 53字→9文節 / **54字→0文節** / 55字以上→0文節
+    # 超えると「切れない」のではなく**何も返らない**。例外にもならないので、
+    # 分割せずに投げると候補ゼロのまま黙って終わる（長い一文の再変換が無反応だった原因）。
+    google_cgi_max_reading: int = int(_env("VOXCRAFT_GOOGLE_CGI_MAX_READING", "53"))
 
     # 認識時の初期プロンプト（口語・句読点を促す）。
     initial_prompt: str = _env(

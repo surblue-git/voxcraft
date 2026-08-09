@@ -27,6 +27,12 @@
     50%, 100% { opacity: 0.25; }
 }
 
+/* 口述で入ったテキスト。タップすれば変換候補を出せる、という手がかり。
+   「ここが怪しい」という意味ではないので、読む邪魔にならない濃さに留める。 */
+.voxcraft-dictated {
+    border-bottom: 1px dotted var(--text-faint);
+}
+
 /* 変換戻しモーダル */
 .voxcraft-reconvert .voxcraft-hint {
     color: var(--text-muted);

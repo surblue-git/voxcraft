@@ -319,14 +319,31 @@ async def reconvert_post(payload: dict = Body(...)) -> dict:
 
     WS の {"type": "reconvert"} と同じ reconvert() を呼ぶ。
     選択範囲の再変換や「Aを再変換」コマンドがこちらを使う。
+
+    各文節は text 上の文字位置（start/end）を持つ。`offset` を渡すと、その位置を
+    含む文節の番号を `at` で返す ＝ タップした語の特定。範囲外なら `at` は null。
+    位置は client 側でも start/end から求められるが、境界の扱いを2箇所に
+    持たせたくないのでサーバーで決める。
     """
     text = str(payload.get("text", ""))
     if not text.strip():
         raise HTTPException(status_code=400, detail="text を指定してください")
     if len(text) > 1000:
         raise HTTPException(status_code=400, detail="text が長すぎます（1000文字まで）")
+    offset = payload.get("offset")
+    if offset is not None and not isinstance(offset, int):
+        raise HTTPException(status_code=400, detail="offset は整数で指定してください")
     dictionary = _resolve_dictionary_snapshot(payload.get("dictionarySetId", "default"))
     result = await asyncio.to_thread(reconvert, text, dictionary.reverse_replacements)
+    if offset is not None:
+        result["at"] = next(
+            (
+                i
+                for i, s in enumerate(result.get("segments") or [])
+                if s.get("start") is not None and s["start"] <= offset < s["end"]
+            ),
+            None,
+        )
     return {**result, **dictionary.metadata()}
 
 

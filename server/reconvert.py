@@ -28,6 +28,20 @@ def _kata_to_hira(text: str) -> str:
     return text.translate(_KATA_TO_HIRA)
 
 
+@dataclass
+class Span:
+    """元テキストの [start, end) と、その範囲の表層・読み。
+
+    start/end は**元テキストの文字位置**。タップした位置がどの語かを決めるために、
+    読みへ変換したあとも元の位置へ戻れるようにしている。
+    """
+
+    start: int
+    end: int
+    surface: str
+    reading: str
+
+
 class _Reading:
     """Sudachi があれば使い、無ければ入力をそのまま読みとして扱う。"""
 
@@ -40,37 +54,81 @@ class _Reading:
         except Exception:
             self._tokenizer = None
 
-    def to_hiragana(
+    def _tokenize_span(self, text: str, offset: int) -> list[Span]:
+        """辞書に当たらなかった範囲を形態素へ割る。offset は元テキスト上の開始位置。"""
+        if not text:
+            return []
+        if self._tokenizer is None:
+            # フォールバック: カタカナだけひらがな化する（漢字は読めない）。
+            return [Span(offset, offset + len(text), text, _kata_to_hira(text))]
+
+        from sudachipy import tokenizer as _t  # type: ignore
+
+        out: list[Span] = []
+        pos = offset
+        for m in self._tokenizer.tokenize(text, _t.Tokenizer.SplitMode.C):
+            surface = m.surface()
+            reading = m.reading_form()  # カタカナ
+            out.append(
+                Span(pos, pos + len(surface), surface,
+                     _kata_to_hira(reading) if reading else surface)
+            )
+            pos += len(surface)
+        return out
+
+    def to_spans(
         self,
         text: str,
         reverse_replacements: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
-    ) -> str:
-        """テキスト全体の読み（ひらがな）を返す。
+    ) -> list[Span]:
+        """元テキストの文字位置つきで (表層, 読み) に割る。
 
-        ユーザー辞書の表記→読みを最優先で適用し、残りを Sudachi でひらがな化する。
+        **ユーザー辞書の逆引きでテキストを書き換えない**のが要点。以前は
+        `text.replace(表記, 読み)` してから解析していたので、置換が起きた時点で
+        元テキストの文字位置との対応が失われていた。読みの長さを測るだけなら
+        それで足りるが、**タップした位置がどの語かを決めるには使えない**。
+
+        そこで書き換える代わりに、辞書の表記に当たった範囲を「この範囲の読みはこれ」
+        という Span として記録し、当たらなかった範囲だけ Sudachi に渡す。
+        逆引きは表記の長い順に並んでいるので、前から最長一致で拾えばよい。
         """
         if reverse_replacements is None:
             from userdict import get_reverse_replacements
 
             reverse_replacements = get_reverse_replacements()
+        entries = [(s, h) for s, h in reverse_replacements if s]
 
-        # 1. ユーザー辞書の逆引き（表記 → 読み）を適用
-        for surface, hira in reverse_replacements:
-            if surface and surface in text:
-                text = text.replace(surface, hira)
+        out: list[Span] = []
+        i = 0
+        run = 0  # 辞書に当たらなかった範囲の開始位置
+        while i < len(text):
+            hit = next(((s, h) for s, h in entries if text.startswith(s, i)), None)
+            if hit is None:
+                i += 1
+                continue
+            surface, hira = hit
+            out.extend(self._tokenize_span(text[run:i], run))
+            out.append(Span(i, i + len(surface), surface, hira))
+            i += len(surface)
+            run = i
+        out.extend(self._tokenize_span(text[run:], run))
+        return out
 
-        if self._tokenizer is None:
-            # フォールバック: カタカナだけひらがな化して返す（漢字は読めない）。
-            return _kata_to_hira(text)
+    def to_morphemes(
+        self,
+        text: str,
+        reverse_replacements: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
+    ) -> list[tuple[str, str]]:
+        """(表層, ひらがな読み) の並びを返す（位置が要らない呼び出し向け）。"""
+        return [(s.surface, s.reading) for s in self.to_spans(text, reverse_replacements)]
 
-        from sudachipy import tokenizer as _t  # type: ignore
-
-        mode = _t.Tokenizer.SplitMode.C
-        out = []
-        for m in self._tokenizer.tokenize(text, mode):
-            reading = m.reading_form()  # カタカナ
-            out.append(_kata_to_hira(reading) if reading else m.surface())
-        return "".join(out)
+    def to_hiragana(
+        self,
+        text: str,
+        reverse_replacements: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
+    ) -> str:
+        """テキスト全体の読み（ひらがな）を返す。"""
+        return "".join(r for _, r in self.to_morphemes(text, reverse_replacements))
 
 
 _reading = _Reading()
@@ -103,6 +161,144 @@ def _google_transliterate(hiragana: str) -> list[Segment]:
         candidates = list(entry[1]) if len(entry) > 1 else []
         segments.append(Segment(reading=reading, candidates=candidates))
     return segments
+
+
+def split_reading(
+    morphemes: list[tuple[str, str]], limit: int | None = None
+) -> list[str]:
+    """読みを API に投げられる長さへ、**形態素境界で**割る。
+
+    Google CGI は読みが 53字を超えると何も返さない（config.google_cgi_max_reading
+    の注記を参照）。長い選択の再変換が無反応だったのはこれが原因で、超過を
+    例外ではなく空配列で返すため誰も気づけなかった。
+
+    形態素の途中で切らないのは、切られた語の変換候補が両側とも無意味になるため。
+    1形態素だけで上限を超える場合（長いカタカナ語など）はやむを得ず切る。
+    切らないと1文字も進まず、無限ループになる。
+    """
+    cap = limit or config.google_cgi_max_reading
+    out: list[str] = []
+    cur = ""
+    for _surface, reading in morphemes:
+        if not reading:
+            continue
+        if len(reading) > cap:
+            # この形態素だけで上限超え。手前を確定してから機械的に割る。
+            if cur:
+                out.append(cur)
+                cur = ""
+            for i in range(0, len(reading), cap):
+                out.append(reading[i : i + cap])
+            continue
+        if len(cur) + len(reading) > cap:
+            out.append(cur)
+            cur = reading
+        else:
+            cur += reading
+    if cur:
+        out.append(cur)
+    return out
+
+
+def transliterate_reading(hiragana: str, morphemes: list[tuple[str, str]]) -> list[Segment]:
+    """読み全体を文節に変換する。長ければ分割して投げ、結果を繋ぐ。
+
+    分割ぶんは並列に投げる（1本ずつだと選択が長いほど待たされる）。
+    1本でも落ちたらまとめて失敗にする。半分だけ候補が付いた状態を返すと、
+    ユーザーには「一部の語だけ変換できない」という理解不能な見え方になるため。
+    """
+    chunks = split_reading(morphemes)
+    if len(chunks) <= 1:
+        # 従来どおりの1回呼び出し（短い入力の挙動は変えない）。
+        return _google_transliterate(hiragana)
+
+    with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as pool:
+        results = list(pool.map(_google_transliterate, chunks))
+
+    out: list[Segment] = []
+    for chunk, segs in zip(chunks, results):
+        if not segs:
+            # 上限内なのに空 ＝ API 側の不調。黙って欠けさせない。
+            raise RuntimeError(f"変換に失敗した読みがある: {chunk[:12]}…")
+        out.extend(segs)
+    return out
+
+
+@dataclass
+class SegmentSpan:
+    """1文節と、それが元テキストのどこを占めるか。"""
+
+    start: int
+    end: int
+    reading: str
+    candidates: list[str] = field(default_factory=list)
+
+
+def segment_spans(text: str, reverse_replacements=None) -> list[SegmentSpan]:
+    """テキストを文節に割り、**元テキストの文字位置つき**で返す。"""
+    return spans_to_segments(text, _reading.to_spans(text, reverse_replacements))
+
+
+def spans_to_segments(text: str, spans: list[Span]) -> list[SegmentSpan]:
+    """解析済みの Span 列から、位置つきの文節を作る。
+
+    タップした位置から文節を決めるための中核。手順:
+      1. 読みの累積長 → 表層の累積位置 の対応表を作る
+      2. 読み全体を文節に変換する（53字制限は `split_reading` が吸収する）
+      3. 各文節の読み終端を対応表で表層位置に戻す
+
+    **文節の境界が形態素の途中に落ちることがある**（実測では数字まわりで1割ほど）。
+    そのときは直近の形態素境界へ丸める。丸めるので文節の範囲は必ず連続し、
+    連結すると元テキストに戻る ＝ 置換してもテキストが壊れない。
+    タップした語が隣の文節に入ることはあるが、それは選び直せば済む。
+
+    `text` は位置の範囲を決めるためだけに使う（spans と同じテキストであること）。
+    """
+    if not spans:
+        return []
+
+    # 読みの累積位置 → 表層の位置
+    read_at = [0]
+    surf_at = [spans[0].start]
+    for s in spans:
+        read_at.append(read_at[-1] + len(s.reading))
+        surf_at.append(s.end)
+    to_surface = dict(zip(read_at, surf_at))
+
+    hira = "".join(s.reading for s in spans)
+    segments = transliterate_reading(hira, [(s.surface, s.reading) for s in spans])
+
+    out: list[SegmentSpan] = []
+    rpos = 0
+    prev = spans[0].start
+    for seg in segments:
+        rpos += len(seg.reading)
+        if rpos in to_surface:
+            spos = to_surface[rpos]
+        else:
+            # 形態素の途中で割れた。直近の境界へ丸める（範囲を連続させるため）。
+            nearest = min(read_at, key=lambda x: (abs(x - rpos), x))
+            spos = to_surface[nearest]
+        if spos <= prev:
+            # 丸めた結果つぶれた文節は、直前へ足して捨てない。
+            if out:
+                out[-1].reading += seg.reading
+                continue
+            spos = min(prev + 1, spans[-1].end)
+        out.append(SegmentSpan(prev, spos, seg.reading, list(seg.candidates)))
+        prev = spos
+    if prev < spans[-1].end and out:
+        # 末尾の取りこぼし（句点など）は最後の文節に含める。
+        out[-1].end = spans[-1].end
+    return out
+
+
+def segment_at(text: str, offset: int, reverse_replacements=None) -> SegmentSpan | None:
+    """`offset`（元テキストの文字位置）を含む文節を返す。タップの受け口。"""
+    for seg in segment_spans(text, reverse_replacements):
+        if seg.start <= offset < seg.end:
+            return seg
+    return None
 
 
 # --- 読みの揺らし ---------------------------------------------------------
@@ -289,22 +485,34 @@ def reconvert(
         "online": bool,   # Google CGI が使えたか
     }
     """
-    hira = _reading.to_hiragana(text, reverse_replacements)
+    spans = _reading.to_spans(text, reverse_replacements)
+    hira = "".join(s.reading for s in spans)
     result = {"reading": hira, "segments": [], "online": False}
+    # 候補が取れなかったときの形。位置は全体を1つの文節として返す。
+    whole = [{"start": 0, "end": len(text), "reading": hira, "candidates": [text]}]
 
     if not config.use_google_cgi or not hira:
-        result["segments"] = [{"reading": hira, "candidates": [text]}]
+        result["segments"] = whole
         return result
 
     try:
-        segments = _google_transliterate(hira)
+        segments = spans_to_segments(text, spans)
+        if not segments:
+            # 上限内なのに空。ここを黙って通すと、プラグインは online=True の
+            # 空モーダルを開いて何も起きない（長い選択が無反応だった経路）。
+            raise RuntimeError("変換候補が空")
+        # start/end は投げたテキスト上の文字位置。タップした位置から文節を
+        # 決めるために使う。既存の呼び出しはこのキーを見ないので影響しない。
         result["segments"] = [
-            {"reading": s.reading, "candidates": s.candidates} for s in segments
+            {"start": s.start, "end": s.end, "reading": s.reading, "candidates": s.candidates}
+            for s in segments
         ]
         result["online"] = True
-    except Exception:
-        # オフライン等: 読みだけ返し、候補は元テキストのみ。
-        result["segments"] = [{"reading": hira, "candidates": [text]}]
+    except Exception as exc:
+        # オフライン・API不調・分割の失敗: 読みだけ返し、候補は元テキストのみ。
+        # online=False なのでクライアントは「候補を取得できない」と案内できる。
+        print(f"[VoxCraft] 再変換の候補を取得できません: {str(exc)[:80]}")
+        result["segments"] = whole
         return result
 
     _append_variant_candidates(result, text, hira)

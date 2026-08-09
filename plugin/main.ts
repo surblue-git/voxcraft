@@ -52,6 +52,14 @@ import { RecordingsModal } from "./recordings";
 import { assessRefinementSafety, preserveParagraphBreaks } from "./refinement";
 import { AsrMode, AsrSocket, AsrSource, isSystemSource, ServerMessage, WsHandlers } from "./ws";
 import { anchorExtension, setAnchor, clearAnchor, getAnchor } from "./anchor";
+import {
+    dictatedExtension,
+    markDictated,
+    clearDictated,
+    dictatedRangeAt,
+    clauseAround,
+    TAP_WINDOW_MAX,
+} from "./dictated";
 import { wordRangeAt } from "./select";
 import { keyboardExtension, isKeyboardSuppressed, setKeyboardSuppressed } from "./keyboard";
 import { DictationToolbar } from "./toolbar";
@@ -199,6 +207,12 @@ export default class VoxCraftPlugin extends Plugin {
 
         // 口述アンカー（CM6 拡張）を全エディタに登録。
         this.registerEditorExtension(anchorExtension);
+        this.registerEditorExtension(dictatedExtension);
+        this.registerEditorExtension(
+            EditorView.domEventHandlers({
+                click: (event, view) => this.onEditorClick(event, view),
+            })
+        );
         // ソフトキーボード抑制（同じく CM6 拡張。既定は無効で、口述中だけ有効化する）。
         this.registerEditorExtension(keyboardExtension);
 
@@ -526,6 +540,9 @@ export default class VoxCraftPlugin extends Plugin {
         this.setPendingRespeak(null);
         this.suppressJoiner = true; // 最初のチャンクには息継ぎ読点を打たない
         setAnchor(cm, cm.state.selection.main.head);
+        // 前のセッションで口述した範囲は持ち越さない。タップの対象は
+        // 「いま喋って入れたところ」に限る（古い本文まで叩けると邪魔になる）。
+        clearDictated(cm);
 
         if (mode === "transcribe") {
             // 画面が消えると AudioContext ごと止まる（Android）。長時間まわす
@@ -1228,6 +1245,12 @@ export default class VoxCraftPlugin extends Plugin {
         });
         // アンカーは StateField 側で at+text.length へ自動前進する。
 
+        // 口述で入った範囲を覚えておく（タップからの再変換の対象）。
+        // 文字起こしは自分の発話ではないので対象にしない。
+        if (this.mode === "dictation") {
+            markDictated(cm, at, at + text.length);
+        }
+
         this.chunks.push(text);
         if (this.chunks.length > 200) this.chunks.shift();
     }
@@ -1647,21 +1670,99 @@ export default class VoxCraftPlugin extends Plugin {
         this.openReconvertModalFor(range, text, payload, cm);
     }
 
-    // オフライン（Google CGI が使えない）ときに、それでもモーダルを開くか。
+    // 変換候補を取得できなかったときに、それでもモーダルを開くか。
     //
     // 変換候補は諦めるしかないが、記号語の取り違え（「まる」→『悪』）はローカルの
     // 記号セットだけで直せる。オフラインでもサーバー本体はLANに居るので、選んだ
     // 記号の辞書登録もそのまま通る。記号を出せない対象のときだけ従来どおり打ち切る。
+    //
+    // 原因はオフラインに限らない（Google CGI 側の不調でも空が返る）ので、
+    // 文言では断定しない。
     private offlineSymbolsOnly(text: string): boolean {
         if (symbolChoicesFor(text, 1).length === 0) {
-            new Notice("VoxCraft: オフラインのため変換候補を取得できませんでした。");
+            new Notice("VoxCraft: 変換候補を取得できませんでした（接続または変換APIの不調）。");
             return false;
         }
-        new Notice("VoxCraft: オフラインのため変換候補はありません。記号だけ選べます。");
+        new Notice("VoxCraft: 変換候補を取得できませんでした。記号だけ選べます。");
         return true;
     }
 
     // 新規経路共通: 候補モーダルを開き、確定時に検証付きで置換する。
+    // 口述したテキストを叩いたら、その語の変換候補を出す。
+    //
+    // いつ拾うか:
+    //   - キーボード抑制中（モバイルの口述中）は**素のタップ**で拾う。そこは
+    //     どうせ打てないので、カーソルを置く価値がほとんど無い。
+    //   - それ以外（デスクトップ、⌨で解除中）は **Alt+クリック**を要求する。
+    //     素のクリックは「喋りながら過去を手直しする」ための操作で、
+    //     アンカー追記式の要なので奪わない。
+    private onEditorClick(event: MouseEvent, cm: EditorView): boolean {
+        if (!this.recording || this.mode !== "dictation") return false;
+        const plain = isKeyboardSuppressed(cm);
+        if (!plain && !event.altKey) return false;
+        const pos = cm.posAtCoords({ x: event.clientX, y: event.clientY });
+        if (pos === null) return false;
+        if (!dictatedRangeAt(cm, pos)) return false;
+        // 候補の取得はネットワーク越しなので、クリックの処理自体は止めない。
+        void this.reconvertAtPosition(cm, pos);
+        return false;
+    }
+
+    // タップ位置を含む文節を出す。窓を切って送るのは、Google CGI が読み53字を
+    // 超えると何も返さないためだけではなく、短いほうが分割も応答も素直だから。
+    private async reconvertAtPosition(cm: EditorView, pos: number): Promise<void> {
+        const range = dictatedRangeAt(cm, pos);
+        const url = this.activeUrl();
+        if (!range || !url) return;
+
+        // 口述した範囲の外へはみ出さない。手で書いた部分まで送ると、
+        // 返ってきた文節の位置が「口述していない箇所」を指しうる。
+        const lo = Math.max(range.from, pos - TAP_WINDOW_MAX);
+        const hi = Math.min(range.to, pos + TAP_WINDOW_MAX);
+        const chunk = cm.state.doc.sliceString(lo, hi);
+        const clause = clauseAround(chunk, pos - lo);
+        const from = lo + clause.from;
+        const to = lo + clause.to;
+        const text = chunk.slice(clause.from, clause.to);
+        if (!text.trim()) return;
+
+        this.setStatus("変換候補を取得中…");
+        let payload: ReconvertPayload;
+        try {
+            payload = await fetchReconvert(
+                url,
+                text,
+                this.appliedDictionarySetId(url),
+                pos - from
+            );
+        } catch (e) {
+            this.setStatus(this.idleStatus());
+            new Notice(`VoxCraft: 変換候補を取得できません（${e instanceof Error ? e.message : e}）`);
+            return;
+        }
+        this.setStatus(this.idleStatus());
+        if (!cm.dom.isConnected) return;
+        if (!payload.online && !this.offlineSymbolsOnly(text)) return;
+
+        const at = payload.at;
+        const segment = at === null || at === undefined ? undefined : payload.segments[at];
+        if (!segment || segment.start === undefined || segment.end === undefined) {
+            // 位置を返さないサーバー（古い版）や、範囲外。窓ごと従来の再変換にする。
+            this.openReconvertModalFor({ from, to }, text, payload, cm);
+            return;
+        }
+
+        // 叩いた1文節だけを見せる。窓の全文節を並べると、直したい語がどれか
+        // 分からなくなるうえ、確定時に触っていない語まで置き換わる。
+        const target = { from: from + segment.start, to: from + segment.end };
+        this.openReconvertModalFor(
+            target,
+            cm.state.doc.sliceString(target.from, target.to),
+            { ...payload, segments: [segment] },
+            cm
+        );
+    }
+
     private openReconvertModalFor(
         range: { from: number; to: number },
         originalText: string,

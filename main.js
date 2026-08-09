@@ -27,7 +27,8 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian7 = require("obsidian");
-var import_state3 = require("@codemirror/state");
+var import_state4 = require("@codemirror/state");
+var import_view4 = require("@codemirror/view");
 
 // audio.ts
 var STALL_MS = 3e3;
@@ -605,12 +606,14 @@ async function addDictionarySymbol(wsUrl, profileId, observed, output, expectedR
     throw new Error(errorDetail(res));
   return res.json;
 }
-async function fetchReconvert(wsUrl, text, dictionarySetId = "default") {
+async function fetchReconvert(wsUrl, text, dictionarySetId = "default", offset) {
   const res = await (0, import_obsidian.requestUrl)({
     url: `${httpBase(wsUrl)}/reconvert`,
     method: "POST",
     contentType: "application/json",
-    body: JSON.stringify({ text, dictionarySetId }),
+    body: JSON.stringify(
+      offset === void 0 ? { text, dictionarySetId } : { text, dictionarySetId, offset }
+    ),
     throw: false
   });
   if (res.status >= 400) {
@@ -2244,6 +2247,99 @@ function getAnchor(cm) {
   return v === void 0 ? null : v;
 }
 
+// dictated.ts
+var import_state2 = require("@codemirror/state");
+var import_view2 = require("@codemirror/view");
+var addDictatedEffect = import_state2.StateEffect.define();
+var clearDictatedEffect = import_state2.StateEffect.define();
+function merge(ranges) {
+  if (ranges.length <= 1)
+    return ranges;
+  const sorted = [...ranges].sort((a, b) => a.from - b.from);
+  const out = [sorted[0]];
+  for (const r of sorted.slice(1)) {
+    const last = out[out.length - 1];
+    if (r.from <= last.to)
+      last.to = Math.max(last.to, r.to);
+    else
+      out.push({ ...r });
+  }
+  return out;
+}
+var dictatedField = import_state2.StateField.define({
+  create() {
+    return [];
+  },
+  update(value, tr) {
+    let next = value;
+    for (const e of tr.effects) {
+      if (e.is(clearDictatedEffect))
+        return [];
+      if (e.is(addDictatedEffect))
+        next = [...next, e.value];
+    }
+    if (tr.docChanged) {
+      next = next.map((r) => ({
+        from: tr.changes.mapPos(r.from, 1),
+        to: tr.changes.mapPos(r.to, -1)
+      })).filter((r) => r.to > r.from);
+    }
+    return next === value ? value : merge(next);
+  }
+});
+var dictatedDecorations = import_view2.EditorView.decorations.compute(
+  [dictatedField],
+  (state) => {
+    var _a;
+    const ranges = (_a = state.field(dictatedField, false)) != null ? _a : [];
+    const len = state.doc.length;
+    const marks = ranges.map((r) => ({ from: Math.max(0, r.from), to: Math.min(r.to, len) })).filter((r) => r.to > r.from).map((r) => import_view2.Decoration.mark({ class: "voxcraft-dictated" }).range(r.from, r.to));
+    return marks.length ? import_state2.RangeSet.of(marks, true) : import_view2.Decoration.none;
+  }
+);
+var dictatedExtension = [dictatedField, dictatedDecorations];
+function markDictated(cm, from, to) {
+  if (to <= from)
+    return;
+  cm.dispatch({ effects: addDictatedEffect.of({ from, to }) });
+}
+function clearDictated(cm) {
+  cm.dispatch({ effects: clearDictatedEffect.of(null) });
+}
+function dictatedRangesIn(state) {
+  var _a;
+  return (_a = state.field(dictatedField, false)) != null ? _a : [];
+}
+function getDictatedRanges(cm) {
+  return dictatedRangesIn(cm.state);
+}
+var TAP_WINDOW_MAX = 40;
+var CLAUSE_BREAK = /[。．.！!？?、，,\n]/;
+function clauseAround(chunk, rel) {
+  let from = 0;
+  for (let i = Math.min(rel, chunk.length) - 1; i >= 0; i--) {
+    if (CLAUSE_BREAK.test(chunk[i])) {
+      from = i + 1;
+      break;
+    }
+  }
+  let to = chunk.length;
+  for (let i = Math.max(rel, 0); i < chunk.length; i++) {
+    if (CLAUSE_BREAK.test(chunk[i])) {
+      to = i + 1;
+      break;
+    }
+  }
+  return to > from ? { from, to } : { from: 0, to: chunk.length };
+}
+function dictatedRangeAt(cm, pos) {
+  for (const r of getDictatedRanges(cm)) {
+    if (r.from <= pos && pos < r.to)
+      return r;
+  }
+  return null;
+}
+
 // select.ts
 var MAX_LEN = 24;
 var OKURIGANA_MAX = 4;
@@ -2299,10 +2395,10 @@ function wordRangeAt(text, pos) {
 }
 
 // keyboard.ts
-var import_state2 = require("@codemirror/state");
-var import_view2 = require("@codemirror/view");
-var setSuppressEffect = import_state2.StateEffect.define();
-var suppressField = import_state2.StateField.define({
+var import_state3 = require("@codemirror/state");
+var import_view3 = require("@codemirror/view");
+var setSuppressEffect = import_state3.StateEffect.define();
+var suppressField = import_state3.StateField.define({
   create() {
     return false;
   },
@@ -2314,7 +2410,7 @@ var suppressField = import_state2.StateField.define({
     return value;
   }
 });
-var suppressAttrs = import_view2.EditorView.contentAttributes.compute(
+var suppressAttrs = import_view3.EditorView.contentAttributes.compute(
   [suppressField],
   (state) => state.field(suppressField, false) ? { inputmode: "none" } : {}
 );
@@ -2636,6 +2732,12 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     var _a;
     await this.loadSettings();
     this.registerEditorExtension(anchorExtension);
+    this.registerEditorExtension(dictatedExtension);
+    this.registerEditorExtension(
+      import_view4.EditorView.domEventHandlers({
+        click: (event, view) => this.onEditorClick(event, view)
+      })
+    );
     this.registerEditorExtension(keyboardExtension);
     this.ribbonEl = this.addRibbonIcon("mic", "VoxCraft \u97F3\u58F0\u5165\u529B\u306E\u958B\u59CB/\u505C\u6B62", (evt) => {
       if (isSecondaryClick(evt))
@@ -2934,6 +3036,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.setPendingRespeak(null);
     this.suppressJoiner = true;
     setAnchor(cm, cm.state.selection.main.head);
+    clearDictated(cm);
     if (mode === "transcribe") {
       if (import_obsidian7.Platform.isMobile && this.settings.keepScreenOn)
         void this.acquireWakeLock();
@@ -3557,6 +3660,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       selection: follow ? { anchor: at + text.length } : void 0,
       scrollIntoView: follow
     });
+    if (this.mode === "dictation") {
+      markDictated(cm, at, at + text.length);
+    }
     this.chunks.push(text);
     if (this.chunks.length > 200)
       this.chunks.shift();
@@ -3622,7 +3728,7 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         return;
       const line = cm.state.doc.lineAt(sel.head);
       const col = sel.head - line.from;
-      from = col === 0 ? sel.head - 1 : line.from + (0, import_state3.findClusterBreak)(line.text, col, false);
+      from = col === 0 ? sel.head - 1 : line.from + (0, import_state4.findClusterBreak)(line.text, col, false);
     }
     if (from >= to)
       return;
@@ -3926,20 +4032,94 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       return;
     this.openReconvertModalFor(range, text, payload, cm);
   }
-  // オフライン（Google CGI が使えない）ときに、それでもモーダルを開くか。
+  // 変換候補を取得できなかったときに、それでもモーダルを開くか。
   //
   // 変換候補は諦めるしかないが、記号語の取り違え（「まる」→『悪』）はローカルの
   // 記号セットだけで直せる。オフラインでもサーバー本体はLANに居るので、選んだ
   // 記号の辞書登録もそのまま通る。記号を出せない対象のときだけ従来どおり打ち切る。
+  //
+  // 原因はオフラインに限らない（Google CGI 側の不調でも空が返る）ので、
+  // 文言では断定しない。
   offlineSymbolsOnly(text) {
     if (symbolChoicesFor(text, 1).length === 0) {
-      new import_obsidian7.Notice("VoxCraft: \u30AA\u30D5\u30E9\u30A4\u30F3\u306E\u305F\u3081\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+      new import_obsidian7.Notice("VoxCraft: \u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\uFF08\u63A5\u7D9A\u307E\u305F\u306F\u5909\u63DBAPI\u306E\u4E0D\u8ABF\uFF09\u3002");
       return false;
     }
-    new import_obsidian7.Notice("VoxCraft: \u30AA\u30D5\u30E9\u30A4\u30F3\u306E\u305F\u3081\u5909\u63DB\u5019\u88DC\u306F\u3042\u308A\u307E\u305B\u3093\u3002\u8A18\u53F7\u3060\u3051\u9078\u3079\u307E\u3059\u3002");
+    new import_obsidian7.Notice("VoxCraft: \u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u8A18\u53F7\u3060\u3051\u9078\u3079\u307E\u3059\u3002");
     return true;
   }
   // 新規経路共通: 候補モーダルを開き、確定時に検証付きで置換する。
+  // 口述したテキストを叩いたら、その語の変換候補を出す。
+  //
+  // いつ拾うか:
+  //   - キーボード抑制中（モバイルの口述中）は**素のタップ**で拾う。そこは
+  //     どうせ打てないので、カーソルを置く価値がほとんど無い。
+  //   - それ以外（デスクトップ、⌨で解除中）は **Alt+クリック**を要求する。
+  //     素のクリックは「喋りながら過去を手直しする」ための操作で、
+  //     アンカー追記式の要なので奪わない。
+  onEditorClick(event, cm) {
+    if (!this.recording || this.mode !== "dictation")
+      return false;
+    const plain = isKeyboardSuppressed(cm);
+    if (!plain && !event.altKey)
+      return false;
+    const pos = cm.posAtCoords({ x: event.clientX, y: event.clientY });
+    if (pos === null)
+      return false;
+    if (!dictatedRangeAt(cm, pos))
+      return false;
+    void this.reconvertAtPosition(cm, pos);
+    return false;
+  }
+  // タップ位置を含む文節を出す。窓を切って送るのは、Google CGI が読み53字を
+  // 超えると何も返さないためだけではなく、短いほうが分割も応答も素直だから。
+  async reconvertAtPosition(cm, pos) {
+    const range = dictatedRangeAt(cm, pos);
+    const url = this.activeUrl();
+    if (!range || !url)
+      return;
+    const lo = Math.max(range.from, pos - TAP_WINDOW_MAX);
+    const hi = Math.min(range.to, pos + TAP_WINDOW_MAX);
+    const chunk = cm.state.doc.sliceString(lo, hi);
+    const clause = clauseAround(chunk, pos - lo);
+    const from = lo + clause.from;
+    const to = lo + clause.to;
+    const text = chunk.slice(clause.from, clause.to);
+    if (!text.trim())
+      return;
+    this.setStatus("\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u4E2D\u2026");
+    let payload;
+    try {
+      payload = await fetchReconvert(
+        url,
+        text,
+        this.appliedDictionarySetId(url),
+        pos - from
+      );
+    } catch (e) {
+      this.setStatus(this.idleStatus());
+      new import_obsidian7.Notice(`VoxCraft: \u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\uFF08${e instanceof Error ? e.message : e}\uFF09`);
+      return;
+    }
+    this.setStatus(this.idleStatus());
+    if (!cm.dom.isConnected)
+      return;
+    if (!payload.online && !this.offlineSymbolsOnly(text))
+      return;
+    const at = payload.at;
+    const segment = at === null || at === void 0 ? void 0 : payload.segments[at];
+    if (!segment || segment.start === void 0 || segment.end === void 0) {
+      this.openReconvertModalFor({ from, to }, text, payload, cm);
+      return;
+    }
+    const target = { from: from + segment.start, to: from + segment.end };
+    this.openReconvertModalFor(
+      target,
+      cm.state.doc.sliceString(target.from, target.to),
+      { ...payload, segments: [segment] },
+      cm
+    );
+  }
   openReconvertModalFor(range, originalText, payload, cm, context = {}) {
     const segments = payload.segments || [];
     if (segments.length === 0) {
