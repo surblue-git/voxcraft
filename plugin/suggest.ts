@@ -29,6 +29,10 @@ export interface ReconvertModalOpts {
     // 読みは「こ」なので「こうほ」の候補は原理的に現れない）。その行き止まりから
     // 抜ける道として、候補の隣に置く。録音中の口述でしか意味がないので任意。
     onRespeak?: () => void;
+    // 「範囲を広げる」を押したとき。誤認識は文節をまたぐことがあり
+    //（『同音異義語』→「どの／意義／語の」）、1文節に固定されていると
+    // **辞書へ登録する単位が作れない**。押すたびに隣の文節を1つ取り込む。
+    onWiden?: () => void;
     // 同じ読みを連続して遡るときの現在位置。
     locationLabel?: string;
     // この一致を変更せず、次回の検索対象から外す。
@@ -143,6 +147,20 @@ export class ReconvertModal extends Modal {
                         "（記号を選んだときは記号語として登録する）"
                     )
                     .onClick(() => this.submit(true))
+            );
+        }
+        if (this.opts.onWiden) {
+            buttons.addButton((b) =>
+                b
+                    .setButtonText("範囲を広げる")
+                    .setTooltip(
+                        "誤認識が隣の語まで及んでいるとき。" +
+                        "隣の文節を取り込んで開き直す（辞書に登録する単位もこの範囲になる）"
+                    )
+                    .onClick(() => {
+                        this.close();
+                        this.opts.onWiden?.();
+                    })
             );
         }
         if (this.opts.onRespeak) {

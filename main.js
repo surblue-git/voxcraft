@@ -1045,6 +1045,17 @@ var ReconvertModal = class extends import_obsidian2.Modal {
         ).onClick(() => this.submit(true))
       );
     }
+    if (this.opts.onWiden) {
+      buttons.addButton(
+        (b) => b.setButtonText("\u7BC4\u56F2\u3092\u5E83\u3052\u308B").setTooltip(
+          "\u8AA4\u8A8D\u8B58\u304C\u96A3\u306E\u8A9E\u307E\u3067\u53CA\u3093\u3067\u3044\u308B\u3068\u304D\u3002\u96A3\u306E\u6587\u7BC0\u3092\u53D6\u308A\u8FBC\u3093\u3067\u958B\u304D\u76F4\u3059\uFF08\u8F9E\u66F8\u306B\u767B\u9332\u3059\u308B\u5358\u4F4D\u3082\u3053\u306E\u7BC4\u56F2\u306B\u306A\u308B\uFF09"
+        ).onClick(() => {
+          var _a, _b;
+          this.close();
+          (_b = (_a = this.opts).onWiden) == null ? void 0 : _b.call(_a);
+        })
+      );
+    }
     if (this.opts.onRespeak) {
       buttons.addButton(
         (b) => b.setButtonText("\u8A00\u3044\u76F4\u3059").setTooltip(
@@ -4168,13 +4179,53 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       this.openReconvertModalFor({ from, to }, text, payload, cm);
       return;
     }
+    const bounds = payload.segments.filter((s) => s.start !== void 0 && s.end !== void 0).map((s) => ({ from: from + s.start, to: from + s.end }));
     const target = { from: from + segment.start, to: from + segment.end };
     this.openReconvertModalFor(
       target,
       cm.state.doc.sliceString(target.from, target.to),
       { ...payload, segments: [segment] },
-      cm
+      cm,
+      { widenBounds: bounds }
     );
+  }
+  // 「範囲を広げる」。誤認識は文節をまたぐことがあり（『同音異義語』→
+  // 「どの／意義/語の」）、1文節に固定されていると辞書へ登録する単位が作れない。
+  // 隣の文節を1つ取り込んで、その範囲で開き直す。
+  widenReconvert(cm, current, bounds) {
+    const right = bounds.find((b) => b.from >= current.to);
+    const left = [...bounds].reverse().find((b) => b.to <= current.from);
+    const next = right ? { from: current.from, to: right.to } : left ? { from: left.from, to: current.to } : null;
+    if (!next) {
+      new import_obsidian7.Notice("VoxCraft: \u3053\u308C\u4EE5\u4E0A\u306F\u5E83\u3052\u3089\u308C\u307E\u305B\u3093\u3002");
+      return;
+    }
+    void this.openReconvertForRange(cm, next, bounds);
+  }
+  // 指定範囲を丸ごと1つの対象として候補を取り直す。offset を渡さないので、
+  // 読みの揺らしも「範囲全体の読み直し」として効く（サーバー側の分岐）。
+  async openReconvertForRange(cm, range, bounds) {
+    const url = this.activeUrl();
+    if (!url)
+      return;
+    const text = cm.state.doc.sliceString(range.from, range.to);
+    if (!text.trim())
+      return;
+    this.setStatus("\u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u4E2D\u2026");
+    let payload;
+    try {
+      payload = await fetchReconvert(url, text, this.appliedDictionarySetId(url));
+    } catch (e) {
+      this.setStatus(this.idleStatus());
+      new import_obsidian7.Notice(`VoxCraft: \u5909\u63DB\u5019\u88DC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\uFF08${e instanceof Error ? e.message : e}\uFF09`);
+      return;
+    }
+    this.setStatus(this.idleStatus());
+    if (!cm.dom.isConnected)
+      return;
+    if (!payload.online && !this.offlineSymbolsOnly(text))
+      return;
+    this.openReconvertModalFor(range, text, payload, cm, { widenBounds: bounds });
   }
   openReconvertModalFor(range, originalText, payload, cm, context = {}) {
     const segments = payload.segments || [];
@@ -4204,7 +4255,12 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         onSkip: context.onSkip,
         // 読みが壊れている誤認識は候補では直らない。口述の録音中だけ、
         // その場から言い直しへ抜けられるようにする。
-        onRespeak: this.recording && this.mode === "dictation" ? () => this.startRespeakRange(range, originalText) : void 0
+        onRespeak: this.recording && this.mode === "dictation" ? () => this.startRespeakRange(range, originalText) : void 0,
+        // 広げられる先が残っているときだけ出す。
+        onWiden: context.widenBounds && context.widenBounds.some((b) => b.from >= range.to || b.to <= range.from) ? () => {
+          var _a;
+          return this.widenReconvert(cm, range, (_a = context.widenBounds) != null ? _a : []);
+        } : void 0
       }
     );
     this.adoptModal(modal);
@@ -4468,7 +4524,24 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     cm.dispatch({ changes: { from, to, insert: text } });
     if (needsConversion(pr.text, text)) {
       void this.offerConversion({ from, to: from + text.length }, text, cm);
+      return;
     }
+    this.offerRegistration(pr.text, text);
+  }
+  // 言い直しで確定した (誤り → 正解) を辞書へ入れるか尋ねる。
+  // 黙って登録はしない。言い直しは一度きりの言い換えのこともあるため。
+  offerRegistration(from, to) {
+    if (!from || !to || from === to || from.length < 2)
+      return;
+    const notice = new import_obsidian7.Notice("", 12e3);
+    const el = notice.noticeEl;
+    el.createSpan({ text: `VoxCraft: \u300C${from}\u300D\u2192\u300C${to}\u300D\u3092\u8F9E\u66F8\u306B\u767B\u9332\u3057\u307E\u3059\u304B\uFF1F ` });
+    const btn = el.createEl("button", { text: "\u767B\u9332" });
+    btn.style.marginLeft = "0.5em";
+    btn.onclick = () => {
+      notice.hide();
+      void this.registerReplacement(from, to);
+    };
   }
   // 言い直しで入ったかな語を、そのまま変換候補モーダルに載せる。
   // ここまで来たら本文は既に置き換わっているので、候補を選ばなくても損はしない。

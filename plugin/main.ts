@@ -129,6 +129,8 @@ interface ReconvertModalContext {
     locationLabel?: string;
     onApplied?: (range: { from: number; to: number }) => void;
     onSkip?: () => void;
+    // タップ経路で「範囲を広げる」を出すための、窓の文節境界（絶対位置）。
+    widenBounds?: { from: number; to: number }[];
 }
 
 export default class VoxCraftPlugin extends Plugin {
@@ -1763,6 +1765,11 @@ export default class VoxCraftPlugin extends Plugin {
             return;
         }
 
+        // 窓の文節境界を絶対位置で覚えておく。「範囲を広げる」がここを使う。
+        const bounds = payload.segments
+            .filter((s) => s.start !== undefined && s.end !== undefined)
+            .map((s) => ({ from: from + (s.start as number), to: from + (s.end as number) }));
+
         // 叩いた1文節だけを見せる。窓の全文節を並べると、直したい語がどれか
         // 分からなくなるうえ、確定時に触っていない語まで置き換わる。
         const target = { from: from + segment.start, to: from + segment.end };
@@ -1770,8 +1777,58 @@ export default class VoxCraftPlugin extends Plugin {
             target,
             cm.state.doc.sliceString(target.from, target.to),
             { ...payload, segments: [segment] },
-            cm
+            cm,
+            { widenBounds: bounds }
         );
+    }
+
+    // 「範囲を広げる」。誤認識は文節をまたぐことがあり（『同音異義語』→
+    // 「どの／意義/語の」）、1文節に固定されていると辞書へ登録する単位が作れない。
+    // 隣の文節を1つ取り込んで、その範囲で開き直す。
+    private widenReconvert(
+        cm: EditorView,
+        current: { from: number; to: number },
+        bounds: { from: number; to: number }[]
+    ): void {
+        const right = bounds.find((b) => b.from >= current.to);
+        const left = [...bounds].reverse().find((b) => b.to <= current.from);
+        const next = right
+            ? { from: current.from, to: right.to }
+            : left
+              ? { from: left.from, to: current.to }
+              : null;
+        if (!next) {
+            new Notice("VoxCraft: これ以上は広げられません。");
+            return;
+        }
+        void this.openReconvertForRange(cm, next, bounds);
+    }
+
+    // 指定範囲を丸ごと1つの対象として候補を取り直す。offset を渡さないので、
+    // 読みの揺らしも「範囲全体の読み直し」として効く（サーバー側の分岐）。
+    private async openReconvertForRange(
+        cm: EditorView,
+        range: { from: number; to: number },
+        bounds: { from: number; to: number }[]
+    ): Promise<void> {
+        const url = this.activeUrl();
+        if (!url) return;
+        const text = cm.state.doc.sliceString(range.from, range.to);
+        if (!text.trim()) return;
+
+        this.setStatus("変換候補を取得中…");
+        let payload: ReconvertPayload;
+        try {
+            payload = await fetchReconvert(url, text, this.appliedDictionarySetId(url));
+        } catch (e) {
+            this.setStatus(this.idleStatus());
+            new Notice(`VoxCraft: 変換候補を取得できません（${e instanceof Error ? e.message : e}）`);
+            return;
+        }
+        this.setStatus(this.idleStatus());
+        if (!cm.dom.isConnected) return;
+        if (!payload.online && !this.offlineSymbolsOnly(text)) return;
+        this.openReconvertModalFor(range, text, payload, cm, { widenBounds: bounds });
     }
 
     private openReconvertModalFor(
@@ -1809,6 +1866,12 @@ export default class VoxCraftPlugin extends Plugin {
                 onRespeak:
                     this.recording && this.mode === "dictation"
                         ? () => this.startRespeakRange(range, originalText)
+                        : undefined,
+                // 広げられる先が残っているときだけ出す。
+                onWiden:
+                    context.widenBounds &&
+                    context.widenBounds.some((b) => b.from >= range.to || b.to <= range.from)
+                        ? () => this.widenReconvert(cm, range, context.widenBounds ?? [])
                         : undefined,
             }
         );
@@ -2101,7 +2164,27 @@ export default class VoxCraftPlugin extends Plugin {
         // 「起用」を「きよ」と言い直して「キヨ」が入る、で止まらせない。
         if (needsConversion(pr.text, text)) {
             void this.offerConversion({ from, to: from + text.length }, text, cm);
+            return;
         }
+        // 言い直しが通った ＝ (誤り, 正解) の対が手に入った瞬間。ここを逃すと
+        // 同じ誤認識のたびに言い直すことになる。候補モーダル経由では作れない
+        // 対（読みごと外れていて候補に正解が出ない場合）が、ここでだけ作れる。
+        this.offerRegistration(pr.text, text);
+    }
+
+    // 言い直しで確定した (誤り → 正解) を辞書へ入れるか尋ねる。
+    // 黙って登録はしない。言い直しは一度きりの言い換えのこともあるため。
+    private offerRegistration(from: string, to: string): void {
+        if (!from || !to || from === to || from.length < 2) return;
+        const notice = new Notice("", 12000);
+        const el = notice.noticeEl;
+        el.createSpan({ text: `VoxCraft: 「${from}」→「${to}」を辞書に登録しますか？ ` });
+        const btn = el.createEl("button", { text: "登録" });
+        btn.style.marginLeft = "0.5em";
+        btn.onclick = () => {
+            notice.hide();
+            void this.registerReplacement(from, to);
+        };
     }
 
     // 言い直しで入ったかな語を、そのまま変換候補モーダルに載せる。
