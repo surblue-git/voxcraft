@@ -3289,9 +3289,12 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
     this.setPendingRespeak(null);
     this.consumedSeqs = [];
   }
+  // セッション終了時の後片付け。末尾のチャンクが届いてから呼ばれる。
   clearDictationAnchor() {
-    if (this.cm && this.cm.dom.isConnected)
+    if (this.cm && this.cm.dom.isConnected) {
       clearAnchor(this.cm);
+      clearDictated(this.cm);
+    }
     this.cm = null;
   }
   // ---- 録音が途切れていないかの見張り ----

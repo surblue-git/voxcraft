@@ -808,8 +808,15 @@ export default class VoxCraftPlugin extends Plugin {
         this.consumedSeqs = [];
     }
 
+    // セッション終了時の後片付け。末尾のチャンクが届いてから呼ばれる。
     private clearDictationAnchor(): void {
-        if (this.cm && this.cm.dom.isConnected) clearAnchor(this.cm);
+        if (this.cm && this.cm.dom.isConnected) {
+            clearAnchor(this.cm);
+            // 口述の点線も一緒に消す。タップの判定は録音中しか効かないので、
+            // 停止後に点線が残っていると「叩けるのに反応しない」という
+            // 見た目と挙動の食い違いになる。
+            clearDictated(this.cm);
+        }
         this.cm = null;
     }
 
