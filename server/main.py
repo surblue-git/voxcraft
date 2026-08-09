@@ -334,7 +334,9 @@ async def reconvert_post(payload: dict = Body(...)) -> dict:
     if offset is not None and not isinstance(offset, int):
         raise HTTPException(status_code=400, detail="offset は整数で指定してください")
     dictionary = _resolve_dictionary_snapshot(payload.get("dictionarySetId", "default"))
-    result = await asyncio.to_thread(reconvert, text, dictionary.reverse_replacements)
+    result = await asyncio.to_thread(
+        reconvert, text, dictionary.reverse_replacements, offset
+    )
     if offset is not None:
         result["at"] = next(
             (

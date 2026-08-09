@@ -411,6 +411,10 @@ _HIRA_TO_KATA = str.maketrans(
 # 1つの揺らしから採る候補の上限。
 _PER_VARIANT_LIMIT = 2
 
+# 「揺らした読み（かな）そのものが答え」を候補に混ぜる上限の読み長。
+# 「ては→では」のような短い機能語では成り立つが、複合語では成り立たない。
+_KANA_ANSWER_MAX = 4
+
 
 def _hira_to_kata(text: str) -> str:
     return text.translate(_HIRA_TO_KATA)
@@ -453,12 +457,17 @@ def variant_candidates(
     out: list[str] = []
     for (reading, kind), candidates in zip(variants, converted):
         # 濁点の揺らしは、かな自体がそのまま答えのことがある（ては→では）。
-        entries = [reading, *candidates] if kind == "voicing" else list(candidates)
+        # ただしそれが成り立つのは短い機能語だけ。長い複合語の読みをそのまま
+        # 並べても選ばれることはなく、本命を下へ押しやるだけになる
+        # （実測 2026-08-09: 「どうおんいき」の揺らしで『とうおんいき』
+        # 『どうおんいぎ』がかなのまま2枠を占め、正解の「同音異義」が10番目に沈んだ）。
+        kana_is_plausible = kind == "voicing" and len(reading) <= _KANA_ANSWER_MAX
+        entries = [reading, *candidates] if kana_is_plausible else list(candidates)
         # 変換できていない読み（＝APIがかなで返しただけ）はノイズ。
         kana = _hira_to_kata(reading)
         taken = 0
         for entry in entries:
-            if kind != "voicing" and entry in (reading, kana):
+            if not kana_is_plausible and entry in (reading, kana):
                 continue
             if not entry or entry in known:
                 continue
@@ -476,6 +485,7 @@ def variant_candidates(
 def reconvert(
     text: str,
     reverse_replacements: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
+    offset: int | None = None,
 ) -> dict:
     """テキストの再変換候補を返す。
 
@@ -515,34 +525,90 @@ def reconvert(
         result["segments"] = whole
         return result
 
-    _append_variant_candidates(result, text, hira)
+    _append_variant_candidates(result, text, hira, offset=offset)
     return result
 
 
-def _append_variant_candidates(result: dict, text: str, hira: str) -> None:
-    """読みを揺らした変換候補を、第1文節の末尾へ足す。
+def _append_variant_candidates(
+    result: dict, text: str, hira: str, offset: int | None = None
+) -> None:
+    """読みを揺らした変換候補を足す。
 
-    足す先を1文節に限るのは、文節に割れている＝長めの入力で、そこは誤変換
-    （読みは合っている）の領域だから。読みが外れる誤認識は短い語で起きる。
+    **以前は「1文節に収まったときだけ」試していた。これが逆だった。**
+    根拠は「文節に割れている＝長めの入力＝読みは合っている領域」だったが、
+    実測（2026-08-09）でその前提が崩れた:
+
+        「同音異義語」を『動音域語』と誤認識 → 読み どうおんい**き**ご
+        正しい読み どうおんい**ぎ**ご とは濁点1つ違い
+        誤った読みでは Google が 2文節（どうおんいき / ご）に割り、
+        候補は「同音域」止まりで正解に**到達できない**
+
+    つまり**読みが外れているからこそ文節が割れる**。割れたら諦める設計だったので、
+    揺らしがいちばん要る場面で発火していなかった。判断は文節数ではなく長さで行う。
+
+    `offset`（タップ位置）があるときは、叩いた文節の読みだけを揺らす。
+    実測: 'どうおんいき' → 'どうおんいぎ' → 「同音異義」。これで前半だけ置換すれば
+    「同音異義」＋「語」となり、全体を差し替えなくても直る。
     """
     if not config.reconvert_variants:
         return
-    if len(text) > config.reconvert_variant_max_len:
-        return
     segments = result.get("segments") or []
-    if len(segments) != 1:
+    if not segments:
         return
 
-    known = {text, *segments[0].get("candidates", [])}
-    extra = variant_candidates(
-        hira,
-        known,
-        limit=config.reconvert_variant_limit,
-        max_candidates=config.reconvert_variant_candidates,
-    )
+    def _extra(reading: str, known: set[str]) -> list[str]:
+        return variant_candidates(
+            reading,
+            known,
+            limit=config.reconvert_variant_limit,
+            max_candidates=config.reconvert_variant_candidates,
+        )
+
+    if offset is not None:
+        # タップ経路: 叩いた文節だけを対象にする。
+        idx = next(
+            (
+                i
+                for i, s in enumerate(segments)
+                if s.get("start") is not None and s["start"] <= offset < s["end"]
+            ),
+            None,
+        )
+        if idx is None:
+            return
+        seg = segments[idx]
+        surface = text[seg["start"] : seg["end"]]
+        if len(surface) > config.reconvert_variant_max_len:
+            return
+        extra = _extra(seg["reading"], {surface, *seg.get("candidates", [])})
+        if not extra:
+            return
+        seg["candidates"] = [*seg.get("candidates", []), *extra]
+        result["variants"] = [r for r, _ in reading_variants(
+            seg["reading"], config.reconvert_variant_limit
+        )]
+        return
+
+    if len(text) > config.reconvert_variant_max_len:
+        return
+    known = {text, *(c for s in segments for c in s.get("candidates", []))}
+    extra = _extra(hira, known)
     if not extra:
         return
-    segments[0]["candidates"] = [*segments[0].get("candidates", []), *extra]
+    if len(segments) == 1:
+        segments[0]["candidates"] = [*segments[0].get("candidates", []), *extra]
+    else:
+        # 揺らしは「全体を読み直した結果」なので、割れた片方には足せない
+        # （片方だけ置換すると語が壊れる）。短い入力に限っているので畳む。
+        joined = "".join(
+            s["candidates"][0] if s.get("candidates") else s["reading"] for s in segments
+        )
+        result["segments"] = [{
+            "start": segments[0].get("start", 0),
+            "end": segments[-1].get("end", len(text)),
+            "reading": hira,
+            "candidates": [joined, *extra],
+        }]
     # 何を試したかは診断で効くので残す（プラグインは未知のキーを無視する）。
     result["variants"] = [reading for reading, _ in reading_variants(
         hira, config.reconvert_variant_limit

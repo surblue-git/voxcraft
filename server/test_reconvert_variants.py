@@ -4,7 +4,11 @@ Google CGI へは行かず、変換関数を差し替えて挙動だけを確か
 """
 from __future__ import annotations
 
-from reconvert import reading_variants, variant_candidates
+from reconvert import (
+    _append_variant_candidates,
+    reading_variants,
+    variant_candidates,
+)
 
 
 def _kinds(hira: str, limit: int = 12) -> dict[str, list[str]]:
@@ -50,6 +54,79 @@ def test_implausible_readings_are_not_generated():
     assert "きっよ" not in [reading for reading, _ in reading_variants("きよ", 20)]
     # 正しい位置の促音は残る。
     assert "かっこ" in [reading for reading, _ in reading_variants("かこ", 20)]
+
+
+def test_variants_fire_even_when_the_reading_split_the_segments():
+    """**読みが外れているからこそ文節が割れる。** 割れたら諦めてはいけない。
+
+    実測 2026-08-09: 「同音異義語」を『動音域語』と誤認識すると読みは
+    どうおんい**き**ご（正しくは …い**ぎ**ご）。誤った読みでは Google が
+    2文節（どうおんいき / ご）に割り、候補は「同音域」止まりで正解に届かない。
+
+    以前は `len(segments) != 1` で揺らしを打ち切っていたため、**揺らしが
+    いちばん要る場面で発火していなかった**。判断は文節数ではなく長さで行う。
+    """
+    result = {
+        "reading": "どうおんいきご",
+        "segments": [
+            {"start": 0, "end": 3, "reading": "どうおんいき", "candidates": ["同音域"]},
+            {"start": 3, "end": 4, "reading": "ご", "candidates": ["語"]},
+        ],
+        "online": True,
+    }
+    _append_variant_candidates(result, "動音域語", "どうおんいきご")
+    # 割れていた2文節は1つに畳まれ、全体を差し替える候補として並ぶ。
+    assert len(result["segments"]) == 1, result["segments"]
+    seg = result["segments"][0]
+    assert (seg["start"], seg["end"]) == (0, 4)
+    # 畳む前の第1候補（そのままの表記）は必ず先頭に残す。
+    assert seg["candidates"][0] == "同音域語"
+    assert len(seg["candidates"]) > 1
+
+
+def test_variants_target_the_tapped_segment():
+    """タップ経路では、叩いた文節の読みだけを揺らす。
+
+    前半だけ「同音域」→「同音異義」に置換できれば、後ろの「語」と合わさって
+    全体が直る。全体を差し替える必要はない。
+    """
+    def convert(reading: str) -> list[str]:
+        return ["同音異義"] if reading == "どうおんいぎ" else []
+
+    result = {
+        "reading": "どうおんいきご",
+        "segments": [
+            {"start": 0, "end": 3, "reading": "どうおんいき", "candidates": ["同音域"]},
+            {"start": 3, "end": 4, "reading": "ご", "candidates": ["語"]},
+        ],
+        "online": True,
+    }
+    import reconvert as _rc
+
+    original = _rc._convert_variant
+    _rc._convert_variant = convert
+    try:
+        _append_variant_candidates(result, "動音域語", "どうおんいきご", offset=1)
+    finally:
+        _rc._convert_variant = original
+    # 文節は割れたまま（叩いた側だけに足す）。
+    assert len(result["segments"]) == 2
+    assert "同音異義" in result["segments"][0]["candidates"]
+    assert result["segments"][1]["candidates"] == ["語"]
+
+
+def test_long_reading_does_not_offer_bare_kana():
+    """長い複合語では「かな自体が答え」が成り立たず、本命を押し下げるだけ。"""
+    def convert(reading: str) -> list[str]:
+        return [f"{reading}#"]
+
+    out = variant_candidates(
+        "どうおんいき", set(), limit=6, max_candidates=12, convert=convert
+    )
+    assert "とうおんいき" not in out, out
+    # 短い機能語では従来どおり、かなそのものを候補に残す（ては→では）。
+    short = variant_candidates("ては", set(), limit=6, max_candidates=12, convert=convert)
+    assert "では" in short, short
 
 
 def test_one_variant_does_not_fill_the_list():

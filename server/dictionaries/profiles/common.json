@@ -309,6 +309,26 @@
       "observed": "収有権",
       "output": "周遊券",
       "enabled": true
+    },
+    {
+      "observed": "動音域語",
+      "output": "同音異義語",
+      "enabled": true
+    },
+    {
+      "observed": "同音いい子",
+      "output": "同音異義語",
+      "enabled": true
+    },
+    {
+      "observed": "どうおんいきご",
+      "output": "同音異義語",
+      "enabled": true
+    },
+    {
+      "observed": "どう言いよう",
+      "output": "同音異義語",
+      "enabled": true
     }
   ],
   "symbols": {
