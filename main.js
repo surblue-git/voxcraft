@@ -781,6 +781,7 @@ var DictModal = class extends import_obsidian.Modal {
   }
   async onOpen() {
     this.titleEl.setText("VoxCraft \u30E6\u30FC\u30B6\u30FC\u8F9E\u66F8");
+    this.contentEl.addClass("voxcraft-dict");
     this.contentEl.createEl("p", {
       text: "\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026",
       cls: "setting-item-description"
@@ -831,29 +832,28 @@ var DictModal = class extends import_obsidian.Modal {
       });
       return;
     }
-    contentEl.createEl("p", {
-      text: "\u8A8D\u8B58\u7D50\u679C\u3092\u671B\u3080\u8868\u8A18\u306B\u7F6E\u304D\u63DB\u3048\u308B\u3002\u30AD\u30FC\u306F\u300CWhisper\u304C\u5B9F\u969B\u306B\u51FA\u3057\u305F\u7DB4\u308A\u300D\u3092\u767B\u9332\u3059\u308B\u306E\u304C\u78BA\u5B9F\uFF08\u8AAD\u307F\u3067\u306F\u306A\u304F\u3001\u51FA\u529B\u3092\u305D\u306E\u307E\u307E\u30B3\u30D4\u30FC\u3059\u308B\uFF09\u3002\u4FDD\u5B58\u3059\u308B\u3068\u5373\u5EA7\u306B\u53CD\u6620\u3055\u308C\u308B\uFF08\u518D\u8D77\u52D5\u4E0D\u8981\uFF09\u3002",
-      cls: "setting-item-description"
+    const help = contentEl.createEl("details", { cls: "voxcraft-dict-help" });
+    help.createEl("summary", { text: "\u66F8\u304D\u65B9\u306E\u30D2\u30F3\u30C8" });
+    help.createEl("p", {
+      text: "\u8A8D\u8B58\u7D50\u679C\u3092\u671B\u3080\u8868\u8A18\u306B\u7F6E\u304D\u63DB\u3048\u308B\u3002\u30AD\u30FC\u306F\u300CWhisper\u304C\u5B9F\u969B\u306B\u51FA\u3057\u305F\u7DB4\u308A\u300D\u3092\u767B\u9332\u3059\u308B\u306E\u304C\u78BA\u5B9F\uFF08\u8AAD\u307F\u3067\u306F\u306A\u304F\u3001\u51FA\u529B\u3092\u305D\u306E\u307E\u307E\u30B3\u30D4\u30FC\u3059\u308B\uFF09\u3002\u4FDD\u5B58\u3059\u308B\u3068\u5373\u5EA7\u306B\u53CD\u6620\u3055\u308C\u308B\uFF08\u518D\u8D77\u52D5\u4E0D\u8981\uFF09\u3002"
     });
-    contentEl.createEl("p", {
-      text: "\u540C\u3058\u6B63\u89E3\u306B\u5BFE\u3059\u308B\u8AA4\u8A8D\u8B58\u306F\u30011\u3064\u306E\u884C\u306B\u300C\u3001\u300D\u533A\u5207\u308A\u3067\u307E\u3068\u3081\u3066\u66F8\u3051\u308B\uFF08\u4F8B: \u518D\u5909\u66F4\u3001\u518D\u5909\u5316\u3001\u518D\u5909\u611F \u2192 \u518D\u5909\u63DB\uFF09\u3002\u6CE8\u610F: \u77ED\u304F\u3066\u4E00\u822C\u7684\u306A\u8A9E\u3092\u30AD\u30FC\u306B\u3059\u308B\u3068\u672C\u6587\u3092\u58CA\u3059\u3002\u4F8B\u300C\u8A73\u7D30\u300D\u306F\u8AA4\u8A8D\u8B58\u3067\u3082\u3042\u308A\u6B63\u3057\u3044\u8A9E\u3067\u3082\u3042\u308B\u305F\u3081\u3001\u524D\u5F8C\u3092\u542B\u3081\u305F\u9577\u3044\u30AD\u30FC\u306B\u3059\u308B\u3002",
-      cls: "setting-item-description"
+    help.createEl("p", {
+      text: "\u540C\u3058\u6B63\u89E3\u306B\u5BFE\u3059\u308B\u8AA4\u8A8D\u8B58\u306F\u30011\u3064\u306E\u884C\u306B\u300C\u3001\u300D\u533A\u5207\u308A\u3067\u307E\u3068\u3081\u3066\u66F8\u3051\u308B\uFF08\u4F8B: \u518D\u5909\u66F4\u3001\u518D\u5909\u5316\u3001\u518D\u5909\u611F \u2192 \u518D\u5909\u63DB\uFF09\u3002\u6CE8\u610F: \u77ED\u304F\u3066\u4E00\u822C\u7684\u306A\u8A9E\u3092\u30AD\u30FC\u306B\u3059\u308B\u3068\u672C\u6587\u3092\u58CA\u3059\u3002\u4F8B\u300C\u8A73\u7D30\u300D\u306F\u8AA4\u8A8D\u8B58\u3067\u3082\u3042\u308A\u6B63\u3057\u3044\u8A9E\u3067\u3082\u3042\u308B\u305F\u3081\u3001\u524D\u5F8C\u3092\u542B\u3081\u305F\u9577\u3044\u30AD\u30FC\u306B\u3059\u308B\u3002"
     });
-    this.renderRows(
-      contentEl,
-      "\u7F6E\u63DB\uFF08replacements\uFF09",
-      this.reps,
-      "\u8AA4\u8A8D\u8B58\u3092\u300C\u3001\u300D\u533A\u5207\u308A\u3067\uFF08\u4F8B: \u518D\u5909\u66F4\u3001\u518D\u5909\u5316\uFF09",
-      "\u6B63\u3057\u3044\u8868\u8A18\uFF08\u4F8B: \u518D\u5909\u63DB\uFF09"
-    );
-    this.renderRows(
-      contentEl,
-      "\u8A18\u53F7\u8A9E\uFF08symbols\u30FB\u5358\u72EC\u3067\u8A00\u3063\u305F\u3068\u304D\u3060\u3051\u5909\u63DB\uFF09",
-      this.syms,
-      "\u8AA4\u8A8D\u8B58\u3092\u300C\u3001\u300D\u533A\u5207\u308A\u3067\uFF08\u4F8B: \u5F53\u70B9\u3001\u3068\u3046\u3066\u3093\u3066\u3093\uFF09",
-      "\u8A18\u53F7\uFF08\u4F8B: \u3001 / \u6539\u884C\uFF09"
-    );
-    new import_obsidian.Setting(contentEl).addButton(
+    this.renderRows(contentEl, "\u7F6E\u63DB\uFF08replacements\uFF09", this.reps, {
+      keyLabel: "\u8AA4\u8A8D\u8B58\u3057\u305F\u8868\u8A18\uFF08\u300C\u3001\u300D\u533A\u5207\u308A\u3067\u8907\u6570\u53EF\uFF09",
+      keyPlaceholder: "\u4F8B: \u518D\u5909\u66F4\u3001\u518D\u5909\u5316",
+      valueLabel: "\u6B63\u3057\u3044\u8868\u8A18",
+      valuePlaceholder: "\u4F8B: \u518D\u5909\u63DB"
+    });
+    this.renderRows(contentEl, "\u8A18\u53F7\u8A9E\uFF08symbols\u30FB\u5358\u72EC\u3067\u8A00\u3063\u305F\u3068\u304D\u3060\u3051\u5909\u63DB\uFF09", this.syms, {
+      keyLabel: "\u8AA4\u8A8D\u8B58\u3057\u305F\u8868\u8A18\uFF08\u300C\u3001\u300D\u533A\u5207\u308A\u3067\u8907\u6570\u53EF\uFF09",
+      keyPlaceholder: "\u4F8B: \u5F53\u70B9\u3001\u3068\u3046\u3066\u3093\u3066\u3093",
+      valueLabel: "\u8A18\u53F7",
+      valuePlaceholder: "\u4F8B: \u3001 / \u6539\u884C"
+    });
+    const actions = contentEl.createDiv({ cls: "voxcraft-dict-actions" });
+    new import_obsidian.Setting(actions).addButton(
       (b) => b.setButtonText("\u4FDD\u5B58").setCta().onClick(async () => {
         const reps = flattenGroups(this.reps);
         const syms = flattenGroups(this.syms);
@@ -879,46 +879,121 @@ var DictModal = class extends import_obsidian.Modal {
       })
     ).addButton((b) => b.setButtonText("\u30AD\u30E3\u30F3\u30BB\u30EB").onClick(() => this.close()));
   }
-  renderRows(parent, title, rows, keyPlaceholder, valPlaceholder) {
-    const headingText = () => `${title} \u2014 ${rows.length}\u884C\u30FB${countKeys(rows)}\u30AD\u30FC`;
-    const heading = parent.createEl("h3", { text: headingText() });
-    const list = parent.createDiv();
-    list.style.maxHeight = "40vh";
-    list.style.overflowY = "auto";
-    const renderRow = (row, i) => {
-      const s = new import_obsidian.Setting(list).addText((t) => {
-        t.setPlaceholder(keyPlaceholder).setValue(row.keys).onChange((v) => {
-          row.keys = v;
-        });
-        t.inputEl.style.minWidth = "18em";
-        t.inputEl.style.flexGrow = "1";
-      }).addText((t) => {
-        t.setPlaceholder(valPlaceholder).setValue(row.value).onChange((v) => {
-          row.value = v;
-        });
-        t.inputEl.style.minWidth = "10em";
-      }).addExtraButton(
-        (b) => b.setIcon("trash").setTooltip("\u3053\u306E\u884C\uFF08\u30AD\u30FC\u5168\u90E8\uFF09\u3092\u524A\u9664").onClick(() => {
-          rows.splice(i, 1);
-          this.render();
-        })
-      );
-      s.controlEl.style.flexWrap = "wrap";
-      s.infoEl.remove();
-      return s;
+  // 1件を「誤認識… → 正しい表記」の1行に畳んで並べる。叩いた行だけ編集欄を開く。
+  // 入力欄を出しっぱなしにすると1件で3行分の高さを食い、狭い画面では一覧にならない。
+  renderRows(parent, title, rows, labels) {
+    const section = parent.createDiv({ cls: "voxcraft-dict-section" });
+    const heading = section.createEl("h3", { cls: "voxcraft-dict-heading" });
+    const updateHeading = () => {
+      heading.setText(`${title} \u2014 ${rows.length}\u884C\u30FB${countKeys(rows)}\u30AD\u30FC`);
     };
-    rows.forEach((row, i) => renderRow(row, i));
-    new import_obsidian.Setting(parent).addButton(
-      (b) => b.setButtonText("\uFF0B \u8FFD\u52A0").onClick(() => {
-        var _a;
-        const row = { keys: "", value: "" };
-        rows.push(row);
-        heading.setText(headingText());
-        const s = renderRow(row, rows.length - 1);
-        s.settingEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
-        (_a = s.settingEl.querySelector("input")) == null ? void 0 : _a.focus();
-      })
-    );
+    updateHeading();
+    const search = section.createEl("input", {
+      cls: "voxcraft-dict-search",
+      type: "search",
+      attr: { placeholder: "\u7D5E\u308A\u8FBC\u307F\uFF08\u8AA4\u8A8D\u8B58\u30FB\u6B63\u3057\u3044\u8868\u8A18\uFF09", enterkeyhint: "search" }
+    });
+    const list = section.createDiv({ cls: "voxcraft-dict-list" });
+    const none = section.createDiv({ cls: "voxcraft-dict-none" });
+    const shown = [];
+    const applyFilter = () => {
+      const q = search.value.trim().toLowerCase();
+      let hits = 0;
+      for (const item of shown) {
+        const hit = !q || `${item.row.keys} ${item.row.value}`.toLowerCase().includes(q);
+        item.el.toggleClass("is-hidden", !hit);
+        if (hit)
+          hits += 1;
+      }
+      none.setText(shown.length === 0 ? "\u307E\u3060\u767B\u9332\u304C\u3042\u308A\u307E\u305B\u3093" : "\u8A72\u5F53\u3059\u308B\u884C\u304C\u3042\u308A\u307E\u305B\u3093");
+      none.toggleClass("is-hidden", hits > 0);
+    };
+    search.addEventListener("input", applyFilter);
+    const buildRow = (row) => {
+      const el = list.createDiv({ cls: "voxcraft-dict-row" });
+      const summary = el.createEl("button", {
+        cls: "voxcraft-dict-summary",
+        attr: { type: "button" }
+      });
+      const keysEl = summary.createSpan({ cls: "voxcraft-dict-keys" });
+      summary.createSpan({ cls: "voxcraft-dict-arrow", text: "\u2192" });
+      const valueEl = summary.createSpan({ cls: "voxcraft-dict-value" });
+      const edit = el.createDiv({ cls: "voxcraft-dict-edit" });
+      const refresh = () => {
+        const keys = row.keys.trim();
+        const value = row.value.trim();
+        keysEl.setText(keys || "\uFF08\u672A\u5165\u529B\uFF09");
+        keysEl.toggleClass("is-blank", !keys);
+        valueEl.setText(value || "\uFF08\u672A\u5165\u529B\uFF09");
+        valueEl.toggleClass("is-blank", !value);
+        updateHeading();
+      };
+      const field = (label, placeholder, value, onInput) => {
+        const wrap = edit.createDiv({ cls: "voxcraft-dict-field" });
+        wrap.createEl("label", { cls: "voxcraft-dict-label", text: label });
+        const input = wrap.createEl("input", {
+          cls: "voxcraft-dict-input",
+          type: "text",
+          attr: { placeholder, autocapitalize: "off", autocomplete: "off", spellcheck: "false" }
+        });
+        input.value = value;
+        input.addEventListener("input", () => {
+          onInput(input.value);
+          refresh();
+        });
+        return input;
+      };
+      const keyInput = field(
+        labels.keyLabel,
+        labels.keyPlaceholder,
+        row.keys,
+        (v) => {
+          row.keys = v;
+        }
+      );
+      field(
+        labels.valueLabel,
+        labels.valuePlaceholder,
+        row.value,
+        (v) => {
+          row.value = v;
+        }
+      );
+      const rowActions = edit.createDiv({ cls: "voxcraft-dict-row-actions" });
+      const remove = rowActions.createEl("button", { cls: "mod-warning", text: "\u3053\u306E\u884C\u3092\u524A\u9664" });
+      remove.addEventListener("click", () => {
+        const at = rows.indexOf(row);
+        if (at >= 0)
+          rows.splice(at, 1);
+        const seen = shown.findIndex((item) => item.row === row);
+        if (seen >= 0)
+          shown.splice(seen, 1);
+        el.remove();
+        updateHeading();
+        applyFilter();
+      });
+      summary.addEventListener("click", () => {
+        el.toggleClass("is-open", !el.hasClass("is-open"));
+      });
+      refresh();
+      shown.push({ row, el });
+      return { el, keyInput };
+    };
+    rows.forEach((row) => buildRow(row));
+    applyFilter();
+    const add = section.createDiv({ cls: "voxcraft-dict-add" }).createEl("button", {
+      text: "\uFF0B \u8FFD\u52A0"
+    });
+    add.addEventListener("click", () => {
+      const row = { keys: "", value: "" };
+      rows.push(row);
+      search.value = "";
+      const created = buildRow(row);
+      created.el.addClass("is-open");
+      applyFilter();
+      created.el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      created.keyInput.focus();
+    });
   }
 };
 

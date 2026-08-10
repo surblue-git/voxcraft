@@ -93,6 +93,150 @@
     color: var(--text-on-accent);
 }
 
+/* ユーザー辞書モーダル。
+   1件を「誤認識 → 正しい表記」の1行に畳んで並べ、叩いた行だけ編集欄を開く。
+   入力欄を出しっぱなしにすると、スマホでは1件が画面の3行分を占めて一覧にならない。 */
+.voxcraft-dict .voxcraft-dict-help {
+    color: var(--text-muted);
+    font-size: 0.85em;
+    margin-bottom: 0.6em;
+}
+.voxcraft-dict .voxcraft-dict-help summary {
+    cursor: pointer;
+}
+.voxcraft-dict .voxcraft-dict-help p {
+    margin: 0.4em 0;
+}
+.voxcraft-dict .voxcraft-dict-heading {
+    margin: 1em 0 0.4em;
+    font-size: 1em;
+}
+.voxcraft-dict .voxcraft-dict-search {
+    width: 100%;
+    margin-bottom: 0.4em;
+}
+.voxcraft-dict .voxcraft-dict-list {
+    max-height: 40vh;
+    overflow-y: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+}
+/* モバイルでは入れ子のスクロールが扱いにくいうえ、40vh では数行しか見えない。
+   モーダル本体のスクロールに任せて、一覧の高さを画面いっぱいに使う。 */
+body.is-mobile .voxcraft-dict .voxcraft-dict-list {
+    max-height: none;
+    overflow-y: visible;
+}
+.voxcraft-dict .voxcraft-dict-none {
+    padding: 0.6em 0.2em;
+    color: var(--text-faint);
+    font-size: 0.85em;
+}
+.voxcraft-dict .is-hidden {
+    display: none;
+}
+.voxcraft-dict .voxcraft-dict-row {
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+.voxcraft-dict .voxcraft-dict-row:last-child {
+    border-bottom: none;
+}
+.voxcraft-dict .voxcraft-dict-row.is-open {
+    background: var(--background-secondary);
+}
+/* 一覧の1行。ボタン既定の高さ・中央寄せを打ち消して、詰めて並べる。 */
+.voxcraft-dict .voxcraft-dict-summary {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4em;
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    padding: 0.45em 0.6em;
+    margin: 0;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    text-align: left;
+    font-size: 0.9em;
+    line-height: 1.4;
+    color: var(--text-normal);
+    cursor: pointer;
+}
+.voxcraft-dict .voxcraft-dict-keys {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-muted);
+}
+.voxcraft-dict .voxcraft-dict-arrow {
+    flex: 0 0 auto;
+    color: var(--text-faint);
+}
+/* 正しい表記はその行の見出しなので、詰まったときは誤認識キーのほうから削る。 */
+.voxcraft-dict .voxcraft-dict-value {
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+}
+.voxcraft-dict .is-blank {
+    color: var(--text-faint);
+    font-weight: normal;
+}
+.voxcraft-dict .voxcraft-dict-edit {
+    display: none;
+    padding: 0 0.6em 0.7em;
+}
+.voxcraft-dict .voxcraft-dict-row.is-open .voxcraft-dict-edit {
+    display: block;
+}
+.voxcraft-dict .voxcraft-dict-field {
+    margin-bottom: 0.5em;
+}
+.voxcraft-dict .voxcraft-dict-label {
+    display: block;
+    font-size: 0.75em;
+    color: var(--text-muted);
+    margin-bottom: 0.15em;
+}
+.voxcraft-dict .voxcraft-dict-input {
+    width: 100%;
+}
+.voxcraft-dict .voxcraft-dict-row-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+.voxcraft-dict .voxcraft-dict-add {
+    margin-top: 0.5em;
+}
+/* 保存は一覧が長くても手の届く場所に置く（末尾まで送らせない）。 */
+.voxcraft-dict .voxcraft-dict-actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--background-primary);
+    border-top: 1px solid var(--background-modifier-border);
+    margin-top: 0.8em;
+}
+.voxcraft-dict .voxcraft-dict-actions .setting-item {
+    border-top: none;
+    padding: 0.6em 0;
+}
+/* 親指で押せる大きさに。狭い画面では追加ボタンを横幅いっぱいに広げる。 */
+body.is-mobile .voxcraft-dict .voxcraft-dict-summary {
+    font-size: 0.95em;
+    padding: 0.6em;
+}
+body.is-mobile .voxcraft-dict .voxcraft-dict-add button {
+    width: 100%;
+}
+
 /* 口述ツールバー（画面下部・録音中のみ） */
 .voxcraft-toolbar {
     position: fixed;

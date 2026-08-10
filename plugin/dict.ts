@@ -389,6 +389,8 @@ export class DictModal extends Modal {
 
     async onOpen(): Promise<void> {
         this.titleEl.setText("VoxCraft ユーザー辞書");
+        // モーダル自身に印を付ける（contentEl.empty() では消えない）。
+        this.contentEl.addClass("voxcraft-dict");
         this.contentEl.createEl("p", {
             text: "読み込み中…",
             cls: "setting-item-description",
@@ -444,28 +446,40 @@ export class DictModal extends Modal {
             return;
         }
 
-        contentEl.createEl("p", {
+        // 説明は畳んでおく。開いた瞬間に一覧が見えることを優先する
+        // （モバイルでは数行の説明だけで画面が埋まってしまう）。
+        const help = contentEl.createEl("details", { cls: "voxcraft-dict-help" });
+        help.createEl("summary", { text: "書き方のヒント" });
+        help.createEl("p", {
             text:
                 "認識結果を望む表記に置き換える。キーは「Whisperが実際に出した綴り」を登録するのが確実" +
                 "（読みではなく、出力をそのままコピーする）。保存すると即座に反映される（再起動不要）。",
-            cls: "setting-item-description",
         });
-        contentEl.createEl("p", {
+        help.createEl("p", {
             text:
                 "同じ正解に対する誤認識は、1つの行に「、」区切りでまとめて書ける" +
                 "（例: 再変更、再変化、再変感 → 再変換）。" +
                 "注意: 短くて一般的な語をキーにすると本文を壊す。" +
                 "例「詳細」は誤認識でもあり正しい語でもあるため、前後を含めた長いキーにする。",
-            cls: "setting-item-description",
         });
 
-        this.renderRows(contentEl, "置換（replacements）", this.reps,
-            "誤認識を「、」区切りで（例: 再変更、再変化）", "正しい表記（例: 再変換）");
+        this.renderRows(contentEl, "置換（replacements）", this.reps, {
+            keyLabel: "誤認識した表記（「、」区切りで複数可）",
+            keyPlaceholder: "例: 再変更、再変化",
+            valueLabel: "正しい表記",
+            valuePlaceholder: "例: 再変換",
+        });
 
-        this.renderRows(contentEl, "記号語（symbols・単独で言ったときだけ変換）", this.syms,
-            "誤認識を「、」区切りで（例: 当点、とうてんてん）", "記号（例: 、 / 改行）");
+        this.renderRows(contentEl, "記号語（symbols・単独で言ったときだけ変換）", this.syms, {
+            keyLabel: "誤認識した表記（「、」区切りで複数可）",
+            keyPlaceholder: "例: 当点、とうてんてん",
+            valueLabel: "記号",
+            valuePlaceholder: "例: 、 / 改行",
+        });
 
-        new Setting(contentEl)
+        // 保存は常に手の届く場所に置く（一覧が長くなると末尾まで遠い）。
+        const actions = contentEl.createDiv({ cls: "voxcraft-dict-actions" });
+        new Setting(actions)
             .addButton((b) =>
                 b
                     .setButtonText("保存")
@@ -498,53 +512,122 @@ export class DictModal extends Modal {
             .addButton((b) => b.setButtonText("キャンセル").onClick(() => this.close()));
     }
 
+    // 1件を「誤認識… → 正しい表記」の1行に畳んで並べる。叩いた行だけ編集欄を開く。
+    // 入力欄を出しっぱなしにすると1件で3行分の高さを食い、狭い画面では一覧にならない。
     private renderRows(parent: HTMLElement, title: string, rows: Group[],
-                       keyPlaceholder: string, valPlaceholder: string): void {
-        const headingText = () =>
-            `${title} — ${rows.length}行・${countKeys(rows)}キー`;
-        const heading = parent.createEl("h3", { text: headingText() });
-        const list = parent.createDiv();
-        list.style.maxHeight = "40vh";
-        list.style.overflowY = "auto";
+                       labels: { keyLabel: string; keyPlaceholder: string;
+                                 valueLabel: string; valuePlaceholder: string }): void {
+        const section = parent.createDiv({ cls: "voxcraft-dict-section" });
+        const heading = section.createEl("h3", { cls: "voxcraft-dict-heading" });
+        const updateHeading = () => {
+            heading.setText(`${title} — ${rows.length}行・${countKeys(rows)}キー`);
+        };
+        updateHeading();
 
-        const renderRow = (row: Group, i: number): Setting => {
-            const s = new Setting(list)
-                .addText((t) => {
-                    t.setPlaceholder(keyPlaceholder).setValue(row.keys)
-                        .onChange((v) => { row.keys = v; });
-                    // 複数キーを並べる欄なので、正解欄より広めに取る。
-                    t.inputEl.style.minWidth = "18em";
-                    t.inputEl.style.flexGrow = "1";
-                })
-                .addText((t) => {
-                    t.setPlaceholder(valPlaceholder).setValue(row.value)
-                        .onChange((v) => { row.value = v; });
-                    t.inputEl.style.minWidth = "10em";
-                })
-                .addExtraButton((b) =>
-                    b.setIcon("trash").setTooltip("この行（キー全部）を削除").onClick(() => {
-                        rows.splice(i, 1);
-                        this.render();
-                    })
-                );
-            s.controlEl.style.flexWrap = "wrap";
-            s.infoEl.remove(); // 名前欄は使わない（横幅を入力に回す）
-            return s;
+        const search = section.createEl("input", {
+            cls: "voxcraft-dict-search",
+            type: "search",
+            attr: { placeholder: "絞り込み（誤認識・正しい表記）", enterkeyhint: "search" },
+        });
+        const list = section.createDiv({ cls: "voxcraft-dict-list" });
+        const none = section.createDiv({ cls: "voxcraft-dict-none" });
+        const shown: { row: Group; el: HTMLElement }[] = [];
+
+        const applyFilter = () => {
+            const q = search.value.trim().toLowerCase();
+            let hits = 0;
+            for (const item of shown) {
+                const hit = !q || `${item.row.keys} ${item.row.value}`.toLowerCase().includes(q);
+                item.el.toggleClass("is-hidden", !hit);
+                if (hit) hits += 1;
+            }
+            none.setText(shown.length === 0 ? "まだ登録がありません" : "該当する行がありません");
+            none.toggleClass("is-hidden", hits > 0);
+        };
+        search.addEventListener("input", applyFilter);
+
+        const buildRow = (row: Group) => {
+            const el = list.createDiv({ cls: "voxcraft-dict-row" });
+            const summary = el.createEl("button", {
+                cls: "voxcraft-dict-summary",
+                attr: { type: "button" },
+            });
+            const keysEl = summary.createSpan({ cls: "voxcraft-dict-keys" });
+            summary.createSpan({ cls: "voxcraft-dict-arrow", text: "→" });
+            const valueEl = summary.createSpan({ cls: "voxcraft-dict-value" });
+            const edit = el.createDiv({ cls: "voxcraft-dict-edit" });
+
+            const refresh = () => {
+                const keys = row.keys.trim();
+                const value = row.value.trim();
+                keysEl.setText(keys || "（未入力）");
+                keysEl.toggleClass("is-blank", !keys);
+                valueEl.setText(value || "（未入力）");
+                valueEl.toggleClass("is-blank", !value);
+                updateHeading();
+            };
+
+            const field = (label: string, placeholder: string, value: string,
+                           onInput: (v: string) => void): HTMLInputElement => {
+                const wrap = edit.createDiv({ cls: "voxcraft-dict-field" });
+                wrap.createEl("label", { cls: "voxcraft-dict-label", text: label });
+                const input = wrap.createEl("input", {
+                    cls: "voxcraft-dict-input",
+                    type: "text",
+                    attr: { placeholder, autocapitalize: "off", autocomplete: "off", spellcheck: "false" },
+                });
+                input.value = value;
+                input.addEventListener("input", () => {
+                    onInput(input.value);
+                    refresh();
+                });
+                return input;
+            };
+
+            const keyInput = field(labels.keyLabel, labels.keyPlaceholder, row.keys,
+                (v) => { row.keys = v; });
+            field(labels.valueLabel, labels.valuePlaceholder, row.value,
+                (v) => { row.value = v; });
+
+            const rowActions = edit.createDiv({ cls: "voxcraft-dict-row-actions" });
+            const remove = rowActions.createEl("button", { cls: "mod-warning", text: "この行を削除" });
+            remove.addEventListener("click", () => {
+                const at = rows.indexOf(row);
+                if (at >= 0) rows.splice(at, 1);
+                const seen = shown.findIndex((item) => item.row === row);
+                if (seen >= 0) shown.splice(seen, 1);
+                el.remove();
+                updateHeading();
+                applyFilter();
+            });
+
+            summary.addEventListener("click", () => {
+                el.toggleClass("is-open", !el.hasClass("is-open"));
+            });
+
+            refresh();
+            shown.push({ row, el });
+            return { el, keyInput };
         };
 
-        rows.forEach((row, i) => renderRow(row, i));
+        rows.forEach((row) => buildRow(row));
+        applyFilter();
 
-        new Setting(parent).addButton((b) =>
-            b.setButtonText("＋ 追加").onClick(() => {
-                const row: Group = { keys: "", value: "" };
-                rows.push(row);
-                heading.setText(headingText());
-                // 全体を作り直すと一覧の先頭までスクロールが戻ってしまうため、
-                // 新しい行だけをその場に足してそこへスクロール・フォーカスする。
-                const s = renderRow(row, rows.length - 1);
-                s.settingEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
-                (s.settingEl.querySelector("input") as HTMLInputElement | null)?.focus();
-            })
-        );
+        const add = section.createDiv({ cls: "voxcraft-dict-add" }).createEl("button", {
+            text: "＋ 追加",
+        });
+        add.addEventListener("click", () => {
+            const row: Group = { keys: "", value: "" };
+            rows.push(row);
+            // 絞り込み中でも新しい行は見えないと困る。
+            search.value = "";
+            // 全体を作り直すと一覧の先頭までスクロールが戻ってしまうため、
+            // 新しい行だけをその場に足してそこへスクロール・フォーカスする。
+            const created = buildRow(row);
+            created.el.addClass("is-open");
+            applyFilter();
+            created.el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+            created.keyInput.focus();
+        });
     }
 }
