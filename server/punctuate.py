@@ -120,6 +120,29 @@ def morphemes(text: str) -> list[tuple[str, str]] | None:
     return [(m.surface(), m.reading_form() or m.surface()) for m in morphs]
 
 
+def morphemes_pos(text: str) -> list[tuple[str, str, str]] | None:
+    """形態素を (表層, 読みカタカナ, 品詞大分類) で返す。sudachi 未導入なら None。
+
+    品詞まで要るのは辞書候補の切り出し（dictcandidates.py）。名詞の連続だけを
+    語として拾わないと、「という形」「のマイナー」のように助詞を巻き込んだ
+    キーが候補に出る。そのまま登録すると関係ない場所でも置換が起きる。
+    """
+    t = text.strip()
+    if not t:
+        return None
+    tok = _get_tokenizer()
+    if tok is None:
+        return None
+    try:
+        morphs = tok.tokenize(t, _mode)
+    except Exception:  # noqa: BLE001 — 補助情報。取れなくても本文は返す。
+        return None
+    return [
+        (m.surface(), m.reading_form() or m.surface(), m.part_of_speech()[0])
+        for m in morphs
+    ]
+
+
 def add_punctuation(text: str) -> str:
     """テキストに「。」「、」を自動挿入して返す（sudachi 未導入ならそのまま）。"""
     t = text.strip()

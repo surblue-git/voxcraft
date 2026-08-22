@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from main import ws_endpoint
+from main import dictionary_set_replacements_get, ws_endpoint
 
 
 class FakeWebSocket:
@@ -84,6 +84,37 @@ def _run_all() -> int:
     print(f"\n{len(functions) - failed}/{len(functions)} passed")
     return failed
 
+
+
+def test_set_replacements_are_served_in_apply_order():
+    """辞書セットの置換を、**適用順のまま**配ること。
+
+    既存ノートへ辞書を当て直す機能（プラグインの「このノートに辞書を当てる」）が
+    この順で先頭から当てる。並び替えを呼び出し側に任せると最長一致の規則が
+    2箇所に分かれて、いつか食い違う。順序はここで固定する。
+    """
+    from userdict import get_dictionary_snapshot
+
+    body = dictionary_set_replacements_get("default")
+    snapshot = get_dictionary_snapshot("default")
+    assert body["setId"] == "default"
+    assert body["revision"] == snapshot.revision
+    served = [tuple(pair) for pair in body["replacements"]]
+    assert served == list(snapshot.replacements)
+    # 長いキーが先（最長一致）。ここが崩れると短いキーが先に当たって結果が変わる。
+    lengths = [len(observed) for observed, _output in served]
+    assert lengths == sorted(lengths, reverse=True)
+
+
+def test_set_replacements_rejects_unknown_set():
+    from fastapi import HTTPException
+
+    try:
+        dictionary_set_replacements_get("存在しないセット")
+    except HTTPException as exc:
+        assert exc.status_code in (400, 500)
+    else:
+        raise AssertionError("未知のセットIDでも成功してしまった")
 
 if __name__ == "__main__":
     raise SystemExit(1 if _run_all() else 0)

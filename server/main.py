@@ -288,6 +288,24 @@ async def dictionary_symbol_post(profile_id: str, payload: dict = Body(...)) -> 
         raise HTTPException(status_code=500, detail=f"辞書を保存できません: {exc}") from exc
 
 
+@app.get("/dictionaries/sets/{set_id}/replacements")
+def dictionary_set_replacements_get(set_id: str) -> dict:
+    """辞書セットを解決した置換規則を、**適用順のまま**返す。
+
+    既存ノートへ辞書を当て直す機能（プラグインの「このノートに辞書を当てる」）が使う。
+    プロファイルを個別に取って呼び出し側で混ぜると、プロファイルの優先順と最長一致の
+    並びを2箇所で持つことになり、いつか食い違う。**順序ごとサーバーが配る**のが要点で、
+    クライアントはこの順で先頭から当てるだけでよい（ReplacementPlan と同じ結果になる）。
+    """
+    snapshot = _resolve_dictionary_snapshot(set_id)
+    return {
+        "setId": snapshot.set_id,
+        "setName": snapshot.set_name,
+        "revision": snapshot.revision,
+        "replacements": [[observed, output] for observed, output in snapshot.replacements],
+    }
+
+
 @app.get("/dictionaries/{profile_id}/dict")
 def dictionary_profile_dict_get(profile_id: str) -> dict:
     """指定プロファイルを置換・記号語のフラット形式で返す（/dict と同じ編集UI用）。"""

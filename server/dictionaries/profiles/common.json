@@ -344,6 +344,150 @@
       "observed": "マナポータル",
       "output": "マイナポータル",
       "enabled": true
+    },
+    {
+      "observed": "マイナーアプリ",
+      "output": "マイナアプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "データ認証サービス",
+      "output": "デジタル認証サービス",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナポーター",
+      "output": "マイナポータル",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "データ認証",
+      "output": "デジタル認証",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナップポータル",
+      "output": "マイナポータル",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "デジタル認識アプリ",
+      "output": "デジタル認証アプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マインアプリ",
+      "output": "マイナアプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナルアプリ",
+      "output": "マイナアプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナンバーパード",
+      "output": "マイナンバーカード",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナップオータル",
+      "output": "マイナポータル",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "データ認証アプリ",
+      "output": "デジタル認証アプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナーポータル",
+      "output": "マイナポータル",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "デジタル認識",
+      "output": "デジタル認証",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "デジタル入社アプリ",
+      "output": "デジタル認証アプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナポタル",
+      "output": "マイナポータル",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "ポーターアプリ",
+      "output": "ポータルアプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "認識アプリ",
+      "output": "認証アプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マナポータルアプリ",
+      "output": "マイナポータルアプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "IOS",
+      "output": "iOS",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "コータル",
+      "output": "ポータル",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナポーターアプリ",
+      "output": "マイナポータルアプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナーコータルアプリ",
+      "output": "マイナポータルアプリ",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マイナバーカード",
+      "output": "マイナンバーカード",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
+    },
+    {
+      "observed": "マインバーカード",
+      "output": "マイナンバーカード",
+      "enabled": true,
+      "note": "260821 デジ庁マイナアプリ"
     }
   ],
   "symbols": {

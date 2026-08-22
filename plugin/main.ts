@@ -21,9 +21,11 @@ import {
 import {
     addDictionaryEntry,
     addDictionarySymbol,
+    ApplyDictionaryModal,
     DictModal,
     DictionarySetModal,
     fetchDictionaryCatalog,
+    fetchSetReplacements,
     fetchReconvert,
     QuickAddDictionaryModal,
     ReconvertPayload,
@@ -370,6 +372,12 @@ export default class VoxCraftPlugin extends Plugin {
             name: "選択範囲を辞書に追加",
             icon: "book-plus",
             callback: () => void this.openQuickAddModal(),
+        });
+        this.addCommand({
+            id: "apply-dictionary-to-note",
+            name: "このノートに辞書を当てる",
+            icon: "wand-2",
+            callback: () => void this.applyDictionaryToNote(),
         });
         this.addCommand({
             id: "edit-userdict",
@@ -2503,6 +2511,9 @@ export default class VoxCraftPlugin extends Plugin {
                 this.app,
                 observed,
                 `${target.setName} › ${target.profileName}`,
+                // 登録前プレビュー用。辞書は無条件置換なので、押す前に
+                // 「このノートが何箇所どう変わるか」を見せる（dictpreview.ts）。
+                cm.state.doc.toString(),
                 async (from, to) => {
                     const result = await this.addReplacementDirect(url, from, to);
                     new Notice(
@@ -2514,6 +2525,59 @@ export default class VoxCraftPlugin extends Plugin {
             ).open();
         } catch (error) {
             new Notice(`VoxCraft: 辞書を準備できません — ${error instanceof Error ? error.message : error}`, 8000);
+        }
+    }
+
+    // 育てた辞書を、目の前のノートへ当て直す。
+    //
+    // 辞書は認識のときにしか効かないので、登録しても既にあるノートは直らない
+    // （効くのは次に同じ語を録ったとき）。取材の当日に語を覚えさせても、その日の
+    // ノートは直らないままなので、輪を閉じるのにこれが要る。
+    //
+    // 選択があればその範囲だけ。手書きの要約まで巻き込みたくない場合に使う。
+    private async applyDictionaryToNote(): Promise<void> {
+        const cm = this.getActiveCm();
+        if (!cm) {
+            new Notice("VoxCraft: ノートを編集モードで開いてください。");
+            return;
+        }
+        const url = this.activeUrl();
+        if (!url) {
+            new Notice("VoxCraft: 接続先が設定されていません");
+            return;
+        }
+        const sel = cm.state.selection.main;
+        const from = sel.empty ? 0 : sel.from;
+        const to = sel.empty ? cm.state.doc.length : sel.to;
+        const text = cm.state.doc.sliceString(from, to);
+        if (!text.trim()) {
+            new Notice("VoxCraft: 当てる本文がありません。");
+            return;
+        }
+        const scope = sel.empty ? "ノート全体" : `選択範囲（${text.length}字）`;
+        try {
+            const { setName, pairs } = await fetchSetReplacements(
+                url,
+                this.dictionarySetIdFor(url)
+            );
+            if (pairs.length === 0) {
+                new Notice("VoxCraft: 辞書に登録がありません。");
+                return;
+            }
+            new ApplyDictionaryModal(this.app, scope, text, pairs, setName, (replaced) => {
+                if (replaced === text) {
+                    new Notice("VoxCraft: 変更はありませんでした。");
+                    return;
+                }
+                // 1トランザクションで置き換える＝取り消しも1回で戻せる。
+                cm.dispatch({ changes: { from, to, insert: replaced } });
+                new Notice("VoxCraft: 辞書を当てました（取り消しは Ctrl+Z）");
+            }).open();
+        } catch (error) {
+            new Notice(
+                `VoxCraft: 辞書を取得できません — ${error instanceof Error ? error.message : error}`,
+                8000
+            );
         }
     }
 

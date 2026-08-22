@@ -5,6 +5,12 @@
 
 import { App, Modal, Notice, Setting, requestUrl } from "obsidian";
 
+import {
+    DictionaryPair,
+    previewReplacement,
+    runDictionary,
+} from "./dictpreview";
+
 export interface DictData {
     replacements: Record<string, string>;
     symbols: Record<string, string>;
@@ -142,6 +148,31 @@ export async function addDictionaryEntry(
     return res.json as DictionaryEntryResult;
 }
 
+// 辞書セットを解決した置換規則を、**適用順のまま**受け取る。
+// 並べ替えはしないこと。最長一致の順序はサーバーが決めていて、こちら側で
+// もう一度並べ替えると、いつか食い違って「プレビューと結果が違う」になる。
+export async function fetchSetReplacements(
+    wsUrl: string,
+    setId: string
+): Promise<{ setName: string; revision: string; pairs: DictionaryPair[] }> {
+    const res = await requestUrl({
+        url: `${httpBase(wsUrl)}/dictionaries/sets/${encodeURIComponent(setId)}/replacements`,
+        method: "GET",
+        throw: false,
+    });
+    if (res.status >= 400) throw new Error(errorDetail(res));
+    const body = (res.json ?? {}) as {
+        setName?: string;
+        revision?: string;
+        replacements?: [string, string][];
+    };
+    return {
+        setName: body.setName ?? setId,
+        revision: body.revision ?? "",
+        pairs: (body.replacements ?? []).map(([observed, output]) => ({ observed, output })),
+    };
+}
+
 // 記号語（単独チャンク一致）を1件追加する。置換辞書とは別枠なので経路も分ける。
 // 1文字キー（例 悪→。）が許されるのは、チャンク全体一致でしか効かないため。
 export async function addDictionarySymbol(
@@ -270,40 +301,53 @@ export class DictionarySetModal extends Modal {
 }
 
 export class QuickAddDictionaryModal extends Modal {
+    private previewEl: HTMLElement | null = null;
+    private observed: string;
+    private output = "";
+
     constructor(
         app: App,
-        private observedInitial: string,
+        observedInitial: string,
         private targetLabel: string,
+        private noteText: string,
         private onSubmit: (observed: string, output: string) => Promise<void>
     ) {
         super(app);
+        this.observed = observedInitial;
     }
 
     onOpen(): void {
         this.titleEl.setText("VoxCraft 辞書へ追加");
+        this.contentEl.addClass("voxcraft-dictadd");
         this.contentEl.createEl("p", {
             text: `登録先: ${this.targetLabel}。Whisperが実際に出した表記を、望む表記へ置換します。`,
             cls: "setting-item-description",
         });
-        let observed = this.observedInitial;
-        let output = "";
         new Setting(this.contentEl)
             .setName("誤認識した表記")
             .setDesc("ノートに出力された文字をそのまま指定")
-            .addText((text) => text.setValue(observed).onChange((value) => { observed = value; }));
+            .addText((text) => text.setValue(this.observed).onChange((value) => {
+                this.observed = value;
+                this.renderPreview();
+            }));
         new Setting(this.contentEl)
             .setName("正しい表記")
             .setDesc("今後、自動的に置き換える文字")
             .addText((text) => {
-                text.setPlaceholder("正しい表記").onChange((value) => { output = value; });
+                text.setPlaceholder("正しい表記").onChange((value) => {
+                    this.output = value;
+                    this.renderPreview();
+                });
                 window.setTimeout(() => text.inputEl.focus(), 0);
             });
+        this.previewEl = this.contentEl.createDiv({ cls: "voxcraft-dictadd-preview" });
+        this.renderPreview();
         const status = this.contentEl.createEl("p", { cls: "setting-item-description" });
         status.setAttribute("aria-live", "polite");
         new Setting(this.contentEl)
             .addButton((button) => button.setButtonText("登録").setCta().onClick(async () => {
-                const from = observed.trim();
-                const to = output.trim();
+                const from = this.observed.trim();
+                const to = this.output.trim();
                 if (!from || !to) {
                     status.setText("誤認識した表記と正しい表記を入力してください。");
                     return;
@@ -321,6 +365,55 @@ export class QuickAddDictionaryModal extends Modal {
                 }
             }))
             .addButton((button) => button.setButtonText("キャンセル").onClick(() => this.close()));
+    }
+
+    // 登録は無条件置換なので、押す前に「このノートが何箇所どう変わるか」を出す。
+    // 危ないのは誤りを直すつもりで正しい語を潰す登録（実例: 要約の略称
+    // 「マイナカード」を正解にして、本文の「マイナンバーカード」を全部潰す）。
+    // 件数と実際の文脈を見れば、その場で気づける。
+    private renderPreview(): void {
+        const host = this.previewEl;
+        if (!host) return;
+        host.empty();
+        const from = this.observed.trim();
+        const to = this.output.trim();
+        if (!from) return;
+
+        const preview = previewReplacement(this.noteText, from, to);
+        const head = host.createEl("p", { cls: "voxcraft-dictadd-count" });
+        if (preview.count === 0) {
+            head.setText("このノートには出てきません。登録は次回以降の認識に効きます。");
+        } else {
+            head.setText(`このノートの ${preview.count} 箇所が変わります。`);
+            if (preview.count >= 5) head.addClass("is-heavy");
+        }
+
+        if (to && preview.looksLikeAbbreviation) {
+            host.createEl("p", {
+                cls: "voxcraft-dictadd-warn",
+                text: `「${to}」は「${from}」を短くしただけに見えます。`
+                    + "要約で使う略称をそのまま登録すると、正しい本文が潰れます。",
+            });
+        } else if (to && preview.outputAlreadyIn > 0) {
+            host.createEl("p", {
+                cls: "voxcraft-dictadd-note",
+                text: `「${to}」はこのノートに既に ${preview.outputAlreadyIn} 箇所あります。`,
+            });
+        }
+
+        for (const hit of preview.hits) {
+            const line = host.createDiv({ cls: "voxcraft-dictadd-hit" });
+            line.createSpan({ text: (hit.clippedBefore ? "…" : "") + hit.before });
+            line.createSpan({ cls: "voxcraft-dictadd-from", text: from });
+            if (to) line.createSpan({ cls: "voxcraft-dictadd-to", text: to });
+            line.createSpan({ text: hit.after + (hit.clippedAfter ? "…" : "") });
+        }
+        if (preview.truncated) {
+            host.createEl("p", {
+                cls: "voxcraft-dictadd-note",
+                text: `（他 ${preview.count - preview.hits.length} 箇所）`,
+            });
+        }
     }
 }
 
@@ -629,5 +722,112 @@ export class DictModal extends Modal {
             created.el.scrollIntoView({ block: "nearest", behavior: "smooth" });
             created.keyInput.focus();
         });
+    }
+}
+
+
+// 育てた辞書を、既にあるノートへ当て直す。
+//
+// 辞書は認識のときにしか効かないので、登録しても目の前のノートは直らない。
+// 効くのは次に同じ語を録ったときで、その一周には次の取材が要る。ここはその穴を埋める。
+//
+// **無条件置換をまとめて掛ける**ので、1件登録より危ない。だから押す前に、
+// 当たる箇所の総数・登録ごとの件数・実際の文脈を出し、行ごとに外せるようにする。
+// 置換の意味論はサーバーと同じ（dictpreview.runDictionary）で、実測で
+// 置換後のテキストがサーバーの結果と1文字も違わないことを確かめてある。
+export class ApplyDictionaryModal extends Modal {
+    private disabled = new Set<string>();
+    private bodyEl: HTMLElement | null = null;
+
+    constructor(
+        app: App,
+        private scopeLabel: string,
+        private text: string,
+        private pairs: DictionaryPair[],
+        private setLabel: string,
+        private onApply: (replaced: string) => void
+    ) {
+        super(app);
+    }
+
+    private activePairs(): DictionaryPair[] {
+        return this.pairs.filter((p) => !this.disabled.has(p.observed));
+    }
+
+    onOpen(): void {
+        this.titleEl.setText("VoxCraft 辞書をこのノートに当てる");
+        this.contentEl.addClass("voxcraft-dictadd");
+        this.contentEl.createEl("p", {
+            text: `辞書「${this.setLabel}」の登録 ${this.pairs.length}件 / 対象: ${this.scopeLabel}`,
+            cls: "setting-item-description",
+        });
+        this.bodyEl = this.contentEl.createDiv({ cls: "voxcraft-dictadd-preview" });
+        const actions = new Setting(this.contentEl);
+        actions.addButton((button) =>
+            button.setButtonText("適用").setCta().onClick(() => {
+                this.onApply(runDictionary(this.text, this.activePairs()).text);
+                this.close();
+            })
+        );
+        actions.addButton((button) => button.setButtonText("キャンセル").onClick(() => this.close()));
+        this.render();
+    }
+
+    private render(): void {
+        const host = this.bodyEl;
+        if (!host) return;
+        host.empty();
+        const run = runDictionary(this.text, this.activePairs());
+
+        const head = host.createEl("p", { cls: "voxcraft-dictadd-count" });
+        if (run.total === 0) {
+            head.setText("当たる登録がありません。このノートは変わりません。");
+            return;
+        }
+        head.setText(`${run.total}箇所が変わります（${run.entries.length}種の登録が当たりました）。`);
+        if (run.total >= 5) head.addClass("is-heavy");
+
+        // 外した登録も行として残す。消えると「何を外したか」が分からなくなる。
+        const off = [...this.disabled].filter(
+            (observed) => !run.entries.some((e) => e.observed === observed)
+        );
+        for (const entry of run.entries) {
+            this.renderRow(host, entry.observed, entry.output, entry.count, entry.hits);
+        }
+        for (const observed of off) {
+            const pair = this.pairs.find((p) => p.observed === observed);
+            if (pair) this.renderRow(host, observed, pair.output, 0, []);
+        }
+    }
+
+    private renderRow(
+        host: HTMLElement,
+        observed: string,
+        output: string,
+        count: number,
+        hits: { before: string; after: string; clippedBefore: boolean; clippedAfter: boolean }[]
+    ): void {
+        const row = host.createDiv({ cls: "voxcraft-dictadd-row" });
+        const label = row.createEl("label", { cls: "voxcraft-dictadd-rowhead" });
+        const box = label.createEl("input", { type: "checkbox" });
+        box.checked = !this.disabled.has(observed);
+        box.addEventListener("change", () => {
+            if (box.checked) this.disabled.delete(observed);
+            else this.disabled.add(observed);
+            this.render();
+        });
+        label.createSpan({ cls: "voxcraft-dictadd-from", text: observed });
+        label.createSpan({ cls: "voxcraft-dictadd-to", text: output });
+        label.createSpan({
+            cls: "voxcraft-dictadd-note",
+            text: count ? `${count}箇所` : "（外した）",
+        });
+        for (const hit of hits) {
+            const line = row.createDiv({ cls: "voxcraft-dictadd-hit" });
+            line.createSpan({ text: (hit.clippedBefore ? "…" : "") + hit.before });
+            line.createSpan({ cls: "voxcraft-dictadd-from", text: observed });
+            line.createSpan({ cls: "voxcraft-dictadd-to", text: output });
+            line.createSpan({ text: hit.after + (hit.clippedAfter ? "…" : "") });
+        }
     }
 }

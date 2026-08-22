@@ -40,6 +40,9 @@ Phase 1A（永続形式と互換移行）、Phase 1B（セッション固定ス�
 - `POST /dictionaries/validate`: 保存なし検証。
 - `POST /dictionaries/{profile_id}/entries`: `observed`, `output`, 任意の `expectedRevision`, `hotword`, `priority`, `note`。競合は409。
 - `POST /dictionaries/{profile_id}/symbols`: `observed`, `output`, 任意の `expectedRevision`。記号語（単独チャンク一致）を1件追加する。置換と違いチャンク全体一致でしか効かないので1文字キーを許す。競合は409。
+- `GET /dictionaries/sets/{set_id}/replacements`: セットを解決した置換を**適用順のまま**返す。
+  プラグインの「このノートに辞書を当てる」が使う。**並び順ごと配るのが要点**で、
+  呼び出し側で並べ替えない（最長一致の規則をサーバーの1箇所に残す）。
 - `POST /reconvert`, `POST /recognize`: `dictionarySetId` を受け、辞書メタデータを返す。
 - WebSocket `start`: `dictionarySetId` を受ける。`started` はセットID／名前／リビジョン／構成プロファイル／登録先／診断を返す。
 
@@ -82,6 +85,9 @@ Phase 2完全版として残している主項目:
 1. JSON/CSV/TSVのインポート、エクスポート、dry-run差分表示。
 2. プロファイル作成・複製・無効化、セット構成編集の管理UI。
 3. 登録候補キュー（低信頼・未確定）と承認フロー、使用回数・最終使用日時。
+   → 候補づくりは `server/dictcandidates.py` に実装済み（ノートの要約を正解側に使う）。
+   残りはUIへの取り込み。CLIとUIで**省略判定の規則を必ず揃えること**
+   （`ABBREVIATION_MIN_DROP` / `plugin/dictpreview.ts`）。
 4. プロファイル単位の履歴一覧とUIからのロールバック（現状は直前 `.bak` のみ）。
 5. サーバー書き込みAPIの認証／Tailscale ACL前提の明文化。
 6. 辞書精度評価用コーパスと、変更前後の認識・置換回帰レポート。
@@ -93,5 +99,8 @@ Phase 3候補は自動提案、共有辞書同期、評価指標に基づく昇�
 
 - 進行中セッションの辞書をホットリロードしない。不変性は再現性と長時間文字起こしの整合に必要。
 - クイック登録で既存キーを黙って更新しない。変更UIは差分確認付きで別に設計する。
+- クイック登録は押す前に「このノートが何箇所どう変わるか」を出す（`plugin/dictpreview.ts`）。
+  件数は多めに倒す（既存キーとの最長一致は見ない）。**少なく見せる方向へ変えないこと** —
+  このプレビューの目的は正しい語を潰す登録を止めることなので、見落としが唯一の失敗。
 - 旧 `/dict` は共通辞書・記号語の互換編集用。ジャンル辞書の主管理UIへ拡張しない。
 - BRATはプラグインしか配布しない。サーバー更新とのバージョン差を検証時に必ず確認する。

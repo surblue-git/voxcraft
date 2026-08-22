@@ -304,3 +304,82 @@ body.is-mobile .voxcraft-toolbar {
     font-size: 0.9em;
     cursor: pointer;
 }
+
+/* 辞書クイック登録の「このノートへの影響」。
+   辞書は無条件置換なので、押す前に何箇所どう変わるかを見せる（dictpreview.ts）。 */
+.voxcraft-dictadd .voxcraft-dictadd-preview {
+    margin: 0.4em 0 0.2em;
+    padding: 0.6em 0.7em;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background: var(--background-secondary);
+    max-height: 30vh;
+    overflow-y: auto;
+}
+body.is-mobile .voxcraft-dictadd .voxcraft-dictadd-preview {
+    max-height: none;
+    overflow-y: visible;
+}
+.voxcraft-dictadd .voxcraft-dictadd-count {
+    margin: 0 0 0.4em;
+    font-size: 0.85em;
+    color: var(--text-muted);
+}
+/* 多くの箇所が変わる登録ほど、正しい語を潰している可能性が高い。 */
+.voxcraft-dictadd .voxcraft-dictadd-count.is-heavy {
+    color: var(--text-warning);
+    font-weight: 600;
+}
+.voxcraft-dictadd .voxcraft-dictadd-warn {
+    margin: 0 0 0.4em;
+    font-size: 0.85em;
+    color: var(--text-error);
+}
+.voxcraft-dictadd .voxcraft-dictadd-note {
+    margin: 0.3em 0 0;
+    font-size: 0.8em;
+    color: var(--text-faint);
+}
+.voxcraft-dictadd .voxcraft-dictadd-hit {
+    margin: 0.25em 0;
+    font-size: 0.85em;
+    line-height: 1.5;
+    word-break: break-all;
+}
+.voxcraft-dictadd .voxcraft-dictadd-from {
+    text-decoration: line-through;
+    color: var(--text-error);
+}
+.voxcraft-dictadd .voxcraft-dictadd-to {
+    margin-left: 0.15em;
+    color: var(--text-accent);
+    font-weight: 600;
+}
+
+/* 「このノートに辞書を当てる」の行。まとめて掛ける操作なので、
+   件数と文脈を見てから行ごとに外せるようにしている。 */
+.voxcraft-dictadd .voxcraft-dictadd-row {
+    padding: 0.35em 0;
+    border-top: 1px solid var(--background-modifier-border);
+}
+.voxcraft-dictadd .voxcraft-dictadd-row:first-of-type {
+    border-top: none;
+}
+.voxcraft-dictadd .voxcraft-dictadd-rowhead {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+.voxcraft-dictadd .voxcraft-dictadd-rowhead input {
+    margin: 0;
+}
+.voxcraft-dictadd .voxcraft-dictadd-rowhead .voxcraft-dictadd-note {
+    margin-left: auto;
+    white-space: nowrap;
+}
+.voxcraft-dictadd .voxcraft-dictadd-row .voxcraft-dictadd-hit {
+    margin-left: 1.6em;
+    color: var(--text-muted);
+}
