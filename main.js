@@ -549,6 +549,116 @@ var ARGUMENT_FREE = /* @__PURE__ */ new Set([
 
 // dict.ts
 var import_obsidian = require("obsidian");
+
+// dictpreview.ts
+var DEFAULT_LIMIT = 6;
+var DEFAULT_CONTEXT = 20;
+function matchPositions(text, needle) {
+  const out = [];
+  if (!text || !needle)
+    return out;
+  let from = 0;
+  for (; ; ) {
+    const at = text.indexOf(needle, from);
+    if (at < 0)
+      return out;
+    out.push(at);
+    from = at + needle.length;
+  }
+}
+var ABBREVIATION_MIN_DROP = 3;
+function looksLikeAbbreviation(observed, output) {
+  if (!observed || !output)
+    return false;
+  if (observed.length - output.length < ABBREVIATION_MIN_DROP)
+    return false;
+  const target = Array.from(output);
+  let i = 0;
+  for (const ch of observed) {
+    if (ch === target[i])
+      i += 1;
+    if (i === target.length)
+      return true;
+  }
+  return false;
+}
+function previewReplacement(text, observed, output, options = {}) {
+  var _a, _b;
+  const limit = (_a = options.limit) != null ? _a : DEFAULT_LIMIT;
+  const context = (_b = options.context) != null ? _b : DEFAULT_CONTEXT;
+  const positions = matchPositions(text, observed);
+  const hits = [];
+  for (const index of positions.slice(0, Math.max(0, limit))) {
+    const from = Math.max(0, index - context);
+    const to = Math.min(text.length, index + observed.length + context);
+    hits.push({
+      index,
+      before: text.slice(from, index),
+      after: text.slice(index + observed.length, to),
+      clippedBefore: from > 0,
+      clippedAfter: to < text.length
+    });
+  }
+  return {
+    count: positions.length,
+    hits,
+    truncated: positions.length > hits.length,
+    outputAlreadyIn: output ? matchPositions(text, output).length : 0,
+    looksLikeAbbreviation: looksLikeAbbreviation(observed, output)
+  };
+}
+function escapeForRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function runDictionary(text, pairs, options = {}) {
+  var _a, _b;
+  const limit = (_a = options.limit) != null ? _a : DEFAULT_LIMIT;
+  const context = (_b = options.context) != null ? _b : DEFAULT_CONTEXT;
+  const usable = pairs.filter((p) => p.observed && p.output && p.observed !== p.output);
+  if (!text || usable.length === 0) {
+    return { text, matches: [], entries: [], total: 0 };
+  }
+  const values = new Map(usable.map((p) => [p.observed, p.output]));
+  const pattern = new RegExp(usable.map((p) => escapeForRegExp(p.observed)).join("|"), "g");
+  const matches = [];
+  const out = text.replace(pattern, (found, at) => {
+    var _a2;
+    const replacement = (_a2 = values.get(found)) != null ? _a2 : found;
+    matches.push({ index: at, observed: found, output: replacement });
+    return replacement;
+  });
+  const byObserved = /* @__PURE__ */ new Map();
+  for (const hit of matches) {
+    const list = byObserved.get(hit.observed);
+    if (list)
+      list.push(hit);
+    else
+      byObserved.set(hit.observed, [hit]);
+  }
+  const entries = [];
+  for (const [observed, list] of byObserved) {
+    entries.push({
+      observed,
+      output: list[0].output,
+      count: list.length,
+      hits: list.slice(0, limit).map((hit) => {
+        const from = Math.max(0, hit.index - context);
+        const to = Math.min(text.length, hit.index + observed.length + context);
+        return {
+          index: hit.index,
+          before: text.slice(from, hit.index),
+          after: text.slice(hit.index + observed.length, to),
+          clippedBefore: from > 0,
+          clippedAfter: to < text.length
+        };
+      })
+    });
+  }
+  entries.sort((a, b) => b.count - a.count || a.observed.localeCompare(b.observed));
+  return { text: out, matches, entries, total: matches.length };
+}
+
+// dict.ts
 function httpBase(wsUrl) {
   const u = wsUrl.trim().replace(/^ws(s)?:\/\//i, (_m, s) => s ? "https://" : "http://");
   return u.replace(/\/ws\/?$/i, "");
@@ -593,6 +703,22 @@ async function addDictionaryEntry(wsUrl, profileId, observed, output, expectedRe
   if (res.status >= 400)
     throw new Error(errorDetail(res));
   return res.json;
+}
+async function fetchSetReplacements(wsUrl, setId) {
+  var _a, _b, _c, _d;
+  const res = await (0, import_obsidian.requestUrl)({
+    url: `${httpBase(wsUrl)}/dictionaries/sets/${encodeURIComponent(setId)}/replacements`,
+    method: "GET",
+    throw: false
+  });
+  if (res.status >= 400)
+    throw new Error(errorDetail(res));
+  const body = (_a = res.json) != null ? _a : {};
+  return {
+    setName: (_b = body.setName) != null ? _b : setId,
+    revision: (_c = body.revision) != null ? _c : "",
+    pairs: ((_d = body.replacements) != null ? _d : []).map(([observed, output]) => ({ observed, output }))
+  };
 }
 async function addDictionarySymbol(wsUrl, profileId, observed, output, expectedRevision) {
   const res = await (0, import_obsidian.requestUrl)({
@@ -690,34 +816,40 @@ var DictionarySetModal = class extends import_obsidian.Modal {
   }
 };
 var QuickAddDictionaryModal = class extends import_obsidian.Modal {
-  constructor(app, observedInitial, targetLabel, onSubmit) {
+  constructor(app, observedInitial, targetLabel, noteText, onSubmit) {
     super(app);
-    this.observedInitial = observedInitial;
     this.targetLabel = targetLabel;
+    this.noteText = noteText;
     this.onSubmit = onSubmit;
+    this.previewEl = null;
+    this.output = "";
+    this.observed = observedInitial;
   }
   onOpen() {
     this.titleEl.setText("VoxCraft \u8F9E\u66F8\u3078\u8FFD\u52A0");
+    this.contentEl.addClass("voxcraft-dictadd");
     this.contentEl.createEl("p", {
       text: `\u767B\u9332\u5148: ${this.targetLabel}\u3002Whisper\u304C\u5B9F\u969B\u306B\u51FA\u3057\u305F\u8868\u8A18\u3092\u3001\u671B\u3080\u8868\u8A18\u3078\u7F6E\u63DB\u3057\u307E\u3059\u3002`,
       cls: "setting-item-description"
     });
-    let observed = this.observedInitial;
-    let output = "";
-    new import_obsidian.Setting(this.contentEl).setName("\u8AA4\u8A8D\u8B58\u3057\u305F\u8868\u8A18").setDesc("\u30CE\u30FC\u30C8\u306B\u51FA\u529B\u3055\u308C\u305F\u6587\u5B57\u3092\u305D\u306E\u307E\u307E\u6307\u5B9A").addText((text) => text.setValue(observed).onChange((value) => {
-      observed = value;
+    new import_obsidian.Setting(this.contentEl).setName("\u8AA4\u8A8D\u8B58\u3057\u305F\u8868\u8A18").setDesc("\u30CE\u30FC\u30C8\u306B\u51FA\u529B\u3055\u308C\u305F\u6587\u5B57\u3092\u305D\u306E\u307E\u307E\u6307\u5B9A").addText((text) => text.setValue(this.observed).onChange((value) => {
+      this.observed = value;
+      this.renderPreview();
     }));
     new import_obsidian.Setting(this.contentEl).setName("\u6B63\u3057\u3044\u8868\u8A18").setDesc("\u4ECA\u5F8C\u3001\u81EA\u52D5\u7684\u306B\u7F6E\u304D\u63DB\u3048\u308B\u6587\u5B57").addText((text) => {
       text.setPlaceholder("\u6B63\u3057\u3044\u8868\u8A18").onChange((value) => {
-        output = value;
+        this.output = value;
+        this.renderPreview();
       });
       window.setTimeout(() => text.inputEl.focus(), 0);
     });
+    this.previewEl = this.contentEl.createDiv({ cls: "voxcraft-dictadd-preview" });
+    this.renderPreview();
     const status = this.contentEl.createEl("p", { cls: "setting-item-description" });
     status.setAttribute("aria-live", "polite");
     new import_obsidian.Setting(this.contentEl).addButton((button) => button.setButtonText("\u767B\u9332").setCta().onClick(async () => {
-      const from = observed.trim();
-      const to = output.trim();
+      const from = this.observed.trim();
+      const to = this.output.trim();
       if (!from || !to) {
         status.setText("\u8AA4\u8A8D\u8B58\u3057\u305F\u8868\u8A18\u3068\u6B63\u3057\u3044\u8868\u8A18\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
         return;
@@ -734,6 +866,54 @@ var QuickAddDictionaryModal = class extends import_obsidian.Modal {
         status.setText(error instanceof Error ? error.message : String(error));
       }
     })).addButton((button) => button.setButtonText("\u30AD\u30E3\u30F3\u30BB\u30EB").onClick(() => this.close()));
+  }
+  // 登録は無条件置換なので、押す前に「このノートが何箇所どう変わるか」を出す。
+  // 危ないのは誤りを直すつもりで正しい語を潰す登録（実例: 要約の略称
+  // 「マイナカード」を正解にして、本文の「マイナンバーカード」を全部潰す）。
+  // 件数と実際の文脈を見れば、その場で気づける。
+  renderPreview() {
+    const host = this.previewEl;
+    if (!host)
+      return;
+    host.empty();
+    const from = this.observed.trim();
+    const to = this.output.trim();
+    if (!from)
+      return;
+    const preview = previewReplacement(this.noteText, from, to);
+    const head = host.createEl("p", { cls: "voxcraft-dictadd-count" });
+    if (preview.count === 0) {
+      head.setText("\u3053\u306E\u30CE\u30FC\u30C8\u306B\u306F\u51FA\u3066\u304D\u307E\u305B\u3093\u3002\u767B\u9332\u306F\u6B21\u56DE\u4EE5\u964D\u306E\u8A8D\u8B58\u306B\u52B9\u304D\u307E\u3059\u3002");
+    } else {
+      head.setText(`\u3053\u306E\u30CE\u30FC\u30C8\u306E ${preview.count} \u7B87\u6240\u304C\u5909\u308F\u308A\u307E\u3059\u3002`);
+      if (preview.count >= 5)
+        head.addClass("is-heavy");
+    }
+    if (to && preview.looksLikeAbbreviation) {
+      host.createEl("p", {
+        cls: "voxcraft-dictadd-warn",
+        text: `\u300C${to}\u300D\u306F\u300C${from}\u300D\u3092\u77ED\u304F\u3057\u305F\u3060\u3051\u306B\u898B\u3048\u307E\u3059\u3002\u8981\u7D04\u3067\u4F7F\u3046\u7565\u79F0\u3092\u305D\u306E\u307E\u307E\u767B\u9332\u3059\u308B\u3068\u3001\u6B63\u3057\u3044\u672C\u6587\u304C\u6F70\u308C\u307E\u3059\u3002`
+      });
+    } else if (to && preview.outputAlreadyIn > 0) {
+      host.createEl("p", {
+        cls: "voxcraft-dictadd-note",
+        text: `\u300C${to}\u300D\u306F\u3053\u306E\u30CE\u30FC\u30C8\u306B\u65E2\u306B ${preview.outputAlreadyIn} \u7B87\u6240\u3042\u308A\u307E\u3059\u3002`
+      });
+    }
+    for (const hit of preview.hits) {
+      const line = host.createDiv({ cls: "voxcraft-dictadd-hit" });
+      line.createSpan({ text: (hit.clippedBefore ? "\u2026" : "") + hit.before });
+      line.createSpan({ cls: "voxcraft-dictadd-from", text: from });
+      if (to)
+        line.createSpan({ cls: "voxcraft-dictadd-to", text: to });
+      line.createSpan({ text: hit.after + (hit.clippedAfter ? "\u2026" : "") });
+    }
+    if (preview.truncated) {
+      host.createEl("p", {
+        cls: "voxcraft-dictadd-note",
+        text: `\uFF08\u4ED6 ${preview.count - preview.hits.length} \u7B87\u6240\uFF09`
+      });
+    }
   }
 };
 var KEY_SPLIT_RE = /[、,，／/\n]+/;
@@ -994,6 +1174,91 @@ var DictModal = class extends import_obsidian.Modal {
       created.el.scrollIntoView({ block: "nearest", behavior: "smooth" });
       created.keyInput.focus();
     });
+  }
+};
+var ApplyDictionaryModal = class extends import_obsidian.Modal {
+  constructor(app, scopeLabel, text, pairs, setLabel, onApply) {
+    super(app);
+    this.scopeLabel = scopeLabel;
+    this.text = text;
+    this.pairs = pairs;
+    this.setLabel = setLabel;
+    this.onApply = onApply;
+    this.disabled = /* @__PURE__ */ new Set();
+    this.bodyEl = null;
+  }
+  activePairs() {
+    return this.pairs.filter((p) => !this.disabled.has(p.observed));
+  }
+  onOpen() {
+    this.titleEl.setText("VoxCraft \u8F9E\u66F8\u3092\u3053\u306E\u30CE\u30FC\u30C8\u306B\u5F53\u3066\u308B");
+    this.contentEl.addClass("voxcraft-dictadd");
+    this.contentEl.createEl("p", {
+      text: `\u8F9E\u66F8\u300C${this.setLabel}\u300D\u306E\u767B\u9332 ${this.pairs.length}\u4EF6 / \u5BFE\u8C61: ${this.scopeLabel}`,
+      cls: "setting-item-description"
+    });
+    this.bodyEl = this.contentEl.createDiv({ cls: "voxcraft-dictadd-preview" });
+    const actions = new import_obsidian.Setting(this.contentEl);
+    actions.addButton(
+      (button) => button.setButtonText("\u9069\u7528").setCta().onClick(() => {
+        this.onApply(runDictionary(this.text, this.activePairs()).text);
+        this.close();
+      })
+    );
+    actions.addButton((button) => button.setButtonText("\u30AD\u30E3\u30F3\u30BB\u30EB").onClick(() => this.close()));
+    this.render();
+  }
+  render() {
+    const host = this.bodyEl;
+    if (!host)
+      return;
+    host.empty();
+    const run = runDictionary(this.text, this.activePairs());
+    const head = host.createEl("p", { cls: "voxcraft-dictadd-count" });
+    if (run.total === 0) {
+      head.setText("\u5F53\u305F\u308B\u767B\u9332\u304C\u3042\u308A\u307E\u305B\u3093\u3002\u3053\u306E\u30CE\u30FC\u30C8\u306F\u5909\u308F\u308A\u307E\u305B\u3093\u3002");
+      return;
+    }
+    head.setText(`${run.total}\u7B87\u6240\u304C\u5909\u308F\u308A\u307E\u3059\uFF08${run.entries.length}\u7A2E\u306E\u767B\u9332\u304C\u5F53\u305F\u308A\u307E\u3057\u305F\uFF09\u3002`);
+    if (run.total >= 5)
+      head.addClass("is-heavy");
+    const off = [...this.disabled].filter(
+      (observed) => !run.entries.some((e) => e.observed === observed)
+    );
+    for (const entry of run.entries) {
+      this.renderRow(host, entry.observed, entry.output, entry.count, entry.hits);
+    }
+    for (const observed of off) {
+      const pair = this.pairs.find((p) => p.observed === observed);
+      if (pair)
+        this.renderRow(host, observed, pair.output, 0, []);
+    }
+  }
+  renderRow(host, observed, output, count, hits) {
+    const row = host.createDiv({ cls: "voxcraft-dictadd-row" });
+    const label = row.createEl("label", { cls: "voxcraft-dictadd-rowhead" });
+    const box = label.createEl("input", { type: "checkbox" });
+    box.checked = !this.disabled.has(observed);
+    box.addEventListener("change", () => {
+      if (box.checked)
+        this.disabled.delete(observed);
+      else
+        this.disabled.add(observed);
+      this.render();
+    });
+    label.createSpan({ cls: "voxcraft-dictadd-from", text: observed });
+    label.createSpan({ cls: "voxcraft-dictadd-to", text: output });
+    label.createSpan({
+      cls: "voxcraft-dictadd-note",
+      text: count ? `${count}\u7B87\u6240` : "\uFF08\u5916\u3057\u305F\uFF09"
+    });
+    for (const hit of hits) {
+      const line = row.createDiv({ cls: "voxcraft-dictadd-hit" });
+      line.createSpan({ text: (hit.clippedBefore ? "\u2026" : "") + hit.before });
+      line.createSpan({ cls: "voxcraft-dictadd-from", text: observed });
+      line.createSpan({ cls: "voxcraft-dictadd-to", text: output });
+      line.createSpan({ text: hit.after + (hit.clippedAfter ? "\u2026" : "") });
+    }
   }
 };
 
@@ -3035,6 +3300,12 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       callback: () => void this.openQuickAddModal()
     });
     this.addCommand({
+      id: "apply-dictionary-to-note",
+      name: "\u3053\u306E\u30CE\u30FC\u30C8\u306B\u8F9E\u66F8\u3092\u5F53\u3066\u308B",
+      icon: "wand-2",
+      callback: () => void this.applyDictionaryToNote()
+    });
+    this.addCommand({
       id: "edit-userdict",
       name: "\u30E6\u30FC\u30B6\u30FC\u8F9E\u66F8\u3092\u7DE8\u96C6",
       icon: "book-open",
@@ -4901,6 +5172,9 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
         this.app,
         observed,
         `${target.setName} \u203A ${target.profileName}`,
+        // 登録前プレビュー用。辞書は無条件置換なので、押す前に
+        // 「このノートが何箇所どう変わるか」を見せる（dictpreview.ts）。
+        cm.state.doc.toString(),
         async (from, to) => {
           const result = await this.addReplacementDirect(url, from, to);
           new import_obsidian7.Notice(
@@ -4910,6 +5184,57 @@ var VoxCraftPlugin = class extends import_obsidian7.Plugin {
       ).open();
     } catch (error) {
       new import_obsidian7.Notice(`VoxCraft: \u8F9E\u66F8\u3092\u6E96\u5099\u3067\u304D\u307E\u305B\u3093 \u2014 ${error instanceof Error ? error.message : error}`, 8e3);
+    }
+  }
+  // 育てた辞書を、目の前のノートへ当て直す。
+  //
+  // 辞書は認識のときにしか効かないので、登録しても既にあるノートは直らない
+  // （効くのは次に同じ語を録ったとき）。取材の当日に語を覚えさせても、その日の
+  // ノートは直らないままなので、輪を閉じるのにこれが要る。
+  //
+  // 選択があればその範囲だけ。手書きの要約まで巻き込みたくない場合に使う。
+  async applyDictionaryToNote() {
+    const cm = this.getActiveCm();
+    if (!cm) {
+      new import_obsidian7.Notice("VoxCraft: \u30CE\u30FC\u30C8\u3092\u7DE8\u96C6\u30E2\u30FC\u30C9\u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002");
+      return;
+    }
+    const url = this.activeUrl();
+    if (!url) {
+      new import_obsidian7.Notice("VoxCraft: \u63A5\u7D9A\u5148\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093");
+      return;
+    }
+    const sel = cm.state.selection.main;
+    const from = sel.empty ? 0 : sel.from;
+    const to = sel.empty ? cm.state.doc.length : sel.to;
+    const text = cm.state.doc.sliceString(from, to);
+    if (!text.trim()) {
+      new import_obsidian7.Notice("VoxCraft: \u5F53\u3066\u308B\u672C\u6587\u304C\u3042\u308A\u307E\u305B\u3093\u3002");
+      return;
+    }
+    const scope = sel.empty ? "\u30CE\u30FC\u30C8\u5168\u4F53" : `\u9078\u629E\u7BC4\u56F2\uFF08${text.length}\u5B57\uFF09`;
+    try {
+      const { setName, pairs } = await fetchSetReplacements(
+        url,
+        this.dictionarySetIdFor(url)
+      );
+      if (pairs.length === 0) {
+        new import_obsidian7.Notice("VoxCraft: \u8F9E\u66F8\u306B\u767B\u9332\u304C\u3042\u308A\u307E\u305B\u3093\u3002");
+        return;
+      }
+      new ApplyDictionaryModal(this.app, scope, text, pairs, setName, (replaced) => {
+        if (replaced === text) {
+          new import_obsidian7.Notice("VoxCraft: \u5909\u66F4\u306F\u3042\u308A\u307E\u305B\u3093\u3067\u3057\u305F\u3002");
+          return;
+        }
+        cm.dispatch({ changes: { from, to, insert: replaced } });
+        new import_obsidian7.Notice("VoxCraft: \u8F9E\u66F8\u3092\u5F53\u3066\u307E\u3057\u305F\uFF08\u53D6\u308A\u6D88\u3057\u306F Ctrl+Z\uFF09");
+      }).open();
+    } catch (error) {
+      new import_obsidian7.Notice(
+        `VoxCraft: \u8F9E\u66F8\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093 \u2014 ${error instanceof Error ? error.message : error}`,
+        8e3
+      );
     }
   }
   openRecordingsModal() {
