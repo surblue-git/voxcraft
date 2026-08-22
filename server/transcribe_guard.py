@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import re
 
@@ -50,6 +51,33 @@ def speech_evidence(
     rms = float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
     peak = float(np.max(np.abs(x)))
     return SpeechEvidence(x.size / sample_rate, rms, peak, active_ratio)
+
+
+def choose_language(
+    probs: Mapping[str, float],
+    *,
+    min_confidence: float,
+    default: str = "ja",
+) -> str:
+    """言語判定の確率から、このチャンクを解く言語を選ぶ。
+
+    ja と en の**大小を比べるだけでは足りない**。音楽・拍手・無音のように
+    どの言語でもない入力では、全言語の確率が低いまま横並びになり、en がわずかに
+    ja を上回るだけで en が選ばれてしまう。実測（2026-08-19・FCNT発表会の
+    プロモ映像 14:40-17:15）では、最上位が nn(ノルウェー語) 0.36 や cy(ウェールズ語)
+    0.16 という「何も掴めていない」判定なのに、p_en 0.30 > p_ja 0.03 だけで en に
+    倒れ、本文が "Thank you." の羅列になっていた。
+
+    そこで en を選ぶには絶対値の確信度を要求する。本物の英語なら p_en は 0.9 以上に
+    出る（逐次通訳50分の実測で中央 0.97）ので、この条件で落ちるのは判定が
+    そもそも当てになっていないチャンクだけ。
+
+    en に届かなければ ja に倒す。日本語側には定型幻覚のブロックリストがあるので、
+    音楽や無音から出た定型句はそちらで捨てられる（英語側には無い）。
+    """
+    if not probs:
+        return default
+    return "en" if probs.get("en", 0.0) >= min_confidence else "ja"
 
 
 class AudioRingBuffer:

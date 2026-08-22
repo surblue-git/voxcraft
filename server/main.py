@@ -55,6 +55,7 @@ from asr import (
     AsrOptions, hq_transcriber, lid_transcriber, probe_transcriber, transcriber,
 )
 from config import config
+from denoise import NoiseSuppressor
 from dictionary_registry import (
     DictionaryRevisionConflict,
     DictionarySchemaError,
@@ -77,6 +78,7 @@ from transcribe_guard import (
     AudioRingBuffer,
     SilenceTracker,
     SpeechEvidence,
+    choose_language,
     filter_contextual_artifacts,
     speech_evidence,
     should_remove_between_context,
@@ -386,6 +388,17 @@ async def _detect_language_probs(audio: np.ndarray) -> dict[str, float]:
         return {}
 
 
+def _new_suppressor() -> NoiseSuppressor:
+    """セッション1本ぶんの会場ノイズ推定器。"""
+    return NoiseSuppressor(
+        config.sample_rate,
+        window_sec=config.denoise_window_sec,
+        max_alpha=config.denoise_max_alpha,
+        snr_full=config.denoise_snr_full,
+        snr_none=config.denoise_snr_none,
+    )
+
+
 async def _detect_chunk_language(audio: np.ndarray) -> str:
     """チャンクが日本語か英語かを判定する（文字起こしの language=auto 用）。
 
@@ -397,12 +410,18 @@ async def _detect_chunk_language(audio: np.ndarray) -> str:
     turbo で判定すると 1114ms かかり、認識そのもの（1272ms）とほぼ同じ時間がもう一度
     乗る。判定結果は base と turbo で完全一致したので、大きいモデルを使う理由がない。
 
+    en を選ぶ条件は ja との大小ではなく確信度そのもの
+    （transcribe_guard.choose_language / config.language_detect_min_confidence）。
+    音楽や拍手は「どの言語でもない」ので、比較だけだと必ず en に倒れる。
+
     判定に失敗しても本文そのものは作れるので、既定言語に倒す。
     """
     probs = await _detect_language_probs(audio)
-    if not probs:
-        return config.language
-    return "en" if probs.get("en", 0.0) > probs.get("ja", 0.0) else "ja"
+    return choose_language(
+        probs,
+        min_confidence=config.language_detect_min_confidence,
+        default=config.language,
+    )
 
 
 async def _transcribe_chunk(
@@ -686,6 +705,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
     system_consumer_task: asyncio.Task | None = None
     last_source_level_at = 0.0
     audio_ring = AudioRingBuffer(max(1, int(config.retry_buffer_sec * config.sample_rate)))
+    suppressor = _new_suppressor()
+    denoise_reported = False
     last_source_chunk_end = 0
     silence_tracker: SilenceTracker | None = None
     auto_stop_task: asyncio.Task | None = None
@@ -817,6 +838,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         dictionary: DictionarySnapshot | None = None,
     ) -> None:
         nonlocal pending_contextual_chunk, chunk_seq, last_chunk_language
+        nonlocal denoise_reported
         if dictionary is None:
             raise RuntimeError("辞書スナップショットがありません")
         # 発話を検出しチャンクを確定 → 認識開始を通知（クライアントで「認識中…」表示）。
@@ -860,8 +882,21 @@ async def ws_endpoint(ws: WebSocket) -> None:
             chunk_opts = replace(chunk_opts, language=last_chunk_language)
         # 英語チャンクに日本語向けの後処理を当てない（下の postprocess で使う）。
         english = mode == "transcribe" and (chunk_opts.language or config.language) == "en"
+        # 会場ノイズの減算。SNRが良ければ強さ0＝元の音声がそのまま渡る。
+        # 音声根拠（speech_evidence）も言語判定も**元音声のまま**測るので、
+        # 再認識の要否や言語判定の較正はこの処理の影響を受けない。
+        asr_audio = audio
+        if mode == "transcribe" and config.denoise:
+            asr_audio, alpha = suppressor.process(audio)
+            if alpha > 0 and not denoise_reported:
+                denoise_reported = True
+                snr = suppressor.snr_db()
+                print(
+                    f"[VoxCraft] 会場ノイズを減算します"
+                    f"（推定SNR {snr:.1f}dB / 強さ {alpha:.2f}）"
+                )
         result = await _transcribe_chunk(
-            audio, chunk_opts, dictionary, hq=(mode == "transcribe")
+            asr_audio, chunk_opts, dictionary, hq=(mode == "transcribe")
         )
         raw_text = result.text
         if mode == "transcribe" and raw_text:
@@ -940,8 +975,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     f"{span.end / config.sample_rate:.1f}秒"
                 )
                 return
-            refine_language = (
-                "en" if probs.get("en", 0.0) > probs.get("ja", 0.0) else "ja"
+            # 速報と同じ規則で選ぶ（音楽・拍手だけの30秒を英語で解き直さない）。
+            refine_language = choose_language(
+                probs, min_confidence=config.language_detect_min_confidence
             )
         refine_english = refine_language == "en"
         result = await _transcribe_chunk(
@@ -1132,6 +1168,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
         if pcm.size == 0:
             return
         audio_ring.append(pcm)
+        # 無音も含めて全部渡す（無音区間こそノイズ推定の材料）。
+        # 口述は挙動を変えないので、文字起こしのときだけ測る。
+        if mode == "transcribe" and config.denoise:
+            suppressor.feed(pcm)
         if silence_tracker is not None:
             silence_tracker.feed(pcm, asyncio.get_running_loop().time())
         if session is not None:
@@ -1299,6 +1339,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
         nonlocal transcribe_language, last_chunk_language
         nonlocal input_finished, previous_transcript_text, pending_contextual_chunk
         nonlocal refinement_delivered_end, audio_ring, last_source_chunk_end
+        nonlocal suppressor, denoise_reported
         nonlocal system_device_label
 
         requested_dictionary_set = cmd.get("dictionarySetId", "default")
@@ -1336,6 +1377,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
             ) * config.sample_rate))
         )
         last_source_chunk_end = 0
+        # 会場が変わればノイズも変わる。セッションごとに測り直す。
+        suppressor = _new_suppressor()
+        denoise_reported = False
         strip_space = bool(cmd.get("stripSpace", config.strip_ja_alnum_space))
         symbols = bool(cmd.get("symbols", config.enable_symbol_dictation))
         mode = "transcribe" if cmd.get("mode") == "transcribe" else "dictation"

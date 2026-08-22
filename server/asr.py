@@ -51,13 +51,36 @@ _BOILERPLATE_RE = re.compile(
     rf"(?:{_BOILERPLATE_CORE})[。、！\s　]*\Z"
 )
 
+# 英語側の同じ定型句。language=auto / en のときだけ効く。
+# 日本語側と対で要る理由: 無音・BGM から定型句が出るのはモデルの癖であって
+# 言語の性質ではない。実測（2026-08-18 FCNT発表会のプロモ映像）では、同じ区間が
+# ja なら「ご視聴ありがとうございました」で捨てられ、en だと素通りしていた。
+#
+# 日本語側が「ありがとうございました」単体を含めないのと同じ理由で、
+# "Thank you." 単体は含めない（会見で実際に言う）。ここに入れるのは
+# YouTube の字幕でしか出てこない、取材の発話とは絶対に被らない言い回しだけ。
+_BOILERPLATE_EN_CORE = "|".join([
+    r"thank(?:s| you)(?: (?:so|very) much)?(?: again)? for watching(?: (?:this|my) video)?",
+    r"(?:please |and )?(?:don'?t forget to |remember to )?(?:like and )?subscribe"
+    r"(?: to (?:my|our|the) channel)?",
+    r"(?:i'?ll |we'?ll )?see you (?:in|on) the next (?:video|one)",
+    r"(?:if you have any questions,? )?(?:please )?let me know"
+    r"(?: what you think)? in the comments(?: below)?",
+])
+_BOILERPLATE_EN_RE = re.compile(
+    rf"\A(?:so|and|well|okay|ok|all right|alright)?[,.]?\s*"
+    rf"(?:{_BOILERPLATE_EN_CORE})[.!,\s]*\Z",
+    re.IGNORECASE,
+)
+
 
 def is_boilerplate(text: str) -> bool:
-    """チャンク丸ごとが動画のアウトロ定型句なら True。
+    """チャンク丸ごとが動画のアウトロ定型句なら True（日本語・英語）。
 
     本文の途中に混ざった場合は False（本物の発話を消さないため丸ごと一致に限る）。
     """
-    return bool(_BOILERPLATE_RE.match(text.strip()))
+    stripped = text.strip()
+    return bool(_BOILERPLATE_RE.match(stripped) or _BOILERPLATE_EN_RE.match(stripped))
 
 
 @dataclass(frozen=True)

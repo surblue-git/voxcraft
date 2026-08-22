@@ -329,6 +329,21 @@
       "observed": "どう言いよう",
       "output": "同音異義語",
       "enabled": true
+    },
+    {
+      "observed": "あろーず",
+      "output": "arrows",
+      "enabled": true
+    },
+    {
+      "observed": "アローズ",
+      "output": "arrows",
+      "enabled": true
+    },
+    {
+      "observed": "マナポータル",
+      "output": "マイナポータル",
+      "enabled": true
     }
   ],
   "symbols": {

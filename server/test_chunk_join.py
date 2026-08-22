@@ -121,6 +121,28 @@ def test_boilerplate_whole_chunk():
     assert is_boilerplate("お楽しみに")
 
 
+def test_boilerplate_english_whole_chunk():
+    # language=auto で英語側へ流れたときの同じ定型句（2026-08-18 の発表会で実測）。
+    assert is_boilerplate("Thank you for watching.")
+    assert is_boilerplate("Thanks for watching!")
+    assert is_boilerplate("Thank you so much for watching.")
+    assert is_boilerplate("Please subscribe to my channel.")
+    assert is_boilerplate("Like and subscribe!")
+    assert is_boilerplate("I'll see you in the next video.")
+    assert is_boilerplate("If you have any questions, please let me know in the comments.")
+
+
+def test_real_english_speech_is_kept():
+    # 会見・取材で実際に言う英語は残す（日本語側で「ありがとうございました」を
+    # 残すのと同じ理由）。
+    assert not is_boilerplate("Thank you.")
+    assert not is_boilerplate("Thank you very much.")
+    assert not is_boilerplate("All right, let's go.")
+    # 定型句と同じ語が本文に混ざっただけの場合も残す（丸ごと一致に限る）。
+    assert not is_boilerplate("Thank you for watching our stock price this quarter.")
+    assert not is_boilerplate("We want people to subscribe to the service for years.")
+
+
 def test_real_speech_is_kept():
     # 本文に混ざった場合は消さない（丸ごと一致に限る）。
     assert not is_boilerplate("信頼性フェクターをご視聴ください。")

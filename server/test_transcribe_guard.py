@@ -5,6 +5,7 @@ from transcribe_guard import (
     AudioRingBuffer,
     SilenceTracker,
     SpeechEvidence,
+    choose_language,
     filter_contextual_artifacts,
     speech_evidence,
     should_remove_between_context,
@@ -146,6 +147,27 @@ def test_possible_real_ending_requires_weak_audio_to_remove():
     strong = SpeechEvidence(5.0, 0.02, 0.2, 0.6)
     assert filter_contextual_artifacts("以上で終わります。", weak)[0] == ""
     assert filter_contextual_artifacts("以上で終わります。", strong)[0] == "以上で終わります。"
+
+
+# --- 言語の選択 -------------------------------------------------------------
+
+def test_confident_english_is_chosen():
+    # 本物の英語（逐次通訳50分の実測で p_en 中央 0.97）。
+    assert choose_language({"en": 0.97, "ja": 0.00}, min_confidence=0.75) == "en"
+    assert choose_language({"en": 0.80, "ja": 0.03}, min_confidence=0.75) == "en"
+
+
+def test_music_and_applause_do_not_become_english():
+    # 2026-08-18 の発表会・プロモ映像の実測値。en が ja を上回っているが、
+    # 最上位は nn(0.36) や cy(0.16) で判定そのものが何も掴んでいない。
+    assert choose_language({"en": 0.30, "ja": 0.03, "nn": 0.36}, min_confidence=0.75) == "ja"
+    assert choose_language({"en": 0.55, "ja": 0.02}, min_confidence=0.75) == "ja"
+    assert choose_language({"en": 0.71, "ja": 0.00}, min_confidence=0.75) == "ja"
+
+
+def test_failed_detection_falls_back_to_default():
+    assert choose_language({}, min_confidence=0.75) == "ja"
+    assert choose_language({}, min_confidence=0.75, default="en") == "en"
 
 
 if __name__ == "__main__":

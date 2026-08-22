@@ -256,7 +256,10 @@
       "enabled": true
     }
   ],
-  "symbols": {},
+  "symbols": {
+    "はいよ": "改行",
+    "はいきょう": "改行"
+  },
   "hotwords": [],
   "hallucinations": []
 }

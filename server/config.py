@@ -46,12 +46,38 @@ class Config:
     language_detect_min_sec: float = float(
         _env("VOXCRAFT_LANGUAGE_DETECT_MIN_SEC", "2.0")
     )
+    # en と判定するのに要する確信度（絶対値）。ja との大小比較だけでは足りない。
+    # 音楽・拍手・無音のように**どの言語でもない**入力では、全言語の確率が低いまま
+    # 横並びになり、en がわずかに ja を上回るだけで en に倒れてしまう。
+    # 実測 2026-08-19（20260818-110141 の会見86分・純日本語 / 20260807-151651 の
+    # 逐次通訳50分・日英混在）:
+    #   大小比較のみ : 会見の 50チャンク(5.7分)が誤って en / 通訳の英語 19.9分を保持
+    #   0.75 以上    : 会見の誤りは 0件      / 通訳の英語 18.9分（95%）を保持
+    # 会見で誤った区間はプロモ映像とBGMで、p_en 中央 0.44・最上位が nn(ノルウェー語)や
+    # cy(ウェールズ語) ＝ 判定が何も掴めていない。本物の英語は p_en 中央 0.97 に出る。
+    # 下げると逐次通訳の取りこぼしが減る代わりに、無音・音楽が英語化する。
+    language_detect_min_confidence: float = float(
+        _env("VOXCRAFT_LANGUAGE_DETECT_MIN_CONFIDENCE", "0.75")
+    )
     # 両方の言語がこの確率を超えたら「1つの範囲に日英が同居している」とみなす。
     # 逐次通訳の実測（2026-08-07・50.4分）で、7秒チャンクの 9.5% がこれに該当した。
     # PC音声の補正は30秒を丸ごと1言語で解き直すので、該当する範囲は差し替えない。
     language_mix_threshold: float = float(
         _env("VOXCRAFT_LANGUAGE_MIX_THRESHOLD", "0.15")
     )
+    # --- 会場ノイズの減算（文字起こしのみ。口述には一切効かない） ---
+    # 会場で録るとSNRが落ちる。実測 2026-08-19 の発表会はノイズ床が良い録音より
+    # 12dB高く、SNR 24.4dB（良い録音は38-39dB）。帯域ごとにノイズを引くと、
+    # turbo と large-v3 の一致率が 59.6% → 66.0% に上がった（denoise.py に全実測）。
+    denoise: bool = _env("VOXCRAFT_DENOISE", "1") == "1"
+    # 減算の強さの上限。2.5まで上げると実発話が無音判定で捨てられ始める。
+    denoise_max_alpha: float = float(_env("VOXCRAFT_DENOISE_MAX_ALPHA", "1.5"))
+    # このSNR以下で上限の強さ。SNR 24.4dB の発表会で alpha 1.5 が最良だった。
+    denoise_snr_full: float = float(_env("VOXCRAFT_DENOISE_SNR_FULL", "24.0"))
+    # このSNR以上では何もしない。良い録音3本（38-39dB）は全チャンクで alpha 0。
+    denoise_snr_none: float = float(_env("VOXCRAFT_DENOISE_SNR_NONE", "32.0"))
+    # ノイズ推定に使う直近の秒数。長くすると音楽（プロモ映像）を覚えてしまう。
+    denoise_window_sec: float = float(_env("VOXCRAFT_DENOISE_WINDOW_SEC", "60.0"))
     # "auto"（GPUがあれば cuda、無ければ cpu）/ "cpu" / "cuda"
     device: str = _env("VOXCRAFT_DEVICE", "auto")
     # "auto"（cuda→int8_float16 / cpu→int8）/ "int8" / "float16" / "int8_float16" ...

@@ -194,6 +194,11 @@ def decide(row: Row, rule: str, *, margin: float, mix_threshold: float = 0.15) -
     既定は lid（言語判定）。Whisper の言語判定は音そのものを見ていて、
     テキストの見た目に釣られない。logprob は反復に騙されるので単独では使わない。
 
+    ただし **ja との大小比較では en を選ばない**。音楽・拍手・無音はどの言語でもなく、
+    全言語の確率が低いまま横並びになるので、比較だけだと必ず en に倒れる
+    （config.language_detect_min_confidence の実測を参照）。en には絶対値の確信度を
+    要求する。--margin はそのうえでさらに ja 寄りにしたいときの上乗せ。
+
     **"mix" が要る理由。** VAD は息継ぎで切るので、チャンクの切れ目は話者の交代と
     一致しない。通訳者の語尾と話者の English の出だしが1チャンクに入ると、
     ja側とen側が**別々の中身**を拾う（実測 2026-08-07 の 1:37 「私の戦略ですけれども、
@@ -207,7 +212,8 @@ def decide(row: Row, rule: str, *, margin: float, mix_threshold: float = 0.15) -
             if latin_ratio(row.ja_text) > 0.6:
                 return "en"
             return "mix"
-        return "en" if row.p_en > row.p_ja + margin else "ja"
+        floor = max(config.language_detect_min_confidence, row.p_ja + margin)
+        return "en" if row.p_en >= floor else "ja"
     if rule == "logprob":
         ja = row.ja_logprob if row.ja_logprob is not None else -9.0
         en = row.en_logprob if row.en_logprob is not None else -9.0
@@ -339,7 +345,11 @@ def report(rows: list[Row], *, margin: float, mix_threshold: float) -> None:
     # ここを lid が en と呼べているかで、判定の当たり具合が粗く分かる。
     leaked = [r for r in rows if latin_ratio(r.ja_text) > 0.6 and len(r.ja_text) > 20]
     if leaked:
-        hit = sum(1 for r in leaked if r.p_en > r.p_ja + margin)
+        # 実際の採用規則（lid）で数える。ここだけ大小比較にすると答え合わせがずれる。
+        hit = sum(
+            1 for r in leaked
+            if decide(r, "lid", margin=margin, mix_threshold=0.0) == "en"
+        )
         print(
             f"  ja側が英字だらけ（英語が漏れた区間）{len(leaked)}件 → "
             f"lid も en と判定 {hit}件 ({hit / len(leaked) * 100:.0f}%)"
