@@ -164,10 +164,13 @@ _OBVIOUS_VIDEO_ARTIFACTS = (
     "次回予告",
     "次の動画でお会いしましょう",
 )
-# 本物の動画末尾でも発話されるため常時禁止にはしないが、後ろに本文が続くなら
-# Whisper がチャンク途中へ差し込んだ定型幻覚と判断できる句。
-_MIDSTREAM_VIDEO_ARTIFACTS = (
-    "ご視聴ありがとうございました",
+# Whisper がチャンク境界や無音へ差し込みやすい、動画アウトロ由来の定型幻覚。
+# 内容を記録する文字起こしでは、実際の動画末尾で発話された場合も情報価値がないため、
+# 出現位置や音声強度にかかわらず句だけを除去する。単なる「ありがとうございました」や
+# 発表の締めで使われる「ご清聴ありがとうございました」は対象に含めない。
+_VIDEO_OUTRO_ARTIFACT_RE = re.compile(
+    r"((?:最後まで)?ご視聴(?:いただき)?(?:誠に)?ありがとうございま(?:した|す))"
+    r"[。、！？!?]*"
 )
 _CONTEXTUAL_ARTIFACTS = (
     "おやすみなさい",
@@ -224,8 +227,9 @@ def filter_contextual_artifacts(
 ) -> tuple[str, list[str]]:
     """文字起こし結果から、音声と文脈の両方で不自然な定型句だけを除く。
 
-    - 実文に癒着した動画定型句は、その句だけを除く。
-    - 単独出力は、音声根拠が弱い場合だけ除く（本物の動画アウトロを守る）。
+    - 「ご視聴ありがとうございました」系は、位置や音声強度によらず句だけを除く。
+    - それ以外の実文に癒着した動画定型句は、その句だけを除く。
+    - それ以外の単独出力は、音声根拠が弱い場合だけ除く。
     - 「以上で終わります」のような会議で実在し得る句は特に保守的に扱う。
     """
     cleaned = text.strip()
@@ -243,15 +247,12 @@ def filter_contextual_artifacts(
             cleaned = cleaned.replace(phrase, "")
             removed.append(phrase)
 
-    for phrase in _MIDSTREAM_VIDEO_ARTIFACTS:
-        position = cleaned.find(phrase)
-        if position < 0:
-            continue
-        following = cleaned[position + len(phrase):].strip(" 、。！？!?　")
-        # 実際の締めの挨拶は残す。直後に別の本文が十分続く場合だけ癒着幻覚とみなす。
-        if len(following) >= 12:
-            cleaned = cleaned[:position] + cleaned[position + len(phrase):]
-            removed.append(phrase)
+    # チャンク末尾へ実文と癒着するケースは、次チャンクに本文が続くため「後続文字あり」
+    # では判定できない。文字起こし用途では本物のアウトロも不要なので常に除去する。
+    outro_matches = [match.group(1) for match in _VIDEO_OUTRO_ARTIFACT_RE.finditer(cleaned)]
+    if outro_matches:
+        cleaned = _VIDEO_OUTRO_ARTIFACT_RE.sub("", cleaned)
+        removed.extend(outro_matches)
 
     for phrase in _POSSIBLY_REAL_ENDINGS:
         if cleaned.strip(" 、。！？!?　") == phrase and weak_audio:
