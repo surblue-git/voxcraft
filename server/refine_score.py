@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
@@ -149,8 +150,57 @@ def plan_counter(plan):
     return count
 
 
+# --- 辞書の健康診断 -------------------------------------------------------
+
+def audit_dictionary(replacements, morphology) -> list[tuple[str, str]]:
+    """**それ自体が正しい日本語**であるキーを挙げる。
+
+    無条件置換がいちばん危ないのはここ。`現役 → 減益` は決算の文脈でしか
+    正しくないのに、置換は文脈を見ないので「現役の行員」まで「減益の行員」に
+    してしまう。0.23.0 のプレビューは登録時の事故を防ぐが、**登録済みの項目には
+    効かない**（毎回の認識で黙って発火する）。
+
+    判定は「Sudachi が1語として知っているか」。ASRの崩れた出力（`一軒米氏`
+    `水尾銀行`）は複数の形態素に割れるので挙がらない。`ウィンドウズ` のような
+    表記ゆれは1語なので挙がるが、置換しても壊れないので目で落とせばよい
+    ——**見落とすより多めに挙げる**（`dictpreview.ts` と同じ倒し方）。
+    """
+    if not morphology.available:
+        return []
+    risky = []
+    for observed, output in replacements:
+        if not observed or not output:
+            continue
+        # 未知語を含む＝ASRの崩れ。それ自体が正しい語ではない。
+        if morphology.terms(observed):
+            continue
+        if len(_morphemes(morphology, observed)) == 1:
+            risky.append((observed, output))
+    # 漢字を含むキーを先に出す。カタカナの表記ゆれ（アンドロイド → Android）は
+    # 1語ではあるが、置換しても文章は壊れない。壊れるのは漢字語のほうで、
+    # そちらは別の意味で普通に使われる（現役の行員、経営再建、余震が続く）。
+    return sorted(risky, key=lambda kv: (not _has_kanji(kv[0]), kv[0]))
+
+
+_KANJI = re.compile(r"[㐀-䶿一-鿿]")
+
+
+def _has_kanji(text: str) -> bool:
+    return bool(_KANJI.search(text))
+
+
+def _morphemes(morphology, text: str) -> list[str]:
+    tokenizer = getattr(morphology, "_tokenizer", None)
+    if tokenizer is None:
+        return [text]
+    from sudachipy import tokenizer as _t  # type: ignore
+
+    return [m.surface() for m in tokenizer.tokenize(text, _t.Tokenizer.SplitMode.C)]
+
+
 def format_score(score: ErrorScore, accepted_score: ErrorScore | None = None,
-                 top: int = 12, glossary_given: bool = True) -> str:
+                 top: int = 12, glossary_given: bool = True,
+                 ambiguous: set | None = None) -> str:
     """報告用の文字列。門の前と後を並べる。"""
     if not score.present and not score.broken:
         return "  既知の誤りが入力に1件も無い（このノートでは測れない）"
@@ -184,9 +234,28 @@ def format_score(score: ErrorScore, accepted_score: ErrorScore | None = None,
         for e in sorted(fixed_entries, key=lambda e: -e.fixed)[:top]:
             lines.append(f"    {e.entry.observed} → {e.entry.output}  ×{e.fixed}")
 
-    stuck = [e for e in score.entries.values() if e.remained]
+    # 残った語を2つに分ける。曖昧なキー（それ自体が正しい日本語）が残るのは、
+    # 直せなかったのではなく**正しく手を出さなかった**可能性が高い。混ぜると、
+    # 正しい抑制が失点に見えてしまう（辞書は文脈を持たないので、正解側もここは
+    # 区別できない。人が見るための印として出す）。
+    ambiguous = ambiguous or set()
+    stuck = [e for e in score.entries.values()
+             if e.remained and e.entry.observed not in ambiguous]
+    held = [e for e in score.entries.values()
+            if e.remained and e.entry.observed in ambiguous]
     if stuck:
         lines.append("  直せなかった語（辞書が要る）")
         for e in sorted(stuck, key=lambda e: -e.remained)[:top]:
             lines.append(f"    {e.entry.observed} → {e.entry.output}  ×{e.remained}")
+    if held:
+        lines.append("  残ったが、正しい用法かもしれない語（要確認・失点として数えない）")
+        for e in sorted(held, key=lambda e: -e.remained)[:top]:
+            lines.append(f"    {e.entry.observed} → {e.entry.output}  ×{e.remained}")
+    # 曖昧なキーを「直した」ぶんは、逆に壊した可能性がある。
+    risky_fixed = [e for e in score.entries.values()
+                   if e.fixed and e.entry.observed in ambiguous]
+    if risky_fixed:
+        lines.append("  曖昧なキーを直した（本当に誤りだったか、diff で確かめること）")
+        for e in sorted(risky_fixed, key=lambda e: -e.fixed)[:top]:
+            lines.append(f"    {e.entry.observed} → {e.entry.output}  ×{e.fixed}")
     return "\n".join(lines)

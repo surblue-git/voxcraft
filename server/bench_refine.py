@@ -51,7 +51,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 from refine_guard import GuardStats, RefineGuard, extract_numbers
 from refine_llm import PROFILE_BY_NAME, RefineResult, make_client
-from refine_score import ErrorScore, format_score, load_known_errors, plan_counter
+from refine_score import (ErrorScore, audit_dictionary, format_score,
+                          load_known_errors, plan_counter)
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 # 実運用の補正ブロック（30秒）で入る本文の見当。長すぎるとモデルが要約に倒れ、
@@ -198,7 +199,7 @@ def run(blocks, client, profile, guard, glossary, verbose=False,
 
 
 def print_report(report: BenchReport, total_chars: int, scored: bool = False,
-                 glossary_given: bool = True) -> None:
+                 glossary_given: bool = True, ambiguous: set | None = None) -> None:
     stats = report.stats
     seconds = report.seconds
     print()
@@ -223,7 +224,7 @@ def print_report(report: BenchReport, total_chars: int, scored: bool = False,
     if scored:
         print("  ── 既知の誤り（辞書 = 正解） ──")
         print(format_score(report.score, report.accepted_score,
-                           glossary_given=glossary_given))
+                           glossary_given=glossary_given, ambiguous=ambiguous))
 
     # 採用基準（取材モードは幻覚0件・読み保存違反0件が条件）。
     if report.mode == "interview":
@@ -292,6 +293,8 @@ def main() -> int:
     ap.add_argument("--mode", default="manuscript", choices=sorted(PROFILE_BY_NAME),
                     help="既定 manuscript（原稿執筆）")
     ap.add_argument("--model", default="stub", help="Ollama のモデル名。stub で配線だけ確認")
+    ap.add_argument("--replay", type=Path, default=None,
+                    help="保存済みの校正結果を採点し直す（`--- 8< ---` 区切り）。モデルは呼ばない")
     ap.add_argument("--compare", nargs="+", metavar="MODEL", help="複数モデルを並べて比べる")
     ap.add_argument("--base-url", default=DEFAULT_BASE_URL)
     ap.add_argument("--timeout-sec", type=float, default=120.0)
@@ -327,6 +330,10 @@ def main() -> int:
     profile = PROFILE_BY_NAME[args.mode]
     glossary, known_errors, plan = load_dictionary(args.dictionary_set)
     count_key = plan_counter(plan)
+    # それ自体が正しい日本語のキーは、残っていても失点にしない（要確認として出す）。
+    ambiguous = {observed for observed, _ in
+                 audit_dictionary([(k.observed, k.output) for k in known_errors],
+                                  guard._morph)}
     total_chars = sum(len(b) for b in blocks)
     models = args.compare if args.compare else [args.model]
 
@@ -340,12 +347,12 @@ def main() -> int:
     reports = []
     for model in models:
         print(f"\n--- {model} ---")
-        client = make_client(model, args.base_url, args.timeout_sec)
+        client = make_client(model, args.base_url, args.timeout_sec, replay=args.replay)
         report = run(blocks, client, profile, guard, glossary, args.verbose,
                      known_errors=known_errors, count_key=count_key,
                      prompt_glossary=given)
         print_report(report, total_chars, scored=bool(known_errors),
-                     glossary_given=not args.no_glossary)
+                     glossary_given=not args.no_glossary, ambiguous=ambiguous)
         reports.append(report)
 
     if len(reports) > 1:

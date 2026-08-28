@@ -8,6 +8,7 @@ from dictionary_registry import ReplacementPlan
 from refine_score import (
     ErrorScore,
     KnownError,
+    audit_dictionary,
     format_score,
     load_known_errors,
     plan_counter,
@@ -115,6 +116,57 @@ def test_format_reports_both_sides_of_the_gate():
 
 def test_format_says_when_there_is_nothing_to_measure():
     assert "測れない" in format_score(ErrorScore())
+
+
+# --- 辞書の健康診断 -------------------------------------------------------
+
+def test_audit_flags_keys_that_are_real_words():
+    """それ自体が正しい日本語のキーだけを挙げる。
+
+    `現役 → 減益` は決算の文脈でしか正しくない。無条件置換は文脈を見ないので
+    「現役の行員」を「減益の行員」にしてしまう（実データで確認済み）。
+    """
+    from refine_guard import SudachiMorphology
+
+    morph = SudachiMorphology()
+    if not morph.available:
+        print("     （Sudachi が無いので飛ばす）")
+        return
+
+    risky = dict(audit_dictionary([
+        ("現役", "減益"),        # 普通に使う語 → 挙がるべき
+        ("再建", "債権"),        # 同上
+        ("蘇生", "組成"),        # 同上
+        ("水尾銀行", "みずほ銀行"),  # ASRの崩れ（複数形態素）→ 挙がらない
+        ("一軒米氏", "eKYC"),      # 同上
+        ("SMTV", "SMTB"),        # 同上
+    ], morph))
+    assert "現役" in risky and "再建" in risky and "蘇生" in risky, risky
+    assert "水尾銀行" not in risky and "一軒米氏" not in risky and "SMTV" not in risky, risky
+
+
+def test_audit_puts_kanji_keys_first():
+    """漢字語のほうが危ない。カタカナの表記ゆれは1語でも文章を壊さない。"""
+    from refine_guard import SudachiMorphology
+
+    morph = SudachiMorphology()
+    if not morph.available:
+        print("     （Sudachi が無いので飛ばす）")
+        return
+    order = [k for k, _ in audit_dictionary(
+        [("アンドロイド", "Android"), ("現役", "減益")], morph)]
+    assert order and order[0] == "現役", order
+
+
+def test_ambiguous_keys_left_alone_are_not_counted_as_failures():
+    """正しい用法を直さなかったことを、失点として出さない。"""
+    errors = [KnownError("現役", "減益")]
+    count = _counter(("現役", "減益"))
+    score = ErrorScore()
+    score.add_block("現役の行員に話を聞いた。", "現役の行員に話を聞いた。", errors, count)
+    out = format_score(score, ambiguous={"現役"})
+    assert "正しい用法かもしれない語" in out
+    assert "直せなかった語" not in out
 
 
 def _run_all() -> int:

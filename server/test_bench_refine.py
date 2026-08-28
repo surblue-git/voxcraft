@@ -103,6 +103,28 @@ def test_llm_errors_are_counted_and_do_not_reach_the_guard():
 
 # --- 書き出し -------------------------------------------------------------
 
+def test_replay_reads_saved_output_and_refuses_a_short_file():
+    """保存済み出力の採点し直し。ブロック数が合わなければ黙って詰めない。"""
+    import tempfile
+    from pathlib import Path
+
+    from refine_llm import ReplayClient
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "out.txt"
+        path.write_text("一つめ\n--- 8< ---\n二つめ\n", encoding="utf-8")
+        client = ReplayClient(path)
+        assert len(client) == 2
+        assert client.refine(MANUSCRIPT, "x").text == "一つめ"
+        assert client.refine(MANUSCRIPT, "x").text == "二つめ"
+        try:
+            client.refine(MANUSCRIPT, "x")
+        except ValueError as e:
+            assert "足りない" in str(e)
+        else:
+            raise AssertionError("3件目で例外にならなかった")
+
+
 def test_diff_lists_changed_and_rejected_blocks_only():
     report = BenchReport(model="m", mode="interview")
     report.add(BlockOutcome("同じ", "同じ", 0.1, True, (), ()))

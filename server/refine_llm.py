@@ -129,6 +129,45 @@ class StubClient:
         return RefineResult(text, 0.0)
 
 
+class ReplayClient:
+    """保存済みの校正結果を読み直す。モデルは呼ばない。
+
+    2つの用途がある。
+    1. 門やプロンプトを変えたあと、**同じ出力を採点し直す**（モデルを回さずに
+       門の変更だけを評価できる。GPUの1時間を毎回使わなくてよい）。
+    2. Ollama 以外の経路で作った出力を、同じ物差しに載せる。
+
+    区切りは行頭の `--- 8< ---`。ブロック数が合わないのは配線の誤りなので、
+    黙って詰めずに例外にする。
+    """
+
+    SEPARATOR = "--- 8< ---"
+
+    def __init__(self, path, label: str = "replay") -> None:
+        from pathlib import Path
+
+        raw = Path(path).read_text(encoding="utf-8")
+        self._blocks = [part.strip() for part in raw.split(self.SEPARATOR)]
+        self._index = 0
+        self._label = label
+
+    @property
+    def name(self) -> str:
+        return self._label
+
+    def __len__(self) -> int:
+        return len(self._blocks)
+
+    def refine(self, profile, text, glossary=()) -> RefineResult:
+        if self._index >= len(self._blocks):
+            raise ValueError(
+                f"保存済み出力が足りない（{len(self._blocks)}件しかない）。"
+                "ブロックの割り方が測ったときと違う可能性がある。")
+        body = self._blocks[self._index]
+        self._index += 1
+        return RefineResult(body, 0.0)
+
+
 class OllamaClient:
     """Ollama 互換の `/api/chat` を叩く。
 
@@ -200,7 +239,10 @@ def _strip_wrapper(text: str) -> str:
     return body.strip()
 
 
-def make_client(model: str, base_url: str, timeout_sec: float = 120.0) -> RefineClient:
+def make_client(model: str, base_url: str, timeout_sec: float = 120.0,
+                replay=None) -> RefineClient:
+    if replay is not None:
+        return ReplayClient(replay, label=model if model != "stub" else "replay")
     return StubClient() if model == "stub" else OllamaClient(model, base_url, timeout_sec)
 
 
