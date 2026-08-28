@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Protocol, Sequence
@@ -220,14 +221,23 @@ class OllamaClient:
 
 _FENCES = ("```", "~~~")
 
+# 思考を出すモデル（qwen3 等）の推論ブロック。既定で出るので、剥がさないと
+# **全ブロックが却下されて測定そのものが無駄になる**（門は正しく落とすが、
+# 落ちた理由がモデルの実力ではなく出力形式になってしまう）。
+_THINK = re.compile(r"<(think|thinking|reasoning)\b[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+# 閉じタグだけ残る実装もある（開始タグを本文に出さず、終端だけ出す）。
+_THINK_TAIL = re.compile(r"^.*?</(think|thinking|reasoning)>", re.DOTALL | re.IGNORECASE)
+
 
 def _strip_wrapper(text: str) -> str:
-    """モデルが付けがちなコードフェンスと前置きを落とす。
+    """モデルが付けがちな推論ブロック・コードフェンス・前置きを落とす。
 
     プロンプトで禁じても混ざることがあるので、機械的に剥がす。剥がしきれない
     ぶんは門が「作った」と見なして却下するので、ここで無理はしない。
     """
-    body = text.strip()
+    body = _THINK.sub("", text).strip()
+    if "</think>" in body or "</thinking>" in body or "</reasoning>" in body:
+        body = _THINK_TAIL.sub("", body).strip()
     for fence in _FENCES:
         if body.startswith(fence):
             lines = body.split("\n")

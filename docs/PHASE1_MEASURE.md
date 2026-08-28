@@ -28,17 +28,41 @@
 
 ## 1. 準備
 
+### まずブランチを取る
+
+このツールは `main` にまだ入っていない。**ブランチを切り替えないと
+`bench_refine.py` が存在しない。**
+
+```powershell
+cd <リポジトリ>
+git fetch origin claude/wizardly-wright-el1yt0
+git checkout claude/wizardly-wright-el1yt0
+```
+
+サーバーを常駐させている場合、この測定は**サーバーを止めずに走らせてよい**
+（`bench_refine.py` はテキストしか触らない）。ただし辞書の5件を無効化した
+コミットを反映するには、サーバーの再起動が要る（`.\server\control.ps1 restart`。
+**文字起こし・録音中は実行しないこと**）。
+
 ### モデルを入れる
 
 ```powershell
-# Ollama を入れて、日本語の効くモデルを引く
 winget install Ollama.Ollama
-ollama pull qwen3:8b
-ollama pull qwen3:14b     # VRAM に余裕があれば
+ollama pull qwen3:8b       # 8B。VRAM 8GB 程度から
+ollama pull qwen3:14b      # 余裕があれば
+ollama list                # 入っているものを確認
 ```
 
 `ollama serve` が `http://localhost:11434` で待ち受けていれば準備完了。
 別のポートや別の実装（llama.cpp のサーバー等）なら `--base-url` で指す。
+
+**思考を出すモデルに注意。** qwen3 系は既定で `<think>…</think>` を吐く。
+`refine_llm.py` が剥がすので測定は通るが、**そのぶん生成が遅くなる**
+（1ブロックあたり数倍になることもある）。速度を測るなら、プロンプト末尾に
+`/no_think` を足すか、思考しないモデルを選ぶ。
+
+**GPUの取り合い。** Whisper と同じGPUに載せると、文字起こし中は両方遅くなる。
+測定は認識を回していないときにやる。
 
 ### 配線を確かめる（モデル不要・10秒）
 
@@ -56,6 +80,10 @@ cd server
 
 **登録済みの誤りが本文に残っているノート**がよい。0.23.0 のデジ庁会見のノート
 （24語を登録しても本文が62箇所そのままだった、あれ）がまさに理想的な対象。
+
+**辞書セットは、そのノートの分野に合わせる。** 決済まわりの取材なら
+`--dictionary-set payments`、それ以外は `default`。合っていないと既知の誤りが
+1件も見つからず、採点が空振りする。
 
 録音から作り直してもよい（GPUが要る）:
 

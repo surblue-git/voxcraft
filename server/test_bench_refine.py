@@ -125,6 +125,20 @@ def test_replay_reads_saved_output_and_refuses_a_short_file():
             raise AssertionError("3件目で例外にならなかった")
 
 
+def test_reasoning_blocks_are_stripped():
+    """qwen3 等は既定で思考を出す。剥がさないと全ブロックが却下され、
+    測定がモデルの実力ではなく出力形式を測ってしまう。"""
+    from refine_llm import _strip_wrapper
+
+    body = "本日は決算のご説明です。"
+    assert _strip_wrapper(f"<think>まず誤変換を探す</think>\n{body}") == body
+    assert _strip_wrapper(f"考えている。</think>{body}") == body       # 閉じタグだけ
+    assert _strip_wrapper(f"<think>考える</think>\n```\n{body}\n```") == body
+    assert _strip_wrapper(body) == body
+    # 本文中の think という語は消さない。
+    assert _strip_wrapper("thinking about it と彼は言った。") == "thinking about it と彼は言った。"
+
+
 def test_diff_lists_changed_and_rejected_blocks_only():
     report = BenchReport(model="m", mode="interview")
     report.add(BlockOutcome("同じ", "同じ", 0.1, True, (), ()))
