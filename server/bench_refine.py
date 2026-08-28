@@ -50,7 +50,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from refine_guard import GuardStats, RefineGuard, extract_numbers
-from refine_llm import PROFILE_BY_NAME, RefineResult, make_client
+from refine_llm import PROFILE_BY_NAME, ReplayClient, RefineResult, make_client
 from refine_score import (ErrorScore, audit_dictionary, format_score,
                           load_known_errors, plan_counter)
 
@@ -305,6 +305,9 @@ def main() -> int:
     ap.add_argument("--no-glossary", action="store_true",
                     help="用語集をモデルに渡さずに測る（辞書から外せる語を見つける）")
     ap.add_argument("--out", type=Path, default=None, help="採用後の本文の書き出し先")
+    ap.add_argument("--out-raw", type=Path, default=None,
+                    help="モデルの生出力の書き出し先（--replay で採点し直せる形式）。"
+                         "--out を指定すると既定で <out>.raw.txt にも書く")
     ap.add_argument("--diff", type=Path, default=None, help="変更箇所の一覧の書き出し先")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -369,6 +372,16 @@ def main() -> int:
     if args.out:
         args.out.write_text("\n\n".join(o.text for o in first.outcomes), encoding="utf-8")
         print(f"\n本文を書き出した: {args.out}")
+    # 生出力は既定でも残す。門やプロンプトを変えたあと --replay で採点し直せる。
+    # 忘れると1時間のGPU時間がもう一度要るので、指定漏れで失わせない。
+    raw_path = args.out_raw or (args.out.with_suffix(args.out.suffix + ".raw.txt")
+                                if args.out else None)
+    if raw_path:
+        raw_path.write_text(
+            f"\n{ReplayClient.SEPARATOR}\n".join(o.after for o in first.outcomes),
+            encoding="utf-8")
+        print(f"モデルの生出力を書き出した: {raw_path}"
+              f"（--replay {raw_path.name} で採点し直せる）")
     if args.diff:
         args.diff.write_text(_render_diff(first), encoding="utf-8")
         print(f"変更の一覧を書き出した: {args.diff}")

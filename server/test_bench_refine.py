@@ -139,6 +139,26 @@ def test_reasoning_blocks_are_stripped():
     assert _strip_wrapper("thinking about it と彼は言った。") == "thinking about it と彼は言った。"
 
 
+def test_raw_output_round_trips_through_replay():
+    """--out で残した生出力を、--replay がそのまま食えること。
+
+    食えないと、門やプロンプトを変えるたびにGPUを1時間回し直すことになる。
+    指定漏れで失わせないよう、--out があれば既定でも書く。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from refine_llm import ReplayClient
+
+    outcomes = ["一つめの本文。", "二つめの本文。", "三つめの本文。"]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "raw.txt"
+        path.write_text(f"\n{ReplayClient.SEPARATOR}\n".join(outcomes), encoding="utf-8")
+        client = ReplayClient(path)
+        assert len(client) == 3
+        assert [client.refine(MANUSCRIPT, "x").text for _ in outcomes] == outcomes
+
+
 def test_diff_lists_changed_and_rejected_blocks_only():
     report = BenchReport(model="m", mode="interview")
     report.add(BlockOutcome("同じ", "同じ", 0.1, True, (), ()))
