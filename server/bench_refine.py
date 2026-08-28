@@ -237,6 +237,35 @@ def print_report(report: BenchReport, total_chars: int, scored: bool = False,
                   "却下が多すぎる＝そのモデルでは校正が通らない、という意味。")
 
 
+def scan_notes(root: Path, known_errors, count_key, limit: int = 20) -> int:
+    """どのノートなら測れるかを探す。
+
+    「既知の誤りが1件も無い」ノートで本番を回すと、GPUを1〜2時間使って
+    肝心の修正率が出ない。先にここで当たりを付ける。
+    """
+    files = sorted(root.rglob("*.md")) if root.is_dir() else [root]
+    rows = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        hits = sum(count_key(text, e.observed) for e in known_errors)
+        kinds = sum(1 for e in known_errors if count_key(text, e.observed))
+        if hits:
+            rows.append((hits, kinds, len(text), path))
+    if not rows:
+        print("既知の誤りを含むノートが1つも見つからない。"
+              "辞書セットを変えるか、別のフォルダを見る。")
+        return 1
+    rows.sort(reverse=True, key=lambda r: r[0])
+    print(f"{'誤り':>5}{'種':>4}{'字数':>8}  ノート")
+    for hits, kinds, chars, path in rows[:limit]:
+        print(f"{hits:>5}{kinds:>4}{chars:>8,}  {path.name}")
+    print(f"\n{len(rows)} 件のノートで測れる。いちばん上を使うのがよい。")
+    return 0
+
+
 def load_dictionary(set_id: str | None):
     """辞書を2つの役割で使う。
 
@@ -286,7 +315,7 @@ def load_session_text(session: str, limit_sec: float | None, set_id: str | None)
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="AI校正をローカルLLMで測る")
-    source = ap.add_mutually_exclusive_group(required=True)
+    source = ap.add_mutually_exclusive_group()
     source.add_argument("--text", type=Path, help="生テキストのファイル（.md / .txt）")
     source.add_argument("--session", help="保存済み録音のセッションID（GPUが要る）")
     ap.add_argument("--limit-sec", type=float, default=None, help="--session のとき先頭N秒だけ")
@@ -309,14 +338,25 @@ def main() -> int:
                     help="モデルの生出力の書き出し先（--replay で採点し直せる形式）。"
                          "--out を指定すると既定で <out>.raw.txt にも書く")
     ap.add_argument("--diff", type=Path, default=None, help="変更箇所の一覧の書き出し先")
+    ap.add_argument("--scan", type=Path, default=None,
+                    help="フォルダ内の .md を走査し、既知の誤りが多いノートを挙げる")
+    ap.add_argument("--allow-unscored", action="store_true",
+                    help="既知の誤りが0件でも本番を回す（門の統計だけ見たいとき）")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+
+    if not args.scan and not args.text and not args.session:
+        ap.error("--text か --session か --scan のどれかを指定してください")
 
     guard = RefineGuard()
     if not guard.available:
         print("Sudachi が無いので門が動かない。`pip install -r requirements.txt` を先に。",
               file=sys.stderr)
         return 2
+
+    if args.scan:
+        _glossary, known, plan = load_dictionary(args.dictionary_set or "default")
+        return scan_notes(args.scan, known, plan_counter(plan))
 
     if args.text:
         text = args.text.read_text(encoding="utf-8")
@@ -346,6 +386,17 @@ def main() -> int:
     print(f"用語集: モデルへ {len(given)} 語"
           f"{'（渡さない）' if args.no_glossary else ''}"
           f"／ 門の許可 {len(glossary)} 語／ 採点の正解 {len(known_errors)} 件")
+
+    # 測れないまま1〜2時間回さない。stub は配線確認なので素通しでよい。
+    hits = sum(count_key(b, e.observed) for b in blocks for e in known_errors)
+    if known_errors and hits == 0 and not args.allow_unscored and "stub" not in models:
+        print("\n【中止】このノートには既知の誤りが1件も無い。このまま回しても"
+              "修正率が出ない（門の統計だけになる）。", file=sys.stderr)
+        print("  測れるノートを探す:  bench_refine.py --scan <Vaultのフォルダ> "
+              f"--dictionary-set {args.dictionary_set}", file=sys.stderr)
+        print("  辞書セットを変える:  --dictionary-set payments など", file=sys.stderr)
+        print("  それでも回す:        --allow-unscored", file=sys.stderr)
+        return 2
 
     reports = []
     for model in models:
