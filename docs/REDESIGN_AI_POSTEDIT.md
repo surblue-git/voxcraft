@@ -331,11 +331,21 @@ PC音声の補正が既に守っている規則をそのまま適用する。**�
 - `server/bench_refine.py` — 保存済みテキスト／録音に対して指標を出すCLI
 - `server/test_refine_guard.py`（21件）、`server/test_bench_refine.py`（9件）
 
-### Phase 1 — 測る（**次にやること**）
+### Phase 1 — 測る（**手順は `docs/PHASE1_MEASURE.md`。実行は自宅PC**）
 
 自宅PCにローカルLLMを立て、実際のノートに掛けて §10 の指標を取る。
 **ここで採否が決まる。**「悪化しない」ことは門が保証しているので、見るべきは
 「効くか」と「いくらかかるか」の2つだけ。
+
+**正解データは作らない。辞書がそのまま正解になる。** 登録済みの `SMTV → SMTB` は
+実際に観測された誤認識と正しい表記の対なので、手元のノートに `SMTV` があれば
+そこは誤りだと分かっている。評価用の文章を書き起こす必要はない（書き起こすと、
+書いた側の想定しか測れない）。`server/refine_score.py` がこれを数える。
+
+**本命の実験は「用語集を渡さずに測る」**（`--no-glossary`）。語を1件ずつ登録しなくても
+本文が直るなら、辞書の「モデルに教える」役割は要らなくなる。ただし門の許可証としての
+登録は残る（語の門は用語集に無い固有名詞を通さない）ので、**モデルが直した数と、
+門を通って本文が直る数を別々に数える**。この差が「辞書は許可証として要る」の大きさになる。
 
 ### Phase 2 — 停止後の一括AI校正（原稿執筆モードのみ）
 
@@ -460,9 +470,12 @@ cd server
 | `server/refine_guard.py` | 4つの門、3つのモード、読みの正規化、漢数字を含む数値の抽出 |
 | `server/refine_llm.py` | Ollama互換の呼び出し、モードごとのプロンプト、`stub` モデル |
 | `server/bench_refine.py` | ブロック分割、通し実行、指標の出力、`--out` / `--diff` |
-| `server/test_refine_guard.py` | 門のテスト21件（偽の形態素解析＋本物のSudachi） |
+| `server/refine_score.py` | 辞書を正解とした採点（門の前と後を別々に数える） |
+| `server/test_refine_guard.py` | 門のテスト22件（偽の形態素解析＋本物のSudachi） |
+| `server/test_refine_score.py` | 採点のテスト10件 |
 | `server/test_bench_refine.py` | ベンチの配線のテスト9件 |
 | `server/reconvert.py` | `get_tokenizer()` を追加（Sudachiの二重ロードを避ける） |
+| `docs/PHASE1_MEASURE.md` | 自宅PCで測る手順と、読みかた・判断基準 |
 
 ### これから（Phase 2 以降）
 

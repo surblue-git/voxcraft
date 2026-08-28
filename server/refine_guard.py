@@ -477,6 +477,11 @@ class RefineGuard:
     def _check_terms(self, before, after, glossary, reasons, details) -> None:
         licensed = {_fold(t.surface) for t in self._morph.terms(before)}
         licensed |= {_fold(s) for s in glossary}
+        # 用語集の項目も、同じ分かち書きで許可する。`NTTドコモ・フィナンシャル
+        # グループ` を登録してあるのに、出力の `NTTドコモ` だけが未登録の語として
+        # 落ちる——という取りこぼしを防ぐ（実測で起きた）。
+        for entry in glossary:
+            licensed |= {_fold(t.surface) for t in self._morph.terms(entry)}
         # 読みどおりの訂正は許す（スミシン → 住信）。入力の読みに無い音は作れない。
         source_reading = normalize_reading(self._morph.reading(before))
 

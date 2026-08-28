@@ -180,6 +180,27 @@ def test_term_in_the_glossary_may_be_introduced():
     assert guard.check("スミシンの決算", "住信の決算", INTERVIEW, glossary=["住信"]).ok
 
 
+def test_glossary_entries_are_licensed_as_tokenized():
+    """複合語で登録した用語集が、分かち書きされた語を落とさないこと。
+
+    `NTTドコモ・フィナンシャルグループ` を登録してあるのに、出力の `NTTドコモ`
+    だけが未登録の語として却下される——という取りこぼしが実測で起きた。
+    """
+    guard = _guard(
+        readings={"NTTとこのの決算": "えぬてぃーてぃーとこののけっさん",
+                  "NTTドコモの決算": "えぬてぃーてぃーとこものけっさん",
+                  "NTTドコモ・フィナンシャルグループ": "えぬてぃーてぃーどこもふぃなんしゃるぐるーぷ"},
+        terms={"NTTとこのの決算": [("NTTとこの", "えぬてぃーてぃーとこの")],
+               "NTTドコモの決算": [("NTTドコモ", "えぬてぃーてぃーどこも")],
+               "NTTドコモ・フィナンシャルグループ": [
+                   ("NTTドコモ", "えぬてぃーてぃーどこも"),
+                   ("フィナンシャルグループ", "ふぃなんしゃるぐるーぷ")]},
+    )
+    verdict = guard.check("NTTとこのの決算", "NTTドコモの決算", MANUSCRIPT,
+                          glossary=["NTTドコモ・フィナンシャルグループ"])
+    assert verdict.ok, verdict.details
+
+
 def test_term_matching_the_source_reading_may_be_introduced():
     """用語集に無くても、読みが入力にあれば「聞こえた語の書き直し」として通す。"""
     guard = _guard(

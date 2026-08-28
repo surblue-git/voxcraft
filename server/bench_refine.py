@@ -51,6 +51,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 from refine_guard import GuardStats, RefineGuard, extract_numbers
 from refine_llm import PROFILE_BY_NAME, RefineResult, make_client
+from refine_score import ErrorScore, format_score, load_known_errors, plan_counter
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 # 実運用の補正ブロック（30秒）で入る本文の見当。長すぎるとモデルが要約に倒れ、
@@ -118,6 +119,9 @@ class BenchReport:
     stats: GuardStats = field(default_factory=GuardStats)
     outcomes: list[BlockOutcome] = field(default_factory=list)
     errors: int = 0
+    # 既知の誤り（辞書 = 正解）の採点。門の前と後で別々に数える。
+    score: ErrorScore = field(default_factory=ErrorScore)
+    accepted_score: ErrorScore = field(default_factory=ErrorScore)
 
     def add(self, outcome: BlockOutcome) -> None:
         self.outcomes.append(outcome)
@@ -156,10 +160,17 @@ def _edit_size(before: str, after: str) -> int:
 
 # --- 実行 -----------------------------------------------------------------
 
-def run(blocks, client, profile, guard, glossary, verbose=False) -> BenchReport:
+def run(blocks, client, profile, guard, glossary, verbose=False,
+        known_errors=(), count_key=None, prompt_glossary=None) -> BenchReport:
+    """`prompt_glossary` を省くと `glossary` をそのままモデルへ渡す。
+
+    採点用の用語集（門が語を許可するのに使う）と、モデルへ渡す用語集を
+    分けられるようにしてある。「用語集なしでどこまで直せるか」がこの実験の要点。
+    """
     report = BenchReport(model=client.name, mode=profile.name)
+    given = glossary if prompt_glossary is None else prompt_glossary
     for index, block in enumerate(blocks, start=1):
-        result: RefineResult = client.refine(profile, block, glossary)
+        result: RefineResult = client.refine(profile, block, given)
         if not result.ok:
             outcome = BlockOutcome(block, block, result.seconds, False,
                                    ("llm-error",), (result.error,), result.error)
@@ -173,6 +184,11 @@ def run(blocks, client, profile, guard, glossary, verbose=False) -> BenchReport:
                                verdict.ok, verdict.reasons, verdict.details)
         report.add(outcome)
 
+        if known_errors and count_key is not None:
+            # 門の前＝モデルの実力、門の後＝実際に本文が直る数。
+            report.score.add_block(block, result.text, known_errors, count_key)
+            report.accepted_score.add_block(block, outcome.text, known_errors, count_key)
+
         if verbose:
             mark = "通" if verdict.ok else "却"
             note = "" if verdict.ok else "  " + " / ".join(verdict.details)
@@ -181,7 +197,8 @@ def run(blocks, client, profile, guard, glossary, verbose=False) -> BenchReport:
     return report
 
 
-def print_report(report: BenchReport, total_chars: int) -> None:
+def print_report(report: BenchReport, total_chars: int, scored: bool = False,
+                 glossary_given: bool = True) -> None:
     stats = report.stats
     seconds = report.seconds
     print()
@@ -203,6 +220,11 @@ def print_report(report: BenchReport, total_chars: int) -> None:
         print(f"  所要（中央値）  {statistics.median(seconds):.2f}s / ブロック"
               f"（合計 {sum(seconds):.1f}s）")
 
+    if scored:
+        print("  ── 既知の誤り（辞書 = 正解） ──")
+        print(format_score(report.score, report.accepted_score,
+                           glossary_given=glossary_given))
+
     # 採用基準（取材モードは幻覚0件・読み保存違反0件が条件）。
     if report.mode == "interview":
         fatal = sum(stats.reasons.get(r, 0) for r in
@@ -214,18 +236,25 @@ def print_report(report: BenchReport, total_chars: int) -> None:
                   "却下が多すぎる＝そのモデルでは校正が通らない、という意味。")
 
 
-def load_glossary(set_id: str | None) -> list[str]:
-    """用語集＝辞書の正解表記。これに載っている語だけ、AIは持ち込める。"""
+def load_dictionary(set_id: str | None):
+    """辞書を2つの役割で使う。
+
+    用語集 —— AIが持ち込んでよい正しい表記（門の許可証）。
+    正解   —— 登録済みの (誤り, 正しい表記) は、実際に観測された誤認識なので
+              そのまま採点の正解になる。手元のノートが評価コーパスになる。
+    """
     if not set_id:
-        return []
+        return [], [], None
     try:
         from userdict import get_dictionary_snapshot
 
         snapshot = get_dictionary_snapshot(set_id)
-        return sorted({output for _, output in snapshot.replacements if output})
+        glossary = sorted({output for _, output in snapshot.replacements if output})
+        known = load_known_errors(snapshot.replacements)
+        return glossary, known, snapshot.replacement_plan
     except Exception as exc:  # 辞書が無くても測れる
-        print(f"用語集を読めなかった（続行する）: {exc}", file=sys.stderr)
-        return []
+        print(f"辞書を読めなかった（続行する）: {exc}", file=sys.stderr)
+        return [], [], None
 
 
 def load_session_text(session: str, limit_sec: float | None, set_id: str | None) -> str:
@@ -268,7 +297,10 @@ def main() -> int:
     ap.add_argument("--timeout-sec", type=float, default=120.0)
     ap.add_argument("--block-chars", type=int, default=DEFAULT_BLOCK_CHARS)
     ap.add_argument("--limit-blocks", type=int, default=0, help="先頭N ブロックだけ測る")
-    ap.add_argument("--dictionary-set", default=None, help="用語集に使う辞書セットID")
+    ap.add_argument("--dictionary-set", default=None,
+                    help="辞書セットID。用語集としても、採点の正解としても使う")
+    ap.add_argument("--no-glossary", action="store_true",
+                    help="用語集をモデルに渡さずに測る（辞書から外せる語を見つける）")
     ap.add_argument("--out", type=Path, default=None, help="採用後の本文の書き出し先")
     ap.add_argument("--diff", type=Path, default=None, help="変更箇所の一覧の書き出し先")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -293,29 +325,38 @@ def main() -> int:
         return 2
 
     profile = PROFILE_BY_NAME[args.mode]
-    glossary = load_glossary(args.dictionary_set)
+    glossary, known_errors, plan = load_dictionary(args.dictionary_set)
+    count_key = plan_counter(plan)
     total_chars = sum(len(b) for b in blocks)
     models = args.compare if args.compare else [args.model]
 
+    given = [] if args.no_glossary else glossary
     print(f"入力 {total_chars:,} 字 → {len(blocks)} ブロック"
-          f"（{args.block_chars}字目安）／ モード: {profile.label}"
-          f"／ 用語集: {len(glossary)} 語")
+          f"（{args.block_chars}字目安）／ モード: {profile.label}")
+    print(f"用語集: モデルへ {len(given)} 語"
+          f"{'（渡さない）' if args.no_glossary else ''}"
+          f"／ 門の許可 {len(glossary)} 語／ 採点の正解 {len(known_errors)} 件")
 
     reports = []
     for model in models:
         print(f"\n--- {model} ---")
         client = make_client(model, args.base_url, args.timeout_sec)
-        report = run(blocks, client, profile, guard, glossary, args.verbose)
-        print_report(report, total_chars)
+        report = run(blocks, client, profile, guard, glossary, args.verbose,
+                     known_errors=known_errors, count_key=count_key,
+                     prompt_glossary=given)
+        print_report(report, total_chars, scored=bool(known_errors),
+                     glossary_given=not args.no_glossary)
         reports.append(report)
 
     if len(reports) > 1:
         print("\n■ 比較")
-        print(f"  {'モデル':<22}{'採用率':>8}{'直した量':>10}{'中央値':>9}")
+        print(f"  {'モデル':<22}{'採用率':>8}{'直した量':>10}{'既知の誤り':>12}{'中央値':>9}")
         for report in reports:
             median = statistics.median(report.seconds) if report.seconds else 0.0
+            known = (f"{report.accepted_score.fixed}/{report.score.present}"
+                     if report.score.present else "—")
             print(f"  {report.model:<22}{report.stats.pass_rate * 100:7.1f}%"
-                  f"{report.changed:9,}字{median:8.2f}s")
+                  f"{report.changed:9,}字{known:>12}{median:8.2f}s")
 
     first = reports[0]
     if args.out:
