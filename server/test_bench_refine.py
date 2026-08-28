@@ -3,7 +3,8 @@
 モデルも Sudachi も立てずに、ブロック分割・集計・書き出しが正しいことを見る。
 測りたいのはモデルの性能であって、ベンチ自身のバグではないため。
 """
-from bench_refine import BenchReport, BlockOutcome, _edit_size, _render_diff, run, split_blocks
+from bench_refine import (BenchReport, BlockOutcome, _edit_size, _render_diff, run,
+                          split_blocks, strip_frontmatter)
 from refine_guard import INTERVIEW, MANUSCRIPT, RefineGuard
 from refine_llm import RefineResult, StubClient
 from test_refine_guard import FakeMorphology
@@ -19,6 +20,22 @@ def test_splits_at_sentence_ends_not_mid_word():
     assert all(b.endswith("。") for b in blocks), blocks
     # 落としも重複もしない。
     assert "".join(blocks) == text
+
+
+def test_frontmatter_is_not_sent_to_the_model():
+    """Obsidian のフロントマターは本文ではない。
+
+    実測（2026-08-28）で、YAML をそのまま投げたブロックはモデルが長考して
+    タイムアウトし、1ブロックまるごと無駄になった。
+    """
+    note = "---\nwriting_ex:\n  role: coverage\n1入稿: Impress Watch\n---\n本日の取材メモです。"
+    assert strip_frontmatter(note) == "本日の取材メモです。"
+    assert split_blocks(note) == ["本日の取材メモです。"]
+    # 本文中の --- は区切りではないので残す。
+    body = "前段です。\n\n---\n\n後段です。"
+    assert strip_frontmatter(body) == body
+    # フロントマターが無いノートは素通し。
+    assert strip_frontmatter("ふつうの本文。") == "ふつうの本文。"
 
 
 def test_paragraphs_are_never_merged():

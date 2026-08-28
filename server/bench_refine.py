@@ -63,6 +63,14 @@ DEFAULT_BLOCK_CHARS = 400
 # --- 入力をブロックへ割る --------------------------------------------------
 
 _SENTENCE_END = re.compile(r"(?<=[。！？!?])")
+# Obsidian のフロントマター。校正の対象ではないうえ、YAML を投げると
+# モデルが構造を保とうとして長考し、実測ではタイムアウトして1ブロック無駄にした。
+_FRONTMATTER = re.compile(r"\A\ufeff?---\r?\n.*?\r?\n---[ \t]*\r?\n", re.DOTALL)
+
+
+def strip_frontmatter(text: str) -> str:
+    """先頭の YAML フロントマターを落とす。本文ではないので校正しない。"""
+    return _FRONTMATTER.sub("", text, count=1)
 
 
 def split_blocks(text: str, block_chars: int = DEFAULT_BLOCK_CHARS) -> list[str]:
@@ -72,7 +80,7 @@ def split_blocks(text: str, block_chars: int = DEFAULT_BLOCK_CHARS) -> list[str]
     直せなくなる（実運用の補正ブロックが速報チャンクの終端だけを使うのと同じ理由）。
     """
     blocks: list[str] = []
-    for paragraph in re.split(r"\n{2,}", text):
+    for paragraph in re.split(r"\n{2,}", strip_frontmatter(text)):
         paragraph = paragraph.strip()
         if not paragraph:
             continue
