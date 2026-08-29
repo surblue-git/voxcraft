@@ -134,6 +134,15 @@ class _Reading:
 _reading = _Reading()
 
 
+def get_tokenizer():
+    """読み込み済みの Sudachi トークナイザ（無ければ None）。
+
+    辞書のロードは数百MB効くので、同じプロセスの他のモジュール
+    （`refine_guard`）には作らせず、ここのものを貸す。
+    """
+    return _reading._tokenizer
+
+
 # --- Google CGI API for Japanese Input ------------------------------------
 
 @dataclass
